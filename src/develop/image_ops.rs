@@ -348,13 +348,14 @@ fn bake_samples<S: Sample>(
             let tone = (!masks.is_empty()).then(|| masks.local_tone(global, [u, v], aspect));
             let (cu, cv) = canvas;
             let out = match (img.pixel_format, &tone) {
-                (PixelFormat::Srgb8, None) => dev.linear_at(pre, cu, cv).map(S::encode),
-                (PixelFormat::Srgb8, Some(t)) => dev.linear_at_local(pre, cu, cv, t).map(S::encode),
-                (PixelFormat::LinearF16, None) => {
-                    dev.raw_display_at(pre, cu, cv).map(S::from_display)
+                (PixelFormat::Srgb8 | PixelFormat::TonedF16, None) => {
+                    dev.linear_at(pre, cu, cv).map(S::encode)
                 }
-                (PixelFormat::LinearF16, Some(t)) => dev
-                    .raw_display_at_local(pre, cu, cv, t)
+                (PixelFormat::Srgb8 | PixelFormat::TonedF16, Some(t)) => {
+                    dev.linear_at_local(pre, cu, cv, t).map(S::encode)
+                }
+                (PixelFormat::LinearF16, _) => dev
+                    .display_at(PixelFormat::LinearF16, pre, cu, cv, tone.as_ref())
                     .map(S::from_display),
             };
             out_px[..3].copy_from_slice(&out);
@@ -380,30 +381,48 @@ fn pre_at(src: &Source, touchups: &[TouchUp], x: u32, y: u32) -> [f32; 3] {
     apply_touchups(src, touchups, u, v, px)
 }
 
-/// One `LinearF16` pixel as opaque sRGB8, as `raw_shader.wgsl` would
-/// display it with no edits.
-pub fn linear_f16_px_to_srgb8(px: &[u8; 8]) -> [u8; 4] {
-    let f = |b: &[u8]| half::f16::from_le_bytes([b[0], b[1]]).to_f32();
-    let d = develop::apply_raw_display(
-        &Adjustments::default(),
-        [f(&px[0..]), f(&px[2..]), f(&px[4..])],
-    );
-    let [r, g, b] = d.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
-    [r, g, b, 255]
+/// One pixel in `format`, its `bytes_per_pixel` bytes, as sRGB8 the way the
+/// Loupe shows it with no edits: `Srgb8` as stored, `TonedF16` through the
+/// sRGB encode as shader.wgsl does, and `LinearF16` through the RAW display
+/// curve as raw_shader.wgsl does. Opaque black for a short slice.
+pub fn px_to_srgb8(format: PixelFormat, px: &[u8]) -> [u8; 4] {
+    let half = |i: usize| {
+        px.get(i..i + 2)
+            .and_then(|b| <[u8; 2]>::try_from(b).ok())
+            .map(|b| half::f16::from_le_bytes(b).to_f32())
+    };
+    let rgb = || Some([half(0)?, half(2)?, half(4)?]);
+    let out = match format {
+        PixelFormat::Srgb8 => px.get(..4).and_then(|p| <[u8; 4]>::try_from(p).ok()),
+        PixelFormat::TonedF16 => rgb().map(|c| {
+            let [r, g, b] = c.map(linear_to_srgb8);
+            [r, g, b, 255]
+        }),
+        PixelFormat::LinearF16 => rgb().map(|c| {
+            let [r, g, b] = develop::apply_raw_display(&Adjustments::default(), c)
+                .map(<u8 as Sample>::from_display);
+            [r, g, b, 255]
+        }),
+    };
+    out.unwrap_or([0, 0, 0, 255])
 }
 
-/// A `LinearF16` image as opaque sRGB8 RGBA, with no edits, as
-/// `raw_shader.wgsl` would display it. Empty for a short buffer.
-pub fn linear_f16_to_srgb8(img: &DecodedImage) -> Vec<u8> {
+/// `img` as sRGB8 RGBA, each pixel as [`px_to_srgb8`] gives it: borrowed for
+/// `Srgb8`, converted for the half floats. Empty for a short buffer.
+pub fn to_srgb8(img: &DecodedImage) -> std::borrow::Cow<'_, [u8]> {
+    let bpp = img.pixel_format.bytes_per_pixel();
     let n = img.width as usize * img.height as usize;
-    if img.rgba.len() < n * 8 {
-        return Vec::new();
+    let Some(pixels) = n.checked_mul(bpp).and_then(|len| img.rgba.get(..len)) else {
+        return std::borrow::Cow::Owned(Vec::new());
+    };
+    if img.pixel_format == PixelFormat::Srgb8 {
+        return std::borrow::Cow::Borrowed(pixels);
     }
     let mut out = Vec::with_capacity(n * 4);
-    for px in img.rgba.as_chunks::<8>().0.iter().take(n) {
-        out.extend(linear_f16_px_to_srgb8(px));
+    for px in pixels.chunks_exact(bpp) {
+        out.extend(px_to_srgb8(img.pixel_format, px));
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 /// Shrink opaque sRGB8 RGBA so its long side is at most `max_px`, averaging
@@ -488,15 +507,15 @@ pub fn downsample_linear(img: &DecodedImage, target: usize) -> (Vec<[f32; 3]>, u
     (grid, dw, dh)
 }
 
-/// Nearest-pixel sample at UV coordinates, as linear RGB. Handles both pixel
-/// formats; the browser RAW path decodes to linear RGBA16F.
+/// Nearest-pixel sample at UV coordinates, as linear RGB, in any pixel
+/// format.
 pub fn sample_linear(img: &DecodedImage, u: f32, v: f32) -> [f32; 3] {
     let x = (u.clamp(0.0, 1.0) * (img.width.saturating_sub(1)) as f32).round() as u32;
     let y = (v.clamp(0.0, 1.0) * (img.height.saturating_sub(1)) as f32).round() as u32;
     pixel_linear(img, x, y)
 }
 
-/// Pixel `(x, y)` as linear RGB, in either pixel format. The caller keeps
+/// Pixel `(x, y)` as linear RGB, in any pixel format. The caller keeps
 /// `x` and `y` inside the image.
 pub(crate) fn pixel_linear(img: &DecodedImage, x: u32, y: u32) -> [f32; 3] {
     let i = (y as usize * img.width as usize + x as usize) * 4;
@@ -507,7 +526,7 @@ pub(crate) fn pixel_linear(img: &DecodedImage, x: u32, y: u32) -> [f32; 3] {
             img.rgba[i + 2],
             img.rgba[i + 3],
         ]),
-        PixelFormat::LinearF16 => [
+        PixelFormat::LinearF16 | PixelFormat::TonedF16 => [
             half::f16::from_le_bytes([img.rgba[i * 2], img.rgba[i * 2 + 1]]).to_f32(),
             half::f16::from_le_bytes([img.rgba[i * 2 + 2], img.rgba[i * 2 + 3]]).to_f32(),
             half::f16::from_le_bytes([img.rgba[i * 2 + 4], img.rgba[i * 2 + 5]]).to_f32(),
@@ -863,6 +882,31 @@ mod tests {
         let (_, _, deep) =
             bake_edited_as::<u16>(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
         assert_eq!(deep[0], (d[0] * 65535.0).round() as u16);
+    }
+
+    /// A `TonedF16` pixel already carries Apple's curve, so it shows as a
+    /// plain sRGB encode; a `LinearF16` one gets the RAW display curve. An
+    /// image converts pixel for pixel, and `Srgb8` comes back as stored.
+    #[test]
+    fn half_floats_convert_to_srgb8_by_what_they_mean() {
+        let lin = half::f16::from_f32(0.18).to_f32();
+        let toned = to_srgb8(&f16_gray(0.18, PixelFormat::TonedF16)).into_owned();
+        let s = linear_to_srgb8(lin);
+        assert_eq!(toned, [s, s, s, 255].repeat(4));
+        let raw = to_srgb8(&f16_gray(0.18, PixelFormat::LinearF16)).into_owned();
+        let d = develop::apply_raw_display(&Adjustments::default(), [lin; 3]);
+        let r = (d[0] * 255.0).round() as u8;
+        assert_ne!(r, s);
+        assert_eq!(raw, [r, r, r, 255].repeat(4));
+        let stored = [1, 2, 3, 4].repeat(4);
+        let img = DecodedImage::new_tracked(DecodedImageFields {
+            width: 2,
+            height: 2,
+            rgba: stored.clone(),
+            pixel_format: PixelFormat::Srgb8,
+        });
+        assert_eq!(to_srgb8(&img).into_owned(), stored);
+        assert_eq!(px_to_srgb8(PixelFormat::TonedF16, &[0; 5]), [0, 0, 0, 255]);
     }
 
     fn f16_gray(v: f32, format: PixelFormat) -> DecodedImage {

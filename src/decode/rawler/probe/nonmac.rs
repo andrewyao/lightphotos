@@ -187,11 +187,12 @@ fn run_compare_png(args: &[String]) -> Result<(), String> {
 }
 
 /// Writes a `DecodedImage` as PNG, applying the same gamma and display boost
-/// as the loupe shader for `LinearF16` so both pixel formats look right.
+/// as the loupe shader for `LinearF16` so every pixel format looks right.
 fn save_decoded_png(img: &image_decode::DecodedImage, out: &str) -> Result<(), String> {
     let saved = match img.pixel_format {
-        image_decode::PixelFormat::Srgb8 => {
-            let buf = image::RgbaImage::from_raw(img.width, img.height, img.rgba.clone())
+        image_decode::PixelFormat::Srgb8 | image_decode::PixelFormat::TonedF16 => {
+            let rgba = lightphotos::develop::image_ops::to_srgb8(img).into_owned();
+            let buf = image::RgbaImage::from_raw(img.width, img.height, rgba)
                 .ok_or("rgba buffer size mismatch")?;
             buf.save(out)
         }

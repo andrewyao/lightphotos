@@ -179,22 +179,9 @@ impl App {
                     fine.map(|f| f.at_uv(su, sv).mid),
                 );
                 let tone = (!masks.is_empty()).then(|| masks.local_tone(global, [su, sv], aspect));
-                let out = match (self.hist.pixel_format, &tone) {
-                    (image_decode::PixelFormat::Srgb8, None) => dev.linear_at(px, u, v),
-                    (image_decode::PixelFormat::Srgb8, Some(t)) => dev.linear_at_local(px, u, v, t),
-                    (image_decode::PixelFormat::LinearF16, None) => dev.raw_display_at(px, u, v),
-                    (image_decode::PixelFormat::LinearF16, Some(t)) => {
-                        dev.raw_display_at_local(px, u, v, t)
-                    }
-                };
+                let out = dev.display_at(self.hist.pixel_format, px, u, v, tone.as_ref());
                 for ch in 0..3 {
-                    // `apply_raw_display` already returns display space. The
-                    // sRGB path returns linear, so encode it as the Loupe does.
-                    let v = match self.hist.pixel_format {
-                        image_decode::PixelFormat::Srgb8 => develop::srgb_encode(out[ch]),
-                        image_decode::PixelFormat::LinearF16 => out[ch],
-                    }
-                    .clamp(0.0, 1.0);
+                    let v = out[ch].clamp(0.0, 1.0);
                     // Split each sample between its two nearest buckets. Rounding
                     // to one bucket leaves a comb of gaps after a tone stretch.
                     let pos = v * 255.0;

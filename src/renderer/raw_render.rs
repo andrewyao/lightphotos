@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Render pipelines for linear-light RAW images (`PixelFormat::LinearF16`).
-//! Only the wasm32 Loupe RAW path produces those; every other path bakes the
-//! tonemap on the CPU in `apply_raw_preview_boost`. `Renderer::new` builds
-//! these once at startup.
+//! Render pipelines for half-float images. `raw_pipeline` draws a
+//! scene-linear RAW (`PixelFormat::LinearF16`): the browser's RAW decode and
+//! macOS's with the Apple tone curve off. `Renderer::new` builds these once
+//! at startup.
 
-/// Texture format for a `PixelFormat::LinearF16` photo. It holds linear light
-/// with no hardware sRGB decode. `Rgba16Float` is filterable and renderable in
+/// Texture format for a half-float photo, `LinearF16` or `TonedF16`. It
+/// holds linear light with no hardware sRGB decode. `Rgba16Float` is filterable and renderable in
 /// core WebGPU, while `Rgba32Float` needs extra features and twice the memory.
 pub(crate) const LINEAR_IMAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 

@@ -27,6 +27,7 @@
 #![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
 
 use lightphotos::decode::{image_decode, image_encode};
+use lightphotos::develop::image_ops;
 use lightphotos::scoring::segmentation;
 
 #[cfg(target_os = "macos")]
@@ -165,7 +166,7 @@ fn probe(path: &Path) -> Result<(), String> {
         &overlay_out,
         img.width,
         img.height,
-        &tint_foreground(&img.rgba, &scaled.alpha),
+        &tint_foreground(&image_ops::to_srgb8(&img), &scaled.alpha),
         image_encode::JpegQuality::Export,
     )?;
     println!("  wrote {}", overlay_out.display());

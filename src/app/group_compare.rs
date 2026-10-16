@@ -13,7 +13,7 @@ use web_time::Instant;
 
 use super::{App, PendingConfirm, ViewMode};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
+use crate::decode::image_decode::{DecodedImage, DecodedImageFields};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::jobs::loader::Loader;
 use crate::navigation::FlagFilter;
@@ -181,10 +181,7 @@ const FULL_IN_FLIGHT: usize = 2;
 /// The pixels of `img` inside `(x, y, w, h)`.
 #[cfg(not(target_arch = "wasm32"))]
 fn crop_image(img: &DecodedImage, (x, y, w, h): (u32, u32, u32, u32)) -> DecodedImage {
-    let bpp = match img.pixel_format {
-        PixelFormat::Srgb8 => 4,
-        PixelFormat::LinearF16 => 8,
-    };
+    let bpp = img.pixel_format.bytes_per_pixel();
     let stride = img.width as usize * bpp;
     let row = w as usize * bpp;
     let mut rgba = Vec::with_capacity(row * h as usize);

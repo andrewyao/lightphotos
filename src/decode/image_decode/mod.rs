@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Decode images to RGBA8 and read their metadata. macOS uses ImageIO for
-//! every format and CoreImage's `CIRAWFilter` (`raw_filter.rs`) for full RAW
-//! decodes. Other targets use the `image` crate and
+//! Decode images to RGBA8, or RAWs to half floats, and read their metadata.
+//! macOS uses ImageIO for every format and CoreImage's `CIRAWFilter`
+//! (`raw_filter.rs`) for the Loupe's RAW decodes. Other targets use the `image` crate and
 //! `kamadak-exif` in `nonmac_decode.rs`, and `decode::rawler` for RAW.
 
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
 use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use std::time::SystemTime;
@@ -72,28 +74,34 @@ pub use nonmac_decode::*;
 #[cfg(target_os = "macos")]
 mod raw_filter;
 
-/// How `DecodedImage::rgba` is laid out. Every decoder produces `Srgb8`
-/// except `raw_preview::decode_raw_quality_from_bytes` (the wasm32 Loupe RAW
-/// decode). It returns linear light, and `raw_shader.wgsl` applies gamma and
-/// the display boost on the GPU.
+/// How `DecodedImage::rgba` is laid out, and what its values mean. Most
+/// decoders produce `Srgb8`. RAWs decode to half floats: on macOS
+/// `raw_filter` gives `TonedF16` with Apple's tone curve or `LinearF16`
+/// without it, and the browser's RAW decode gives `LinearF16`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum PixelFormat {
     /// sRGB-encoded RGBA8, 4 bytes per pixel.
     #[default]
     Srgb8,
-    /// Linear-light RGBA as `half::f16`, 8 bytes per pixel. Alpha is always 1.
-    #[cfg_attr(
-        target_os = "macos",
-        allow(dead_code, reason = "only the non-mac RAW decoders construct it")
-    )]
+    /// Scene-linear RGBA as `half::f16`, 8 bytes per pixel, alpha always
+    /// one. It still needs a base curve, which `raw_shader.wgsl` and
+    /// `develop::apply_raw_display` apply.
     LinearF16,
+    /// Display-referred linear RGBA as `half::f16`, 8 bytes per pixel, alpha
+    /// always one. Apple's tone curve is already applied, so it displays as
+    /// `Srgb8` does, only with more depth.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only macOS's CIRAWFilter decode builds it")
+    )]
+    TonedF16,
 }
 
 impl PixelFormat {
     pub fn bytes_per_pixel(self) -> usize {
         match self {
             PixelFormat::Srgb8 => 4,
-            PixelFormat::LinearF16 => 8,
+            PixelFormat::LinearF16 | PixelFormat::TonedF16 => 8,
         }
     }
 }
@@ -324,13 +332,31 @@ pub fn open_image_source(path: &Path) -> Result<CFRetained<CGImageSource>, Strin
         .ok_or_else(|| "ImageIO could not open file".into())
 }
 
+/// Whether macOS RAW decodes apply Apple's tone curve. The app owns the
+/// setting and stores it here, since the lib can't read the app's prefs.
+#[cfg(target_os = "macos")]
+static APPLE_TONE_CURVE: AtomicBool = AtomicBool::new(true);
+
+/// Turn Apple's tone curve on or off for RAW decodes from now on. Off, a RAW
+/// decodes to `LinearF16`, which the browser build's base curve shows.
+#[cfg(target_os = "macos")]
+pub fn set_apple_tone_curve(on: bool) {
+    APPLE_TONE_CURVE.store(on, Ordering::SeqCst);
+}
+
+/// The setting [`set_apple_tone_curve`] last stored; on by default.
+#[cfg(target_os = "macos")]
+pub fn apple_tone_curve() -> bool {
+    APPLE_TONE_CURVE.load(Ordering::SeqCst)
+}
+
 /// Decode `path` upright, downscaled so neither side exceeds `max_dim`
 /// (the GPU's max texture size, or `u32::MAX` for full resolution).
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
 pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     if is_raw_extension(path) {
-        match raw_filter::decode(path, max_dim) {
+        match raw_filter::decode(path, max_dim, apple_tone_curve()) {
             Ok(img) => return Ok(img),
             Err(e) => eprintln!("[decode] {}: {e}; using ImageIO", path.display()),
         }
@@ -828,8 +854,8 @@ pub fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> DecodedImag
     if orientation <= 1 {
         return img;
     }
-    // The loop assumes 4 bytes per pixel. The only `LinearF16` producer
-    // orients its own output and never calls this.
+    // The loop assumes 4 bytes per pixel. The half-float decoders orient
+    // their own output and never call this.
     debug_assert_eq!(img.pixel_format, PixelFormat::Srgb8);
     let (w, h) = (img.width, img.height);
     let swaps = matches!(orientation, 5..=8);

@@ -4,7 +4,8 @@
 //! image is uploaded once as a texture with a GPU-built mip chain. Zoom and pan
 //! only update a small transform uniform. Every platform's decoder reaches
 //! `set_image` through `App::upload_shown`. `shader.wgsl` draws every image
-//! except `PixelFormat::LinearF16`, which uses `raw_shader.wgsl`.
+//! except a scene-linear RAW (`PixelFormat::LinearF16`), which uses
+//! `raw_shader.wgsl`. Half-float images upload as `Rgba16Float`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1184,7 +1185,7 @@ impl Renderer {
             &wgpu::RenderPipeline,
         ) = match img.pixel_format {
             PixelFormat::Srgb8 => (IMAGE_FORMAT, 4, &self.mip_pipeline),
-            PixelFormat::LinearF16 => (
+            PixelFormat::LinearF16 | PixelFormat::TonedF16 => (
                 raw_render::LINEAR_IMAGE_FORMAT,
                 8,
                 &self.mip_pipeline_linear,
@@ -1484,21 +1485,16 @@ impl Renderer {
         }
     }
 
-    /// Upload an Srgb8 image as an egui user texture. `mipped` builds
-    /// the mip chain through `mipgen.wgsl` and registers a sampler that reads
-    /// it; otherwise level 0 only with the plain linear sampler. A
-    /// `LinearF16` RAW, the decode off macOS, is encoded to sRGB8 first.
+    /// Upload an image as an egui user texture. `mipped` builds the mip
+    /// chain through `mipgen.wgsl` and registers a sampler that reads it;
+    /// otherwise level 0 only with the plain linear sampler. A half-float
+    /// RAW is encoded to sRGB8 first.
     pub fn upload_egui_image(
         &mut self,
         img: &DecodedImage,
         mipped: bool,
     ) -> Option<egui::TextureId> {
-        let rgba: std::borrow::Cow<[u8]> = match img.pixel_format {
-            PixelFormat::Srgb8 => std::borrow::Cow::Borrowed(&img.rgba),
-            PixelFormat::LinearF16 => {
-                std::borrow::Cow::Owned(crate::develop::image_ops::linear_f16_to_srgb8(img))
-            }
-        };
+        let rgba = crate::develop::image_ops::to_srgb8(img);
         let (w, h) = (img.width, img.height);
         if rgba.len() < (4 * w * h) as usize {
             return None;
@@ -1891,7 +1887,7 @@ impl Renderer {
                 // Both pipelines share `pipeline_layout`, so the bind groups
                 // below are the same for either.
                 let pipeline = match self.image_pixel_format {
-                    PixelFormat::Srgb8 => &self.pipeline,
+                    PixelFormat::Srgb8 | PixelFormat::TonedF16 => &self.pipeline,
                     PixelFormat::LinearF16 => &self.raw_pipeline,
                 };
                 let xform_bind = &self.xform_bind;

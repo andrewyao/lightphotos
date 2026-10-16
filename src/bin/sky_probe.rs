@@ -26,8 +26,9 @@
 //! cargo run --release --bin sky_probe -- --out /tmp/sky ~/Pictures/beach.jpg
 //! ```
 
-use lightphotos::decode::image_decode::{self, PixelFormat};
+use lightphotos::decode::image_decode;
 use lightphotos::decode::image_encode;
+use lightphotos::develop::image_ops;
 use lightphotos::scoring::sky;
 
 use std::path::{Path, PathBuf};
@@ -77,9 +78,7 @@ fn main() -> ExitCode {
 
 fn probe(path: &Path, out_dir: &Path, use_subject: bool) -> Result<(), String> {
     let img = image_decode::decode(path, ANALYSIS_MAX_DIM)?;
-    if img.pixel_format != PixelFormat::Srgb8 {
-        return Err("decoded to linear half floats; the probe reads sRGB8 only".into());
-    }
+    let rgba = image_ops::to_srgb8(&img);
     let (w, h) = (img.width, img.height);
     let subject = use_subject.then(|| subject_mask(path, w, h)).flatten();
 
@@ -87,7 +86,7 @@ fn probe(path: &Path, out_dir: &Path, use_subject: bool) -> Result<(), String> {
     let mut coverage = Vec::new();
     for _ in 0..5 {
         let start = Instant::now();
-        coverage = sky::sky_coverage(&img.rgba, w, h, subject.as_deref());
+        coverage = sky::sky_coverage(&rgba, w, h, subject.as_deref());
         best = best.min(start.elapsed());
     }
     let mean = coverage.iter().map(|&c| c as f64).sum::<f64>() / coverage.len().max(1) as f64;
@@ -108,7 +107,7 @@ fn probe(path: &Path, out_dir: &Path, use_subject: bool) -> Result<(), String> {
     println!("  wrote {}", cov_out.display());
 
     let overlay_out = out_dir.join(format!("{stem}.sky-overlay.jpg"));
-    let overlay = tint(&img.rgba, &coverage);
+    let overlay = tint(&rgba, &coverage);
     image_encode::encode_jpeg(
         &overlay_out,
         w,

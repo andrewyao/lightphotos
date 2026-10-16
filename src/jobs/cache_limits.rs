@@ -13,12 +13,13 @@ pub struct CacheLimits {
     /// 512px thumbnails, about 700 KB each. A floor: the loader raises it to
     /// the grid's working set so a large grid never evicts itself.
     pub thumbs: usize,
-    /// Loupe previews, about 5 MB each: the current photo plus a few
-    /// neighbors either way.
+    /// Loupe previews, about 5 MB each (twice that for a macOS RAW, which
+    /// decodes to half floats): the current photo plus a few neighbors
+    /// either way.
     pub previews: usize,
     /// Full-resolution decodes, a whole RGBA8 frame each (about 180 MB at
-    /// 45 MP). They only happen on zoom, so extra entries do not help
-    /// navigation.
+    /// 45 MP), or 8 bytes a pixel for a macOS RAW (360 MB). They only happen
+    /// on zoom, so extra entries do not help navigation.
     pub fulls: usize,
     /// Most decode threads the loader starts, below its default of every
     /// core but two. On wasm32 every thread's decode scratch comes out of one

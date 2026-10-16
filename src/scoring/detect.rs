@@ -10,6 +10,7 @@ use std::fmt;
 use std::path::Path;
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
+use crate::develop::image_ops::{px_to_srgb8, to_srgb8};
 use crate::develop::{Coverage, DetectTarget};
 
 /// The longest side of [`DetectInput::preview`]. The sky heuristic's budget
@@ -97,7 +98,7 @@ impl From<DecodedImage> for Rgba8 {
     fn from(img: DecodedImage) -> Self {
         let pixels = match img.pixel_format {
             PixelFormat::Srgb8 => img.rgba,
-            PixelFormat::LinearF16 => crate::develop::image_ops::linear_f16_to_srgb8(&img),
+            PixelFormat::LinearF16 | PixelFormat::TonedF16 => to_srgb8(&img).into_owned(),
         };
         Rgba8 {
             width: img.width,
@@ -116,10 +117,7 @@ impl Rgba8 {
     /// it in the browser.
     pub fn fit_from(img: &DecodedImage, max_side: u32) -> Rgba8 {
         let (w, h) = (img.width, img.height);
-        let bpp = match img.pixel_format {
-            PixelFormat::Srgb8 => 4,
-            PixelFormat::LinearF16 => 8,
-        };
+        let bpp = img.pixel_format.bytes_per_pixel();
         if w == 0 || h == 0 || img.rgba.len() < w as usize * h as usize * bpp {
             return Rgba8 {
                 width: 0,
@@ -128,14 +126,10 @@ impl Rgba8 {
             };
         }
         if w.max(h) <= max_side || max_side == 0 {
-            let pixels = match img.pixel_format {
-                PixelFormat::Srgb8 => img.rgba.clone(),
-                PixelFormat::LinearF16 => crate::develop::image_ops::linear_f16_to_srgb8(img),
-            };
             return Rgba8 {
                 width: w,
                 height: h,
-                pixels,
+                pixels: to_srgb8(img).into_owned(),
             };
         }
         let scale = w.max(h) as f64 / max_side as f64;
@@ -147,20 +141,8 @@ impl Rgba8 {
             for x in 0..nw {
                 let sx = (((x as f64 + 0.5) * scale) as u32).min(w - 1) as usize;
                 let i = (sy * w as usize + sx) * bpp;
-                match img.pixel_format {
-                    PixelFormat::Srgb8 => {
-                        pixels.extend_from_slice(img.rgba.get(i..i + 4).unwrap_or(&[0; 4]));
-                    }
-                    PixelFormat::LinearF16 => {
-                        let px = img
-                            .rgba
-                            .get(i..i + 8)
-                            .and_then(|s| <&[u8; 8]>::try_from(s).ok())
-                            .copied()
-                            .unwrap_or([0; 8]);
-                        pixels.extend(crate::develop::image_ops::linear_f16_px_to_srgb8(&px));
-                    }
-                }
+                let px = img.rgba.get(i..i + bpp).unwrap_or_default();
+                pixels.extend(px_to_srgb8(img.pixel_format, px));
             }
         }
         Rgba8 {
@@ -345,8 +327,8 @@ mod tests {
     }
 
     /// A frame within the limit comes back byte for byte; a larger one is
-    /// sampled at the target pixels' centres, in either format, converting
-    /// a LinearF16 pixel exactly as the whole-frame conversion does.
+    /// sampled at the target pixels' centres, in any format, converting a
+    /// half-float pixel exactly as the whole-frame conversion does.
     #[test]
     fn fit_from_keeps_a_small_frame_and_centre_samples_a_large_one() {
         let small = frame(6, 4, PixelFormat::Srgb8, |x, y| {
@@ -373,23 +355,29 @@ mod tests {
         }
 
         let f16 = |v: f32| half::f16::from_f32(v).to_le_bytes();
-        let deep = frame(8, 4, PixelFormat::LinearF16, |x, y| {
-            [
-                f16(x as f32 / 8.0),
-                f16(y as f32 / 4.0),
-                f16(0.25),
-                f16(1.0),
-            ]
-            .concat()
-        });
-        let out = Rgba8::fit_from(&deep, 4);
-        let whole = crate::develop::image_ops::linear_f16_to_srgb8(&deep);
-        assert_eq!((out.width, out.height), (4, 2));
-        for y in 0..2u32 {
-            for x in 0..4u32 {
-                let i = ((y * 4 + x) * 4) as usize;
-                let j = (((2 * y + 1) * 8 + 2 * x + 1) * 4) as usize;
-                assert_eq!(&out.pixels[i..i + 4], &whole[j..j + 4], "({x}, {y})");
+        for format in [PixelFormat::LinearF16, PixelFormat::TonedF16] {
+            let deep = frame(8, 4, format, |x, y| {
+                [
+                    f16(x as f32 / 8.0),
+                    f16(y as f32 / 4.0),
+                    f16(0.25),
+                    f16(1.0),
+                ]
+                .concat()
+            });
+            let out = Rgba8::fit_from(&deep, 4);
+            let whole = to_srgb8(&deep);
+            assert_eq!((out.width, out.height), (4, 2));
+            for y in 0..2u32 {
+                for x in 0..4u32 {
+                    let i = ((y * 4 + x) * 4) as usize;
+                    let j = (((2 * y + 1) * 8 + 2 * x + 1) * 4) as usize;
+                    assert_eq!(
+                        &out.pixels[i..i + 4],
+                        &whole[j..j + 4],
+                        "{format:?} ({x}, {y})"
+                    );
+                }
             }
         }
         assert_eq!(out.pixels.len(), 4 * 2 * 4);

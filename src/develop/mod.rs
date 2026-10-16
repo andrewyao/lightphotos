@@ -31,6 +31,7 @@ pub use mask::{
 };
 pub use sharpen::{Sharpen, Sharpening};
 
+use crate::decode::image_decode::PixelFormat;
 use curve::ToneCurve;
 
 /// Range of every tone slider except exposure and denoise. 0 is no change.
@@ -1326,23 +1327,25 @@ impl<'a> Develop<'a> {
         apply_linear_impl(self, rgb, at, false, Some(local))
     }
 
-    /// [`Develop::raw_display`] for the pixel at canvas UV `(u, v)`.
-    pub fn raw_display_at(&self, rgb: [f32; 3], u: f32, v: f32) -> [f32; 3] {
-        let at = self.frame.as_ref().map(|f| (f, u, v));
-        apply_linear_impl(self, rgb, at, true, None)
-    }
-
-    /// [`Develop::raw_display_at`] with `local` in place of the photo's own
-    /// values for the sliders a mask moves.
-    pub fn raw_display_at_local(
+    /// The pixel at canvas UV `(u, v)` as the Loupe puts it on screen for a
+    /// photo decoded as `format`, sRGB-encoded 0..1: through `shader.wgsl`'s
+    /// math for `Srgb8` and `TonedF16`, `raw_shader.wgsl`'s for `LinearF16`.
+    /// `local` stands in for the photo's own values under a mask.
+    pub fn display_at(
         &self,
+        format: PixelFormat,
         rgb: [f32; 3],
         u: f32,
         v: f32,
-        local: &LocalAmounts,
+        local: Option<&LocalAmounts>,
     ) -> [f32; 3] {
         let at = self.frame.as_ref().map(|f| (f, u, v));
-        apply_linear_impl(self, rgb, at, true, Some(local))
+        match format {
+            PixelFormat::Srgb8 | PixelFormat::TonedF16 => {
+                apply_linear_impl(self, rgb, at, false, local).map(srgb_encode)
+            }
+            PixelFormat::LinearF16 => apply_linear_impl(self, rgb, at, true, local),
+        }
     }
 }
 
@@ -1652,6 +1655,36 @@ mod tests {
                 "linear {linear}: got {got}, want {want}"
             );
         }
+    }
+
+    /// A `TonedF16` photo already carries Apple's curve, so it displays
+    /// exactly as `Srgb8` does from the same linear values; only a
+    /// scene-linear `LinearF16` one gets the RAW look curve.
+    #[test]
+    fn display_at_curves_only_a_scene_linear_photo() {
+        let adj = Adjustments {
+            exposure: 0.3,
+            ..Default::default()
+        };
+        let dev = Develop::new(&adj);
+        for linear in [0.0, 0.01, 0.18, 0.5, 1.0] {
+            let px = [linear, linear * 0.8, linear * 0.5];
+            let srgb = dev.display_at(PixelFormat::Srgb8, px, 0.5, 0.5, None);
+            assert_eq!(
+                dev.display_at(PixelFormat::TonedF16, px, 0.5, 0.5, None),
+                srgb
+            );
+            assert_eq!(srgb, dev.linear(px).map(srgb_encode));
+            assert_eq!(
+                dev.display_at(PixelFormat::LinearF16, px, 0.5, 0.5, None),
+                dev.raw_display(px)
+            );
+        }
+        let mid = [0.18; 3];
+        assert_ne!(
+            dev.display_at(PixelFormat::LinearF16, mid, 0.5, 0.5, None),
+            dev.display_at(PixelFormat::TonedF16, mid, 0.5, 0.5, None)
+        );
     }
 
     fn crop(l: f32, t: f32, r: f32, b: f32) -> Crop {

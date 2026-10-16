@@ -86,10 +86,8 @@ fn luma(px: [f32; 3]) -> f32 {
 /// Linear-light pixel to display colour under `adj`. Matches what
 /// `recompute_histogram` plots in the Develop panel.
 fn display(adj: &Adjustments, format: PixelFormat, px: [f32; 3]) -> [f32; 3] {
-    match format {
-        PixelFormat::Srgb8 => develop::apply_linear(adj, px).map(develop::srgb_encode),
-        PixelFormat::LinearF16 => develop::apply_raw_display(adj, px),
-    }
+    // Unframed, so Vignette and Grain stay out and the position is unused.
+    develop::Develop::new(adj).display_at(format, px, 0.5, 0.5, None)
 }
 
 fn respond(adj: &Adjustments, format: PixelFormat, linear: [f32; 3]) -> f32 {
@@ -853,6 +851,27 @@ mod tests {
         for p in [0.01, 0.25, 0.50, 0.75, 0.99] {
             assert!((hist.percentile(p, &adj) - percentile_under(&photo, &adj, p)).abs() < 1e-4);
         }
+    }
+
+    /// A `TonedF16` RAW already carries Apple's curve, so Auto Tone reads it
+    /// as it reads an `Srgb8` photo of the same linear values.
+    #[test]
+    fn a_toned_half_float_photo_analyzes_as_srgb8_does() {
+        let photo: Vec<[f32; 3]> = (0..400)
+            .map(|i| {
+                let v = 0.02 + 0.5 * (i as f32 / 400.0).powi(2);
+                [v, v * 0.9, v * 0.7]
+            })
+            .collect();
+        let srgb = analyze(&photo, PixelFormat::Srgb8, Centering::Range);
+        assert_eq!(
+            analyze(&photo, PixelFormat::TonedF16, Centering::Range),
+            srgb
+        );
+        assert_ne!(
+            analyze(&photo, PixelFormat::LinearF16, Centering::Range),
+            srgb
+        );
     }
 
     #[test]
