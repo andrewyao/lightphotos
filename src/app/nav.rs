@@ -1906,6 +1906,59 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A thumbnail that arrives with a new shape resizes its cell, and one
+    /// that resizes a cell left of the screen doesn't move the cells on it.
+    #[test]
+    fn a_thumbnail_arriving_resizes_its_filmstrip_cell_without_moving_the_rest() {
+        use crate::app::test_support::{folder_of, frame, settled};
+        // Zero-padded, so position `i` in name order is `paths[i]`.
+        let names: Vec<String> = (0..60).map(|i| format!("{i:02}.jpg")).collect();
+        let (dir, paths) = folder_of("nav-strip-arrive", &names);
+        let mut app = App::new(None);
+        app.playlist = Some(Playlist::from_dir(&dir));
+        app.recompute_visible();
+        app.select_single(30);
+        app.enter_loupe();
+        for _ in 0..30 {
+            let _ = frame(&mut app, Vec::new());
+        }
+        let (first, _) = app.strip_range();
+        assert!(first > 1, "the strip has scrolled to the selection");
+        let sel_before = app.cell_rect(30).unwrap();
+        let next_before = app.cell_rect(31).unwrap();
+
+        app.remember_thumb_shape(&paths[first - 1], 600, 900);
+        app.remember_thumb_shape(&paths[31], 600, 900);
+        let _ = settled(&mut app);
+
+        let next = app.cell_rect(31).unwrap();
+        assert!(
+            next.width() < next_before.width() * 0.5,
+            "{next:?} took its portrait shape, was {next_before:?}"
+        );
+        let sel = app.cell_rect(30).unwrap();
+        // egui snaps the scrolled content to whole pixels.
+        assert!(
+            (sel.left() - sel_before.left()).abs() < 1.0,
+            "the selected cell stayed put: {sel:?}, was {sel_before:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One photo's thumbnails at two sizes round to slightly different
+    /// shapes, which must not rebuild the filmstrip.
+    #[test]
+    fn a_thumbnail_rounding_to_a_nearby_shape_keeps_the_strip_layout() {
+        let (mut app, dir, paths) = folder_app("nav-strip-rounding", 1);
+        app.remember_thumb_shape(&paths[0], 256, 171);
+        app.strip_aspects_changed = false;
+        app.remember_thumb_shape(&paths[0], 1024, 683);
+        assert!(!app.strip_aspects_changed);
+        app.remember_thumb_shape(&paths[0], 683, 1024);
+        assert!(app.strip_aspects_changed, "a rotation is a new shape");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Cmd-click and Shift-click in the filmstrip build a multi-selection, the
     /// Loupe shows the photo clicked last, and the strip outlines every
     /// selected cell.

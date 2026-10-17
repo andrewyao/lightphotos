@@ -25,7 +25,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
             .show_inside(ui, |ui| {
                 // Every cell is this tall and as wide as its photo's shape.
                 let cell_h = strip_h - 16.0;
-                let layout =
+                let (layout, shift) =
                     app.strip_layout(cell_h, STRIP_CELL_STYLE.corner, ui.spacing().item_spacing.x);
 
                 // egui's horizontal ScrollArea ignores a vertical mouse wheel,
@@ -40,13 +40,28 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
                 // egui has no `show_columns`, so build only the cells in view by
                 // hand and report the range so thumbnail loading follows scrolling.
                 let mut area = egui::ScrollArea::horizontal().auto_shrink([false, false]);
+                let scroll_x_id = egui::Id::new("filmstrip_scroll_x");
+                let target_id = egui::Id::new("filmstrip_scroll_target");
+                // A thumbnail that loads with a new shape resizes its cell. Scroll
+                // with it so the cells on screen don't jump.
+                if shift != 0.0 {
+                    ui.ctx().data_mut(|d| {
+                        if let Some(target) = d.get_temp::<f32>(target_id) {
+                            d.insert_temp(target_id, target + shift);
+                        }
+                    });
+                    let x = ui
+                        .ctx()
+                        .data(|d| d.get_temp::<f32>(scroll_x_id))
+                        .unwrap_or(0.0);
+                    area = area.scroll_offset(egui::vec2(x + shift, 0.0));
+                }
                 // The strip scrolls only when a new selection lands at the edge
                 // of last frame's visible range. It then animates toward a
                 // centered target and stops setting `scroll_offset` once there,
                 // so it doesn't fight manual scrolling.
                 if let Some(sel) = sel {
                     let last_sel_id = egui::Id::new("filmstrip_last_sel");
-                    let target_id = egui::Id::new("filmstrip_scroll_target");
                     let anim_id = egui::Id::new("filmstrip_scroll_anim");
 
                     let prev_sel = ui.ctx().data(|d| d.get_temp::<usize>(last_sel_id));
@@ -76,7 +91,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
                         }
                     }
                 }
-                area.show_viewport(ui, |ui, viewport| {
+                let shown = area.show_viewport(ui, |ui, viewport| {
                     let (first, last) = layout.range_in(viewport.min.x, viewport.max.x);
                     app.set_visible_strip_range(first, last);
 
@@ -92,6 +107,8 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
                         ui.add_space(layout.total_width() - edge(last));
                     });
                 });
+                let x = shown.state.offset.x;
+                ui.ctx().data_mut(|d| d.insert_temp(scroll_x_id, x));
 
                 region_focus_marker(ui, app, Region::Filmstrip);
             });

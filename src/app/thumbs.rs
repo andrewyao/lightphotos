@@ -357,6 +357,8 @@ impl App {
             .map(|(p, px, sig)| ((p.clone(), *px), *sig))
             .collect();
 
+        let mut shapes = Vec::new();
+
         // Bake edits into the texture so the grid matches the loupe. The
         // cached thumbnail stays unedited, since the loupe applies edits to its
         // placeholder in the shader. The bake runs on a decode worker; until it
@@ -381,9 +383,7 @@ impl App {
                         height: img.height,
                         sig: *sig,
                     };
-                    if remember_aspect(&mut self.thumb_aspect, path, img.width, img.height) {
-                        self.strip_layout = None;
-                    }
+                    shapes.push((path.clone(), img.width, img.height));
                     if let Some(old) = self.thumb_tex.insert(key, tex) {
                         renderer.free_thumb(old.id);
                     }
@@ -410,9 +410,7 @@ impl App {
                     height: baked.height,
                     sig: baked.sig,
                 };
-                if remember_aspect(&mut self.thumb_aspect, &key.0, baked.width, baked.height) {
-                    self.strip_layout = None;
-                }
+                shapes.push((key.0.clone(), baked.width, baked.height));
                 if let Some(old) = self.thumb_tex.insert(key, tex) {
                     renderer.free_thumb(old.id);
                 }
@@ -429,21 +427,10 @@ impl App {
             renderer.free_thumb(tex.id);
             false
         });
+        for (path, w, h) in shapes {
+            self.remember_thumb_shape(&path, w, h);
+        }
     }
-}
-
-/// Record `path`'s thumbnail shape. Returns whether it changed, which moves
-/// filmstrip cells.
-fn remember_aspect(aspects: &mut HashMap<PathBuf, f32>, path: &Path, w: u32, h: u32) -> bool {
-    if h == 0 {
-        return false;
-    }
-    let aspect = w as f32 / h as f32;
-    if aspects.get(path) == Some(&aspect) {
-        return false;
-    }
-    aspects.insert(path.to_path_buf(), aspect);
-    true
 }
 
 /// The grid's working set: `grid_range` plus three rows either side.

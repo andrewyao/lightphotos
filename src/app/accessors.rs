@@ -346,18 +346,23 @@ impl App {
     /// Where each filmstrip cell sits, for cells `cell_h` tall with the
     /// thumbnail `inset` from the cell's edge and `spacing` between cells.
     /// Rebuilt only when the photos shown, a thumbnail's shape or these sizes
-    /// change.
+    /// change. Also returns how far a thumbnail's new shape moved the first
+    /// cell on screen, so the strip can scroll by as much and hold still.
     pub(crate) fn strip_layout(
         &mut self,
         cell_h: f32,
         inset: f32,
         spacing: f32,
-    ) -> std::sync::Arc<super::thumbs::StripLayout> {
-        if let Some(layout) = &self.strip_layout {
-            if layout.built_for(self.visible.len(), cell_h, inset, spacing) {
-                return layout.clone();
-            }
+    ) -> (std::sync::Arc<super::thumbs::StripLayout>, f32) {
+        let old = self
+            .strip_layout
+            .take()
+            .filter(|old| old.built_for(self.visible.len(), cell_h, inset, spacing));
+        if let Some(old) = old.as_ref().filter(|_| !self.strip_aspects_changed) {
+            self.strip_layout = Some(old.clone());
+            return (old.clone(), 0.0);
         }
+        self.strip_aspects_changed = false;
         let playlist = self.playlist.as_ref();
         let aspects = self.visible.iter().map(|&i| {
             let path = playlist?.entry(i)?;
@@ -366,8 +371,33 @@ impl App {
         let layout = std::sync::Arc::new(super::thumbs::StripLayout::new(
             aspects, cell_h, inset, spacing,
         ));
+        let anchor = self.strip_range.0;
+        let shift = match (old.and_then(|o| o.cell(anchor)), layout.cell(anchor)) {
+            (Some((was, _)), Some((now, _))) => now - was,
+            _ => 0.0,
+        };
         self.strip_layout = Some(layout.clone());
-        layout
+        (layout, shift)
+    }
+
+    /// Record the shape of a thumbnail that just arrived. A new shape
+    /// rebuilds the filmstrip's layout.
+    pub(super) fn remember_thumb_shape(&mut self, path: &std::path::Path, w: u32, h: u32) {
+        if h == 0 {
+            return;
+        }
+        let aspect = w as f32 / h as f32;
+        // One photo's thumbnails at different sizes round their sides
+        // differently, so their ratios differ by a few hundredths.
+        if self
+            .thumb_aspect
+            .get(path)
+            .is_some_and(|&a| (a - aspect).abs() <= a * 0.02)
+        {
+            return;
+        }
+        self.thumb_aspect.insert(path.to_path_buf(), aspect);
+        self.strip_aspects_changed = true;
     }
 
     /// Rating of the visible cell at `pos`. 0 when unrated or out of range.

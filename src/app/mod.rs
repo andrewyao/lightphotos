@@ -584,8 +584,10 @@ pub(crate) struct App {
     /// so a filmstrip cell keeps its width when it scrolls back into view.
     thumb_aspect: HashMap<PathBuf, f32>,
     /// The filmstrip's cell positions, built from `visible` and
-    /// `thumb_aspect`. `None` when either has changed since.
+    /// `thumb_aspect`. `None` when `visible` has changed since.
     strip_layout: Option<std::sync::Arc<thumbs::StripLayout>>,
+    /// `thumb_aspect` has changed since `strip_layout` was built.
+    strip_aspects_changed: bool,
 
     /// The folder's derived signals as they were left last session. Seeded
     /// into the four maps below when a folder opens, and written back as new
@@ -957,6 +959,7 @@ impl App {
             thumb_tex: HashMap::new(),
             thumb_aspect: HashMap::new(),
             strip_layout: None,
+            strip_aspects_changed: false,
             signals: crate::persist::signalcache::SignalCache::empty(),
             #[cfg(not(target_arch = "wasm32"))]
             signal_load_rx: None,
@@ -1188,6 +1191,7 @@ impl App {
         self.finish_folder_jobs();
         if self.playlist.as_ref().map(Playlist::dir) != Some(playlist.dir()) {
             self.expanded_stacks.clear();
+            self.thumb_aspect.clear();
         }
         self.adopt_signal_cache(playlist);
         self.request_folder_store_load(playlist.dir());
