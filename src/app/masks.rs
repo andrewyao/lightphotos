@@ -296,7 +296,11 @@ impl App {
     pub(crate) fn poll_coverage(&mut self) {
         // A stroke whose brush was put down mid-drag (Esc, another tool or
         // page) ends where it got to, so it is saved and never left open.
-        if self.painting.is_some() && !(self.brush_armed() && self.masks_shown()) {
+        let off = self
+            .painting
+            .as_ref()
+            .is_some_and(|p| Some(p.path.as_path()) != self.shown.path());
+        if self.painting.is_some() && (off || !(self.brush_armed() && self.masks_shown())) {
             self.end_stroke(None);
         }
         let selection = self.action_paths();
@@ -550,7 +554,12 @@ impl App {
     /// it lies within a quarter radius of the last point or the photo is out
     /// of points.
     pub(super) fn extend_stroke(&mut self, uv: [f32; 2]) {
-        let Some(p) = self.painting.as_mut() else {
+        let shown = self.shown.path();
+        let Some(p) = self
+            .painting
+            .as_mut()
+            .filter(|p| Some(p.path.as_path()) == shown)
+        else {
             return;
         };
         if p.stroke.points.len() >= p.points_left {
@@ -677,6 +686,12 @@ impl App {
     /// The one writer of a photo's masks for an edit: records the masks it
     /// replaces for Undo, then stores the new ones.
     pub(super) fn put_masks(&mut self, path: &Path, masks: Vec<Mask>) {
+        // An edit while a stroke is held (Delete, a command, a paste) was
+        // made on the masks with the stroke in them, so save the stroke
+        // first and it lands on top.
+        if self.painting.as_ref().is_some_and(|p| p.path == path) {
+            self.end_stroke(None);
+        }
         let before = self.masks.get(path).cloned().unwrap_or_default();
         if before == masks {
             return;
@@ -691,6 +706,11 @@ impl App {
     /// Stores `masks` as `path`'s in the mirror and the folder store, and
     /// redraws the photo if it is the shown one. No undo record.
     pub(super) fn store_masks(&mut self, path: &Path, masks: Vec<Mask>) {
+        // Undo or redo mid-stroke replaces the masks under the stroke, so the
+        // stroke goes rather than write them back on release.
+        if self.painting.as_ref().is_some_and(|p| p.path == path) {
+            self.painting = None;
+        }
         self.folder_store.set_masks(path, &masks);
         // Add, paste, a command, undo and redo all converge here: a detected
         // mask on a photo without that detection gets one queued.
@@ -1069,6 +1089,50 @@ mod tests {
         app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         assert!(app.folder_store.masks(&paths[0]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The defect: the release saved the masks as they were at the press,
+    /// so a Delete or an undo made while the button was held came undone,
+    /// and a stroke held across a change of photo painted the old one.
+    #[test]
+    fn edits_and_photo_changes_mid_stroke_are_not_lost() {
+        let (mut app, dir, paths) = brushing("brush-mid", 2);
+        app.add_mask(radial());
+        app.select_mask(None);
+        app.begin_stroke([0.2, 0.5], false);
+        app.delete_mask(0);
+        assert!(!app.painting(), "the delete saved the stroke first");
+        let masks = app.current_masks();
+        assert_eq!(masks.len(), 1, "{masks:?}");
+        assert!(masks[0].strokes().is_some(), "the brush mask stays");
+
+        app.select_mask(Some(0));
+        app.begin_stroke([0.3, 0.5], false);
+        app.extend_stroke([0.6, 0.5]);
+        app.modifiers = winit::keyboard::ModifiersState::SUPER;
+        app.handle_key(KeyCode::KeyZ);
+        assert!(!app.painting(), "undo drops the held stroke");
+        let undone = app.current_masks().to_vec();
+        app.end_stroke(Some([0.7, 0.5]));
+        assert_eq!(
+            app.current_masks(),
+            &undone[..],
+            "and the release doesn't write over the undo"
+        );
+        app.modifiers = winit::keyboard::ModifiersState::empty();
+        app.store_masks(&paths[0], vec![Mask::brush()]);
+        app.select_mask(Some(0));
+
+        app.begin_stroke([0.3, 0.5], false);
+        app.shown = Shown::Preview(paths[1].clone(), 1500, 1000);
+        app.extend_stroke([0.9, 0.9]);
+        app.poll_coverage();
+        assert!(!app.painting(), "a new photo ends the stroke");
+        let strokes = app.masks[&paths[0]][0].strokes().unwrap().clone();
+        assert_eq!(strokes.len(), 1);
+        assert_eq!(strokes[0].points, vec![[0.3, 0.5]], "nothing from photo 1");
+        assert!(!app.masks.contains_key(&paths[1]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
