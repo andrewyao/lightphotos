@@ -29,10 +29,14 @@ use crate::hash::Fnv1a;
 pub const MAX_BRUSH_TEXELS: usize = 1 << 20;
 
 /// The most texel visits one raster spends on its dabs. A sidecar's strokes
-/// come from whoever supplied the folder, and 8,000 photo-wide dabs would
-/// otherwise take minutes. Real painting stays far below: a 500-dab stroke
-/// of a tenth of the shorter side visits about 16 million.
+/// come from whoever supplied the folder, and 8,000 photo-wide dabs, or a
+/// hundred million tiny ones along far-apart points, would otherwise take
+/// minutes. Real painting stays far below: a 500-dab stroke of a tenth of
+/// the shorter side visits about 16 million.
 const MAX_STAMP_TEXELS: u64 = 1 << 28;
+/// What one dab costs against [`MAX_STAMP_TEXELS`] besides its texels, so
+/// a raster places at most 4 million dabs however small they are.
+const DAB_COST: u64 = 64;
 
 /// Dabs along a segment sit at most this share of the radius apart.
 const DAB_SPACING: f32 = 0.25;
@@ -42,8 +46,8 @@ const DAB_SPACING: f32 = 0.25;
 const CACHE_ENTRIES: usize = super::MAX_MASKS * 2;
 
 /// The raster size for a photo whose width over height is `aspect`: as many
-/// texels as [`MAX_BRUSH_TEXELS`] allows in that shape, each side at least 1
-/// and at most [`MAX_COVERAGE_SIDE`].
+/// texels as [`MAX_BRUSH_TEXELS`] allows in that shape, never more, each
+/// side at least 1 and at most [`MAX_COVERAGE_SIDE`].
 pub fn raster_size(aspect: f32) -> (u32, u32) {
     let aspect = if aspect.is_finite() && aspect > 0.0 {
         aspect as f64
@@ -52,12 +56,15 @@ pub fn raster_size(aspect: f32) -> (u32, u32) {
     };
     let area = MAX_BRUSH_TEXELS as f64;
     let side = |v: f64| (v.round() as u32).clamp(1, MAX_COVERAGE_SIDE);
+    // The second side rounds down past the budget, so the coverage buffer's
+    // cap is a hard bound.
+    let second = |long: u32, v: f64| side(v).min((MAX_BRUSH_TEXELS as u32 / long).max(1));
     if aspect >= 1.0 {
         let w = side((area * aspect).sqrt());
-        (w, side(w as f64 / aspect))
+        (w, second(w, w as f64 / aspect))
     } else {
         let h = side((area / aspect).sqrt());
-        (side(h as f64 * aspect), h)
+        (second(h, h as f64 * aspect), h)
     }
 }
 
@@ -108,15 +115,28 @@ impl BrushRaster {
         }
         let radius = self.radius(stroke);
         let step = radius * DAB_SPACING;
+        // How far off the photo, in UV, a dab still reaches it.
+        let reach = [radius / self.scale[0], radius / self.scale[1]];
         for i in from.max(1)..stroke.points.len() {
             let (Some(&a), Some(&b)) = (stroke.points.get(i - 1), stroke.points.get(i)) else {
                 break;
             };
             let len = ((b[0] - a[0]) * self.scale[0]).hypot((b[1] - a[1]) * self.scale[1]);
             // Clamped points keep `len` below 30 shorter sides, and `step`
-            // is at least half a texel, so the count stays small and finite.
+            // is at least half a texel, so `n` is finite.
             let n = (len / step).ceil().clamp(1.0, 1e6) as u32;
-            for k in 1..=n {
+            // Only the steps whose dabs can reach the photo, so a long
+            // segment off its edge costs nothing. The steps stay `k / n`, so
+            // which dabs land doesn't change.
+            let Some((t0, t1)) = clip(a, b, reach) else {
+                continue;
+            };
+            let first = ((t0 * n as f32).ceil() as u32).max(1);
+            let last = ((t1 * n as f32).floor() as u32).min(n);
+            for k in first..=last {
+                if self.budget == 0 {
+                    return;
+                }
                 let t = k as f32 / n as f32;
                 self.dab(stroke, [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
             }
@@ -146,10 +166,11 @@ impl BrushRaster {
         let y0 = (cy - reach[1]).floor().max(0.0);
         let y1 = (cy + reach[1]).ceil().min(h - 1.0);
         if !(x0 <= x1 && y0 <= y1) {
+            self.budget = self.budget.saturating_sub(DAB_COST);
             return;
         }
         let (x0, x1, y0, y1) = (x0 as usize, x1 as usize, y0 as usize, y1 as usize);
-        let visits = ((x1 - x0 + 1) * (y1 - y0 + 1)) as u64;
+        let visits = ((x1 - x0 + 1) * (y1 - y0 + 1)) as u64 + DAB_COST;
         if visits > self.budget {
             self.budget = 0;
             return;
@@ -188,6 +209,26 @@ impl BrushRaster {
         // `alpha` holds a byte per texel, so this never fails.
         Coverage::fit(self.width, self.height, &alpha).unwrap_or_else(|_| Coverage::nothing())
     }
+}
+
+/// The part of segment `a`→`b`, as `t` in 0..=1, inside the photo grown by
+/// `reach` UV on each side, or `None` when none of it is.
+fn clip(a: [f32; 2], b: [f32; 2], reach: [f32; 2]) -> Option<(f32, f32)> {
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for axis in 0..2 {
+        let (lo, hi) = (-reach[axis], 1.0 + reach[axis]);
+        let d = b[axis] - a[axis];
+        if d == 0.0 {
+            if !(lo..=hi).contains(&a[axis]) {
+                return None;
+            }
+            continue;
+        }
+        let (ta, tb) = ((lo - a[axis]) / d, (hi - a[axis]) / d);
+        t0 = t0.max(ta.min(tb));
+        t1 = t1.min(ta.max(tb));
+    }
+    (t0 <= t1).then_some((t0, t1))
 }
 
 /// The cache: (content key, raster), newest first.
@@ -403,10 +444,7 @@ mod tests {
             let (w, h) = raster_size(aspect);
             assert!(w >= 1 && h >= 1, "{aspect}");
             assert!(w <= MAX_COVERAGE_SIDE && h <= MAX_COVERAGE_SIDE, "{aspect}");
-            assert!(
-                (w as usize * h as usize) <= MAX_BRUSH_TEXELS + 2048,
-                "{aspect}"
-            );
+            assert!((w as usize * h as usize) <= MAX_BRUSH_TEXELS, "{aspect}");
         }
         assert_eq!(raster_size(1.5), (1254, 836));
     }
@@ -447,6 +485,30 @@ mod tests {
         let r = BrushRaster::of(&[wild], 1.5);
         assert_eq!(r.budget, 0, "the budget ran out");
         assert!(start.elapsed() < std::time::Duration::from_secs(20));
+        // The thinnest brush zigzagging far past the photo's corners: each
+        // segment is mostly off the photo, which must cost nothing.
+        let thin = Stroke {
+            radius: 1e-3,
+            feather: 0.5,
+            flow: 1.0,
+            erase: false,
+            points: (0..8_000)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        [-10.0, -10.0]
+                    } else {
+                        [11.0, 11.0]
+                    }
+                })
+                .collect(),
+        };
+        let start = std::time::Instant::now();
+        let _ = BrushRaster::of(&[thin], 3.0);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
         let odd = Stroke {
             radius: f32::NAN,
             feather: f32::INFINITY,
