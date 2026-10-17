@@ -264,9 +264,11 @@ flowchart TD
 `Adjustments` is `Copy` and applies to the whole photo. The two kinds of
 local edit live beside it in the sidecar, as their own lists:
 `ImageRecord::touchups` (spot heals) and `ImageRecord::masks` (Linear and
-Radial gradient masks and Detected masks, `develop/mask.rs`). All are in
-source UV: 0..1 of the photo before straighten and crop, so neither tool
-moves them.
+Radial gradient masks, Detected masks and Brush masks, `develop/mask.rs`).
+All are in source UV: 0..1 of the photo before straighten and crop, so
+neither tool moves them. A Brush mask holds its strokes, so `Mask` is
+`Clone`, not `Copy`; the strokes sit behind an `Arc`, so undo snapshots and
+render copies share one list.
 
 A mask is a shape, an Invert flag and nine sliders (`LocalAmounts`): Temp,
 Tint, Exposure, Contrast, Highlights, Shadows, Whites, Blacks and Saturation.
@@ -276,7 +278,7 @@ them out.
 
 **Detected masks.** A detected mask names what it selects
 (`MaskShape::Detected { target }`, Subject or Sky) and nothing else, so
-`Mask` stays `Copy`, paste is verbatim, and undo never touches a bitmap. The
+paste is verbatim and undo never touches a bitmap. The
 photo owns the detection: `ImageRecord::detections` records which coverage
 answers each target, and every mask of that target shares it. A coverage
 (`develop/coverage.rs`) is one byte per texel in source UV, at most 2048 px
@@ -296,33 +298,65 @@ the shown photo's decoded frame at 512 px and writes its file through File
 System Access; a pending one waits until its photo is shown. Subject needs
 Vision, so the browser only reads Subject coverage a Mac made.
 
+**Brush masks.** A Brush mask (`MaskShape::Brush { strokes }`) stores what
+was painted as vectors: each `Stroke` has a radius (a fraction of the
+shorter side), feather, flow, an erase flag and its points in source UV,
+thinned to a quarter radius apart and rounded to five decimals as they are
+recorded (`brush::push_point`). Vectors, not a bitmap, so crop, straighten
+and paste to another photo work as for every other mask, and the sidecar
+stays the only record. `develop/brush.rs` rasterizes the strokes, in order,
+into the same `Coverage` a detected mask uses, at up to 1024² texels in the
+photo's shape. A stroke is a row of round dabs, each segment cut into equal
+steps no longer than a quarter radius. A painting dab adds
+`flow · w · (1 − a)` and an erasing one multiplies by `1 − flow · w`, with
+`w` the radial mask's falloff. A segment's dabs depend only on its two
+ends, so the Loupe stamps a stroke a point at a time while it is painted
+and gets the bytes a full rasterize would. Brush rasters live in memory
+only, in a small cache keyed by the strokes' content and the raster size;
+nothing about them goes to `.lightphotos/masks`.
+
 **How a mask renders:**
 - `mask::mask_weight` gives each mask's 0..1 weight at a pixel's source UV.
   Lengths are fractions of the shorter side, so a circle stays round. A
   detected mask reads its coverage bilinearly (`Coverage::at_uv`), and
-  covers nothing until its detection lands.
+  covers nothing until its detection lands. A brush mask reads its raster
+  the same way; an empty one is a 1x1 zero raster, so inverted it covers
+  everything.
 - `MaskSet` pairs each mask with the coverage its target resolved to and is
-  what every renderer reads. `MaskSet::local_tone` adds every mask's
-  weighted sliders to the photo's own and holds each sum to its slider's
-  range. The tone pipeline (`Develop::linear_at_local`) reads those nine
-  values in place of the photo's. Jobs carry a `MaskInput`: native workers
-  read the coverage beside the photo themselves (`OnDisk`); the browser's
-  take it resolved (`Ready`). A recorded coverage that is missing or corrupt
-  fails the bake rather than caching an unmasked render.
+  what every bake job carries. A brush raster depends on the photo's shape,
+  so `MaskSet::on_photo(aspect)` makes the `PhotoMasks` that every renderer
+  reads, adding each brush mask's raster from the cache. No renderer can
+  reach a mask's weight any other way, so none can drop a brush mask.
+  `PhotoMasks::local_tone` adds every mask's weighted sliders to the
+  photo's own and holds each sum to its slider's range. The tone pipeline
+  (`Develop::linear_at_local`) reads those nine values in place of the
+  photo's. Jobs carry a `MaskInput`: native workers read the coverage
+  beside the photo themselves (`OnDisk`); the browser's take it resolved
+  (`Ready`). A recorded coverage that is missing or corrupt fails the bake
+  rather than caching an unmasked render.
 - The CPU bake (`image_ops::bake_samples`) and the histogram do this per
   pixel. The Loupe does it in `localTone` (`loupe_common.wgsl`), with the
   masks in a storage buffer at group 3 binding 4 and every distinct coverage
   packed four bytes a word in another at binding 5, read by `coverageAt`
-  with `fieldAt`'s bilinear. The uniform's `mask_count` says how many apply,
-  so compare's "before" half shows none. The renderer re-uploads the
-  coverage only when `MaskSet::coverage_key` changes.
+  with `fieldAt`'s bilinear. Detected and brush masks share that path, so
+  they match the CPU by construction. Each record's `coverage` field holds
+  its byte offset, width and height as u32s: two detections at 2048 px and
+  14 brush rasters make `MAX_COVERAGE_BYTES` 22 MiB, past where an f32
+  counts exactly. The uniform's `mask_count` says how many apply, so
+  compare's "before" half shows none. The renderer re-uploads the coverage
+  only when `PhotoMasks::coverage_key` changes.
 - `renderer/match_test.rs` holds the two paths to the same tolerance as the
   rest of the develop pipeline, raster cases included.
 
 **Where masks are guarded:** `ImageRecord::masks` is a `sidecar::MaskList`.
 A sidecar's mask of a known kind that isn't one, or holds a number that isn't
 finite, is dropped. The rest are clamped (`Mask::sanitized`) and capped at
-`MAX_MASKS`, the GPU buffer's size. A mask whose `kind` this build doesn't
+`MAX_MASKS`, the GPU buffer's size. A brush mask keeps at most
+`MAX_STROKES_PER_MASK` strokes, and a photo's brush masks share
+`MAX_BRUSH_POINTS`, each stroke counting `STROKE_POINTS` more for its
+settings, so a photo at the cap still writes a pretty-printed sidecar under
+`MAX_SIDECAR_BYTES`. A raster spends at most `MAX_STAMP_TEXELS` on its
+dabs, so a hostile sidecar's strokes can't stall a bake. A mask whose `kind` this build doesn't
 know is a later build's: the list keeps its JSON verbatim and writes it back
 where it stood, so a folder shared across versions loses nothing. `mask.add`
 and `mask.set` run the same check.
@@ -331,6 +365,16 @@ and `mask.set` run the same check.
 goes through the main `EditHistory`, so `Cmd`+`Z` undoes a whole handle drag
 as one step. The Loupe overlay (`ui/mask_overlay.rs`) gives each handle its
 own small egui area, so a press anywhere else still pans the photo.
+
+A brush stroke is one step too. `App::painting` holds it from press to
+release (`masks::Painting`): the photo's masks with the stroke in place,
+which `current_masks` returns, and the mask's raster in floats. Each new
+point stamps only its own dabs, and the stroke's raster goes into the
+brush cache under the strokes it belongs to, so the next render finds it
+without rasterizing. The release saves the masks through `put_masks` once.
+The selected brush mask tints the Loupe red, as a detected one does. The
+renderer still re-packs and uploads the whole coverage buffer when a
+stroke grows: about 2 ms a point for one 3:2 brush mask.
 
 ---
 

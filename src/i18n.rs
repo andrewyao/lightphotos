@@ -1379,9 +1379,21 @@ pub static EN: Strings = Strings {
             },
         },
         HelpSection {
+            title: "Brush mask",
+            rows: &[
+                ("K", "Brush on / off; paints the picked brush mask"),
+                ("Drag", "Paint; each stroke is one undo step"),
+                ("Alt+Drag", "Erase"),
+                ("[ / ]", "Brush size"),
+                ("Scroll", "Brush size"),
+                ("Shift+[ / ]", "Brush feather"),
+                ("Shift+Scroll", "Brush feather"),
+                ("Esc", "Put the brush down"),
+            ],
+        },
+        HelpSection {
             title: "Touch Up",
             rows: &[
-                ("K", "Open the Cleanup tab"),
                 ("Q", "Touch Up on / off"),
                 ("[ / ]", "Brush size"),
                 ("Scroll", "Brush size"),
@@ -2248,9 +2260,21 @@ pub static ZH: Strings = Strings {
             },
         },
         HelpSection {
+            title: "画笔蒙版",
+            rows: &[
+                ("K", "开启 / 关闭画笔；绘制选中的画笔蒙版"),
+                ("拖动", "绘制；每一笔可单独撤销"),
+                ("Alt+拖动", "擦除"),
+                ("[ / ]", "画笔大小"),
+                ("滚轮", "画笔大小"),
+                ("Shift+[ / ]", "画笔羽化"),
+                ("Shift+滚轮", "画笔羽化"),
+                ("Esc", "关闭画笔"),
+            ],
+        },
+        HelpSection {
             title: "修补",
             rows: &[
-                ("K", "打开修复"),
                 ("Q", "开启 / 关闭修补"),
                 ("[ / ]", "画笔大小"),
                 ("滚轮", "画笔大小"),

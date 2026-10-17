@@ -65,6 +65,7 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 | `Y` | Before / after compare |
 | `M` | Linear Gradient mask: drag on the photo from where the effect is full to where it ends. `M` again puts the tool down |
 | `Shift`+`M` | Radial Gradient mask: drag out from its center. A click without a drag adds a default-sized one |
+| `K` | Brush mask: paint on the photo. With a brush mask picked, strokes add to it; with none, the first stroke makes one. `K` again puts the brush down |
 | `Cmd`+`U` | Auto Tone this photo |
 | `Cmd`+`Shift`+`U` | Auto Tone the selection (after a confirm) |
 | `Cmd`+`Shift`+`C` | Copy develop settings: choose the sections to carry, then `Enter` copies and `Esc` cancels. The choice is remembered |
@@ -104,4 +105,18 @@ work as usual.
 | `Esc` | Put the mask tool down, or let go of the picked mask |
 | `Delete` / `Backspace` | Delete the picked mask, not the photo |
 | `Shift`+scroll | Over a radial mask's center, change its feather |
-| `Cmd`+`Z` | Undo the last mask change; a whole handle drag is one step |
+| `Cmd`+`Z` | Undo the last mask change; a whole handle drag or brush stroke is one step |
+
+With the Brush armed:
+
+| Key | Action |
+| --- | --- |
+| Drag | Paint a stroke |
+| `Alt`+drag | Erase, as the panel's Erase toggle does |
+| `[` / `]` | Brush size |
+| `Shift`+`[` / `Shift`+`]` | Brush feather |
+| Scroll | Brush size |
+| `Shift`+scroll | Brush feather |
+
+Lightroom also sets the brush's Flow with the number keys. Here they still
+rate the photo.

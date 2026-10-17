@@ -1,0 +1,17 @@
+# Run on one photo: K arms the Brush, a stroke paints a band across the
+# top third, and the band's mask raises Exposure. Two Escapes put the
+# brush down and let go of the mask, so its red tint is off for the shot.
+size 1200 800
+idle
+shot brush-before
+key k
+stroke 60,200 200,205 340,195 480,205 620,200 760,200
+idle
+shot brush-painted
+state
+run {"id":"mask.set","params":{"index":0,"amounts":{"exposure":1.5}}}
+key escape
+key escape
+idle
+shot brush-exposure
+state
