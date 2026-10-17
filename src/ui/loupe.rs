@@ -147,7 +147,10 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
 
     // `region_focus_marker` uses `ui.min_rect()`, which doesn't cover this
     // unclaimed rect, so draw against `central` directly.
-    if app.focus() == Region::Detail && app.focus_level() == FocusLevel::Selected {
+    if app.focus() == Region::Detail
+        && app.focus_level() == FocusLevel::Selected
+        && !app.fullscreen_shown()
+    {
         ui.painter_at(central).rect_stroke(
             central.shrink(2.0),
             2.0,

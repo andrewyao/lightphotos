@@ -175,6 +175,8 @@ pub enum UiAction {
     PickFolder,
     /// Leave the Loupe for the Grid, as the G key does.
     EnterGrid,
+    /// Show only the Loupe's photo, full screen, or leave that, as F does.
+    ToggleFullscreen,
     CropGrab(CropEdge),
     /// Begin moving the whole crop rectangle, anchored at this texture coordinate.
     CropGrabMove(f32, f32),
@@ -340,6 +342,14 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     app.clear_cell_rects();
     app.show_launch_notice();
 
+    // Full screen, the Loupe draws only the photo, its toasts and dialogs.
+    if app.fullscreen_shown() {
+        draw_loupe(ui, app, &mut out);
+        status_toast(ui, app);
+        dialogs(ui, app, &mut out);
+        return out;
+    }
+
     // Drawn first and on every screen, so the Open button never moves.
     app_header(ui, app, &mut out);
 
@@ -384,17 +394,22 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
         ViewMode::Loupe => draw_loupe(ui, app, &mut out),
     }
     status_toast(ui, app);
-    confirm_modal(ui, app, &mut out);
-    delete_group_modal(ui, app, &mut out);
-    delete_preset_modal(ui, app, &mut out);
-    preset_name_modal(ui, app, &mut out);
-    #[cfg(target_arch = "wasm32")]
-    modals::catalog_name_modal(ui, app, &mut out);
-    help_modal(ui, app, &mut out);
-    settings_modal(ui, app, &mut out);
-    copy_settings_modal(ui, app, &mut out);
+    dialogs(ui, app, &mut out);
     tour::draw(ui, app, &mut out);
     out
+}
+
+/// The dialogs, each drawn only while it is open.
+fn dialogs(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    confirm_modal(ui, app, out);
+    delete_group_modal(ui, app, out);
+    delete_preset_modal(ui, app, out);
+    preset_name_modal(ui, app, out);
+    #[cfg(target_arch = "wasm32")]
+    modals::catalog_name_modal(ui, app, out);
+    help_modal(ui, app, out);
+    settings_modal(ui, app, out);
+    copy_settings_modal(ui, app, out);
 }
 
 /// The "LightPhotos" wordmark and the catalog picker at the left; help, Tour
@@ -526,7 +541,7 @@ fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         .strong(),
                 );
             } else {
-                loupe_title(ui, app, name);
+                loupe_title(ui, app, name, out);
             }
         });
         ui.add_space(font_size::px(ui.style(), 4.0));
@@ -534,10 +549,10 @@ fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 }
 
 /// `fx / IMG_1.JPG` beside the Loupe's back arrow, and at the row's right end
-/// the dimensions and the decode's signal bars. The dimensions are smaller
+/// the dimensions, the decode's signal bars and the full-screen button. The dimensions are smaller
 /// and wait for the photo's metadata. `ui.horizontal` centers each label on
 /// the row, so the sizes line up on one center line.
-fn loupe_title(ui: &mut egui::Ui, app: &App, folder: String) {
+fn loupe_title(ui: &mut egui::Ui, app: &App, folder: String, out: &mut FrameOutput) {
     let size = font_size::px(ui.style(), 15.0);
     let gap = font_size::px(ui.style(), 6.0);
     let dim = theme::colors(ui.ctx()).label;
@@ -552,10 +567,14 @@ fn loupe_title(ui: &mut egui::Ui, app: &App, folder: String) {
     ui.label(egui::RichText::new("/").size(size).color(dim));
     ui.add_space(gap);
     ui.label(egui::RichText::new(name).size(size));
-    // Right to left: the signal bars sit at the far right, the dimensions
-    // just before them.
+    // Right to left: the full-screen button sits at the far right, the
+    // signal bars and the dimensions before it.
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.add_space(gap);
+        if fullscreen_button(ui, size).clicked() {
+            out.actions.push(UiAction::ToggleFullscreen);
+        }
+        ui.add_space(2.0 * gap);
         if let Some(tier) = app.shown_tier() {
             shown_tier_bars(ui, tier, size);
             ui.add_space(2.0 * gap);
@@ -568,6 +587,40 @@ fn loupe_title(ui: &mut egui::Ui, app: &App, folder: String) {
             );
         }
     });
+}
+
+/// Four corner brackets, the usual mark for full screen, sized to the title
+/// text and lit on hover.
+fn fullscreen_button(ui: &mut egui::Ui, text_size: f32) -> egui::Response {
+    let colors = theme::colors(ui.ctx());
+    let side = 0.9 * text_size;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    let color = if response.hovered() {
+        colors.value
+    } else {
+        colors.label
+    };
+    let stroke = egui::Stroke::new((0.12 * text_size).max(1.5), color);
+    let arm = 0.35 * side;
+    let painter = ui.painter();
+    for (corner, dx, dy) in [
+        (rect.left_top(), 1.0, 1.0),
+        (rect.right_top(), -1.0, 1.0),
+        (rect.left_bottom(), 1.0, -1.0),
+        (rect.right_bottom(), -1.0, -1.0),
+    ] {
+        painter.line(
+            vec![
+                corner + egui::vec2(dx * arm, 0.0),
+                corner,
+                corner + egui::vec2(0.0, dy * arm),
+            ],
+            stroke,
+        );
+    }
+    response
+        .on_hover_text(t().fullscreen_tip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Four bars of rising height, like a phone's signal meter, that name the

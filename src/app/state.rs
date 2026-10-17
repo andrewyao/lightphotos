@@ -44,6 +44,9 @@ pub(crate) struct State {
     selected_mask: Option<usize>,
     /// The keyboard-focused region.
     focus: Region,
+    /// Whether the Loupe shows only the photo; absent when it doesn't.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    fullscreen: bool,
     /// Loupe zoom relative to fit-to-window; absent in the Grid.
     zoom: Option<f32>,
     /// The status toast, while it shows.
@@ -168,6 +171,7 @@ impl State {
                 .unwrap_or_default(),
             selected_mask: app.selected_mask(),
             focus: app.focus(),
+            fullscreen: app.fullscreen_shown(),
             zoom: (mode == ViewMode::Loupe).then(|| app.zoom_rel()),
             status: app.status().map(|(_, text)| text.to_string()),
             failed_thumbs: (0..app.visible_len())

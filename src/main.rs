@@ -261,6 +261,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height);
                 }
+                // Leaving OS full screen ends the Loupe's full-screen view.
+                self.sync_fullscreen();
                 // The preview decode is sized from the window, so a bigger
                 // window may need a sharper one.
                 self.try_show();

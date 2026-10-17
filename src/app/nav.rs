@@ -835,13 +835,13 @@ impl App {
         self.develop_open && self.group_view() == GroupView::Edit
     }
 
-    /// Loupe only.
+    /// Loupe only, and not full screen.
     pub(crate) fn filmstrip_visible(&self) -> bool {
-        true
+        !self.fullscreen_shown()
     }
 
     pub(crate) fn metadata_panel_visible(&self) -> bool {
-        true
+        !self.fullscreen_shown()
     }
 
     /// Whether region `r` can take keyboard focus in the current mode.
@@ -850,7 +850,7 @@ impl App {
             Region::Toolbar => self.mode != ViewMode::Loupe,
             Region::Grid => self.mode == ViewMode::Grid,
             Region::Detail => self.mode == ViewMode::Loupe,
-            Region::Filmstrip => self.mode == ViewMode::Loupe,
+            Region::Filmstrip => self.mode == ViewMode::Loupe && self.filmstrip_visible(),
             Region::Folders => self.left_panel_visible(),
             Region::Develop => self.mode == ViewMode::Loupe && self.develop_page_shown().is_some(),
         }

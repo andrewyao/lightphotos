@@ -435,6 +435,8 @@ pub(crate) type SignalLoad = (
 
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
+    /// The Loupe's full-screen view.
+    fullscreen: fullscreen::Fullscreen,
     pub(crate) renderer: Option<Renderer>,
     /// Group compare's pane: its tiles, zoom square, view and picks.
     group_compare: group_compare::GroupCompare,
@@ -778,6 +780,7 @@ mod export;
 mod faces;
 mod folders;
 mod fonts;
+mod fullscreen;
 mod group_compare;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use export::ImmichLink;
@@ -887,6 +890,7 @@ impl App {
         };
         let mut app = Self {
             window: None,
+            fullscreen: fullscreen::Fullscreen::Off,
             renderer: None,
             #[cfg(test)]
             pushed_adj: None,
@@ -1253,6 +1257,7 @@ impl App {
         // frame that never cleared it would report the last frame's photo.
         #[cfg(target_arch = "wasm32")]
         crate::web::analytics::begin_frame();
+        self.sync_fullscreen();
         // Upload thumbnails before egui references them.
         self.sync_thumb_textures();
         self.sync_compare_tiles();
@@ -1561,6 +1566,7 @@ impl App {
                 ui::UiAction::RemoveFolder(p) => self.remove_root(&p),
                 ui::UiAction::PickFolder => self.open_folder_picker(),
                 ui::UiAction::EnterGrid => self.enter_grid(),
+                ui::UiAction::ToggleFullscreen => self.toggle_fullscreen(),
                 ui::UiAction::Focus(region) => {
                     self.focus = region;
                     self.focus_level = FocusLevel::Entered;

@@ -341,6 +341,8 @@ impl App {
                 self.request_bulk(ui::BulkKind::ApplySettings)
             }
             KeyCode::KeyY if self.mode == ViewMode::Loupe && !cmd && !alt => self.toggle_compare(),
+            KeyCode::KeyF if loupe && !cmd && !alt => self.toggle_fullscreen(),
+            KeyCode::Escape if self.fullscreen_shown() => self.exit_fullscreen(),
             // Escape undoes Enter one step per press and stops at the Grid
             // or Folders. Leaving the Grid for Folders also clears the selection.
             KeyCode::Escape => {
@@ -762,6 +764,86 @@ mod tests {
         assert_eq!(app.sel, Some(1));
         press(&mut app, ModifiersState::empty(), KeyCode::ArrowLeft);
         assert_eq!(app.sel, Some(0));
+    }
+
+    #[test]
+    fn f_shows_only_the_photo_and_esc_leaves_it() {
+        use crate::app::test_support::settled;
+
+        let (mut app, paths) = editor_app();
+        let name = paths[0]
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        let name = name.unwrap_or_default();
+        assert!(settled(&mut app).has(&name));
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        assert!(app.fullscreen_shown());
+        let painted = settled(&mut app);
+        assert!(painted.texts().is_empty(), "painted {:?}", painted.texts());
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(!app.fullscreen_shown());
+        assert_eq!(app.mode, ViewMode::Loupe);
+        assert!(settled(&mut app).has(&name));
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        assert!(!app.fullscreen_shown());
+    }
+
+    #[test]
+    fn f_in_the_grid_does_nothing() {
+        let (mut app, _) = folder_app(2);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        assert!(!app.fullscreen_shown());
+        app.sync_fullscreen();
+        assert_eq!(app.mode, ViewMode::Grid);
+        assert!(!app.fullscreen_shown());
+    }
+
+    #[test]
+    fn loupe_keys_work_in_full_screen() {
+        let (mut app, paths) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowUp);
+        assert_zoom(&app, 0.55);
+        press(&mut app, ModifiersState::empty(), KeyCode::Digit3);
+        assert_eq!(app.rating_of(&paths[0]), 3);
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowRight);
+        assert_eq!(app.sel, Some(1));
+        app.sync_fullscreen();
+        assert!(app.fullscreen_shown());
+    }
+
+    #[test]
+    fn opening_a_panel_or_the_grid_leaves_full_screen() {
+        // Closed, D opens Develop; already open behind the full-screen
+        // view, D changes nothing but must still show it.
+        for open in [false, true] {
+            let (mut app, _) = editor_app();
+            app.develop_open = open;
+            press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+            press(&mut app, ModifiersState::empty(), KeyCode::KeyD);
+            app.sync_fullscreen();
+            assert!(!app.fullscreen_shown(), "develop_open {open}");
+            assert!(app.develop_page_shown().is_some());
+        }
+
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        assert!(!app.fullscreen_shown());
+        assert!(app.info_open(), "I shows the Info page it was hiding");
+
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyG);
+        app.sync_fullscreen();
+        assert_eq!(app.mode, ViewMode::Grid);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyE);
+        assert_eq!(app.mode, ViewMode::Loupe);
+        assert!(
+            !app.fullscreen_shown(),
+            "a new Loupe starts with its chrome"
+        );
     }
 
     #[test]
