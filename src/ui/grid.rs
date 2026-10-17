@@ -307,7 +307,7 @@ fn root_menu(root: &Path, row: &egui::Response, out: &mut FrameOutput) {
 /// What differs between a grid cell and a filmstrip cell.
 pub(super) struct CellStyle {
     /// Corner radius, also used as the thumbnail inset.
-    corner: f32,
+    pub(super) corner: f32,
     /// The filmstrip's cells sit a shade darker than the grid's.
     strip: bool,
     rating: RatingMark,
@@ -361,7 +361,8 @@ fn badge_center(
     align.pos_in_rect(&rect.shrink(style.corner + badge_r))
 }
 
-/// Thumbnail cell shared by the grid and the filmstrip. A cell in the
+/// Thumbnail cell shared by the grid and the filmstrip, `size` points
+/// across: square in the Grid, the photo's shape in the filmstrip. A cell in the
 /// multi-selection gets an outline, and the active cell `sel` a thicker one.
 /// A click on the stack badge pushes [`UiAction::ToggleStack`] to `actions`
 /// and is not a click on the cell. Records where the cell and its badge
@@ -370,14 +371,13 @@ pub(super) fn thumbnail_cell(
     ui: &mut egui::Ui,
     app: &mut App,
     pos: usize,
-    cell: f32,
+    size: egui::Vec2,
     sel: Option<usize>,
     style: &CellStyle,
     actions: &mut Vec<UiAction>,
 ) -> egui::Response {
     let primary = sel == Some(pos);
     let selected = app.is_selected(pos);
-    let size = egui::vec2(cell, cell);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     app.record_cell_rect(pos, rect);
 
@@ -537,7 +537,7 @@ pub(super) fn thumbnail_cell(
             }
         }
         RatingMark::Dots => {
-            let r = (cell * 0.028).max(2.0);
+            let r = (size.y * 0.028).max(2.0);
             let step = r * 2.8;
             let first =
                 rect.left_bottom() + egui::vec2(style.corner + r + 1.0, -(style.corner + r + 1.0));
@@ -713,7 +713,15 @@ fn grid_cell(
     sel: Option<usize>,
     out: &mut FrameOutput,
 ) {
-    let response = thumbnail_cell(ui, app, pos, cell, sel, &GRID_CELL_STYLE, &mut out.actions);
+    let response = thumbnail_cell(
+        ui,
+        app,
+        pos,
+        egui::Vec2::splat(cell),
+        sel,
+        &GRID_CELL_STYLE,
+        &mut out.actions,
+    );
     if response.clicked() {
         out.actions.push(click_action(ui, pos));
         out.actions.push(UiAction::Focus(Region::Grid));

@@ -580,6 +580,12 @@ pub(crate) struct App {
     /// The renderer owns the GPU side, so dropping an entry here is not enough;
     /// `sync_thumb_textures` hands every pruned id back to `Renderer::free_thumb`.
     thumb_tex: HashMap<(PathBuf, u32), ThumbTexture>,
+    /// Each thumbnail's width over height, kept after its texture is dropped
+    /// so a filmstrip cell keeps its width when it scrolls back into view.
+    thumb_aspect: HashMap<PathBuf, f32>,
+    /// The filmstrip's cell positions, built from `visible` and
+    /// `thumb_aspect`. `None` when either has changed since.
+    strip_layout: Option<std::sync::Arc<thumbs::StripLayout>>,
 
     /// The folder's derived signals as they were left last session. Seeded
     /// into the four maps below when a folder opens, and written back as new
@@ -949,6 +955,8 @@ impl App {
             grid_scroll_reset: true,
             strip_range: (0, 0),
             thumb_tex: HashMap::new(),
+            thumb_aspect: HashMap::new(),
+            strip_layout: None,
             signals: crate::persist::signalcache::SignalCache::empty(),
             #[cfg(not(target_arch = "wasm32"))]
             signal_load_rx: None,

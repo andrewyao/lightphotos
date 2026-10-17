@@ -343,6 +343,33 @@ impl App {
         self.strip_range
     }
 
+    /// Where each filmstrip cell sits, for cells `cell_h` tall with the
+    /// thumbnail `inset` from the cell's edge and `spacing` between cells.
+    /// Rebuilt only when the photos shown, a thumbnail's shape or these sizes
+    /// change.
+    pub(crate) fn strip_layout(
+        &mut self,
+        cell_h: f32,
+        inset: f32,
+        spacing: f32,
+    ) -> std::sync::Arc<super::thumbs::StripLayout> {
+        if let Some(layout) = &self.strip_layout {
+            if layout.built_for(self.visible.len(), cell_h, inset, spacing) {
+                return layout.clone();
+            }
+        }
+        let playlist = self.playlist.as_ref();
+        let aspects = self.visible.iter().map(|&i| {
+            let path = playlist?.entry(i)?;
+            self.thumb_aspect.get(path).copied()
+        });
+        let layout = std::sync::Arc::new(super::thumbs::StripLayout::new(
+            aspects, cell_h, inset, spacing,
+        ));
+        self.strip_layout = Some(layout.clone());
+        layout
+    }
+
     /// Rating of the visible cell at `pos`. 0 when unrated or out of range.
     pub(crate) fn rating_at(&self, pos: usize) -> u8 {
         self.visible

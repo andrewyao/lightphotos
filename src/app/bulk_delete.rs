@@ -435,6 +435,7 @@ impl App {
                     .iter()
                     .filter_map(|&i| crate::navigation::shift_index(i, &removed))
                     .collect();
+                self.strip_layout = None;
             }
             self.autotone.drop_deferred(&gone);
             self.selected.clear();

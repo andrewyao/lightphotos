@@ -23,9 +23,10 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
         egui::Panel::bottom("filmstrip")
             .exact_size(strip_h)
             .show_inside(ui, |ui| {
-                let cell = strip_h - 16.0;
-                let cell_full = cell + ui.spacing().item_spacing.x;
-                let len = app.visible_len();
+                // Every cell is this tall and as wide as its photo's shape.
+                let cell_h = strip_h - 16.0;
+                let layout =
+                    app.strip_layout(cell_h, STRIP_CELL_STYLE.corner, ui.spacing().item_spacing.x);
 
                 // egui's horizontal ScrollArea ignores a vertical mouse wheel,
                 // so read the vertical delta here and step through photos.
@@ -57,11 +58,9 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
                         const EDGE_MARGIN: usize = 1;
                         let near_edge =
                             sel < first.saturating_add(EDGE_MARGIN) || sel + EDGE_MARGIN >= last;
-                        if near_edge {
-                            let max_scroll =
-                                (len as f32 * cell_full - ui.available_width()).max(0.0);
-                            let target = (sel as f32 * cell_full + cell_full * 0.5
-                                - ui.available_width() * 0.5)
+                        if let (true, Some((left, size))) = (near_edge, layout.cell(sel)) {
+                            let max_scroll = (layout.total_width() - ui.available_width()).max(0.0);
+                            let target = (left + size.x * 0.5 - ui.available_width() * 0.5)
                                 .clamp(0.0, max_scroll);
                             ui.ctx().data_mut(|d| d.insert_temp(target_id, target));
                         }
@@ -78,17 +77,19 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
                     }
                 }
                 area.show_viewport(ui, |ui, viewport| {
-                    let first = (viewport.min.x / cell_full).floor().max(0.0) as usize;
-                    let last = ((viewport.max.x / cell_full).ceil() as usize).min(len);
+                    let (first, last) = layout.range_in(viewport.min.x, viewport.max.x);
                     app.set_visible_strip_range(first, last);
 
                     ui.horizontal(|ui| {
                         // Spacers keep the full content width for the scrollbar.
-                        ui.add_space(first as f32 * cell_full);
+                        let edge = |pos| layout.cell(pos).map_or(layout.total_width(), |c| c.0);
+                        ui.add_space(edge(first));
                         for pos in first..last {
-                            filmstrip_cell(ui, app, pos, cell, sel, out);
+                            if let Some((_, size)) = layout.cell(pos) {
+                                filmstrip_cell(ui, app, pos, size, sel, out);
+                            }
                         }
-                        ui.add_space(len.saturating_sub(last) as f32 * cell_full);
+                        ui.add_space(layout.total_width() - edge(last));
                     });
                 });
 
@@ -970,11 +971,11 @@ fn filmstrip_cell(
     ui: &mut egui::Ui,
     app: &mut App,
     pos: usize,
-    cell: f32,
+    size: egui::Vec2,
     sel: Option<usize>,
     out: &mut FrameOutput,
 ) {
-    let response = thumbnail_cell(ui, app, pos, cell, sel, &STRIP_CELL_STYLE, &mut out.actions);
+    let response = thumbnail_cell(ui, app, pos, size, sel, &STRIP_CELL_STYLE, &mut out.actions);
     if response.clicked() {
         out.actions.push(click_action(ui, pos));
         out.actions.push(UiAction::Focus(Region::Filmstrip));

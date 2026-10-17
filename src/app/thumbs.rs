@@ -381,6 +381,9 @@ impl App {
                         height: img.height,
                         sig: *sig,
                     };
+                    if remember_aspect(&mut self.thumb_aspect, path, img.width, img.height) {
+                        self.strip_layout = None;
+                    }
                     if let Some(old) = self.thumb_tex.insert(key, tex) {
                         renderer.free_thumb(old.id);
                     }
@@ -407,6 +410,9 @@ impl App {
                     height: baked.height,
                     sig: baked.sig,
                 };
+                if remember_aspect(&mut self.thumb_aspect, &key.0, baked.width, baked.height) {
+                    self.strip_layout = None;
+                }
                 if let Some(old) = self.thumb_tex.insert(key, tex) {
                     renderer.free_thumb(old.id);
                 }
@@ -424,6 +430,20 @@ impl App {
             false
         });
     }
+}
+
+/// Record `path`'s thumbnail shape. Returns whether it changed, which moves
+/// filmstrip cells.
+fn remember_aspect(aspects: &mut HashMap<PathBuf, f32>, path: &Path, w: u32, h: u32) -> bool {
+    if h == 0 {
+        return false;
+    }
+    let aspect = w as f32 / h as f32;
+    if aspects.get(path) == Some(&aspect) {
+        return false;
+    }
+    aspects.insert(path.to_path_buf(), aspect);
+    true
 }
 
 /// The grid's working set: `grid_range` plus three rows either side.
@@ -456,6 +476,91 @@ pub(crate) fn strip_working_range(
     start..end.max(start)
 }
 
+/// Width over height of a filmstrip cell whose thumbnail hasn't loaded yet:
+/// 3:2, the shape most cameras shoot.
+const DEFAULT_STRIP_ASPECT: f32 = 1.5;
+
+/// The narrowest and widest a filmstrip cell gets, as width over height, so
+/// a panorama can't fill the strip.
+const STRIP_ASPECT_RANGE: (f32, f32) = (0.4, 3.0);
+
+/// Where each filmstrip cell sits. Every cell is `cell_h` tall and as wide as
+/// its thumbnail's aspect ratio needs, so the cells can't be found by
+/// multiplying a position by a fixed width.
+pub(crate) struct StripLayout {
+    cell_h: f32,
+    inset: f32,
+    spacing: f32,
+    /// Left edge of each cell, then the strip's total width. Never empty.
+    edges: Vec<f32>,
+}
+
+impl StripLayout {
+    /// `aspects` gives each cell's thumbnail width over height, `None` where
+    /// it hasn't loaded. `inset` is the margin inside a cell around the
+    /// thumbnail and `spacing` the gap after each cell.
+    pub(crate) fn new(
+        aspects: impl Iterator<Item = Option<f32>>,
+        cell_h: f32,
+        inset: f32,
+        spacing: f32,
+    ) -> Self {
+        let image_h = (cell_h - 2.0 * inset).max(0.0);
+        let mut edges = vec![0.0];
+        let mut x = 0.0;
+        for aspect in aspects {
+            let aspect = match aspect {
+                Some(a) if a.is_finite() => a.clamp(STRIP_ASPECT_RANGE.0, STRIP_ASPECT_RANGE.1),
+                _ => DEFAULT_STRIP_ASPECT,
+            };
+            x += image_h * aspect + 2.0 * inset + spacing;
+            edges.push(x);
+        }
+        Self {
+            cell_h,
+            inset,
+            spacing,
+            edges,
+        }
+    }
+
+    pub(super) fn built_for(&self, len: usize, cell_h: f32, inset: f32, spacing: f32) -> bool {
+        self.edges.len() == len + 1
+            && self.cell_h == cell_h
+            && self.inset == inset
+            && self.spacing == spacing
+    }
+
+    fn len(&self) -> usize {
+        self.edges.len().saturating_sub(1)
+    }
+
+    /// The width of every cell and the gaps between them.
+    pub(crate) fn total_width(&self) -> f32 {
+        self.edges.last().copied().unwrap_or(0.0)
+    }
+
+    /// The cell at `pos` as `(left, size)`, without the gap after it.
+    pub(crate) fn cell(&self, pos: usize) -> Option<(f32, egui::Vec2)> {
+        let left = *self.edges.get(pos)?;
+        let right = *self.edges.get(pos + 1)?;
+        let w = (right - left - self.spacing).max(0.0);
+        Some((left, egui::vec2(w, self.cell_h)))
+    }
+
+    /// The cells `[start, end)` that overlap `left..right`.
+    pub(crate) fn range_in(&self, left: f32, right: f32) -> (usize, usize) {
+        // The first cell whose right edge (with its gap) is past `left`.
+        let start = self
+            .edges
+            .get(1..)
+            .map_or(0, |right_edges| right_edges.partition_point(|&e| e <= left));
+        let end = self.edges.partition_point(|&e| e < right);
+        let len = self.len();
+        (start.min(len), end.clamp(start.min(len), len))
+    }
+}
+
 /// `working` in the order its thumbnails should load: `sel` first, then
 /// `visible` top to bottom, then the margin after it, then the margin before
 /// it nearest first. Every position of `working` appears exactly once.
@@ -481,7 +586,7 @@ pub(crate) fn load_order(
 
 #[cfg(test)]
 mod tests {
-    use super::{grid_working_range, load_order, strip_working_range};
+    use super::{grid_working_range, load_order, strip_working_range, StripLayout};
     use crate::jobs::loader::Loader;
     use std::path::PathBuf;
 
@@ -578,5 +683,44 @@ mod tests {
         assert_eq!(queued[0], photos[550]);
         assert_eq!(queued.len(), 25);
         assert!(queued.iter().all(|p| photos[538..563].contains(p)));
+    }
+
+    /// Cells 100 tall with no inset or gap, so each is 100 × its aspect wide.
+    fn layout(aspects: &[Option<f32>]) -> StripLayout {
+        StripLayout::new(aspects.iter().copied(), 100.0, 0.0, 0.0)
+    }
+
+    #[test]
+    fn strip_cells_share_a_height_and_take_their_width_from_the_aspect() {
+        let strip = StripLayout::new([Some(1.5), Some(0.75)].into_iter(), 110.0, 5.0, 4.0);
+        assert_eq!(strip.cell(0), Some((0.0, egui::vec2(160.0, 110.0))));
+        assert_eq!(strip.cell(1), Some((164.0, egui::vec2(85.0, 110.0))));
+        assert_eq!(strip.cell(2), None);
+        assert_eq!(strip.total_width(), 253.0);
+    }
+
+    #[test]
+    fn a_strip_cell_with_no_thumbnail_or_a_bad_aspect_gets_a_sane_width() {
+        let strip = layout(&[
+            None,
+            Some(f32::NAN),
+            Some(0.0),
+            Some(f32::INFINITY),
+            Some(50.0),
+        ]);
+        let widths: Vec<f32> = (0..5).map(|p| strip.cell(p).unwrap().1.x).collect();
+        assert_eq!(widths, [150.0, 150.0, 40.0, 150.0, 300.0]);
+    }
+
+    #[test]
+    fn the_strip_range_covers_every_cell_the_viewport_touches() {
+        // Edges at 0, 150, 225, 375.
+        let strip = layout(&[Some(1.5), Some(0.75), Some(1.5)]);
+        assert_eq!(strip.range_in(0.0, 150.0), (0, 1));
+        assert_eq!(strip.range_in(149.0, 151.0), (0, 2));
+        assert_eq!(strip.range_in(150.0, 225.0), (1, 2));
+        assert_eq!(strip.range_in(200.0, 10_000.0), (1, 3));
+        assert_eq!(strip.range_in(10_000.0, 20_000.0), (3, 3));
+        assert_eq!(layout(&[]).range_in(0.0, 500.0), (0, 0));
     }
 }

@@ -122,6 +122,7 @@ impl App {
         }
         let Some(pl) = &self.playlist else {
             self.visible.clear();
+            self.strip_layout = None;
             self.visible_in_order = true;
             self.shown_photos = 0;
             self.sel = None;
@@ -266,6 +267,7 @@ impl App {
         }
         self.visible_in_order = in_name_order || visible.is_sorted();
         self.visible = visible;
+        self.strip_layout = None;
         if reorder == Reorder::Sort {
             self.sorted_revision = self.folder_store.sort_revision();
         }
@@ -1877,6 +1879,33 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Filmstrip cells share one height and take their width from the photo,
+    /// so a landscape cell is wider than a portrait one.
+    #[test]
+    fn filmstrip_cells_are_one_height_and_as_wide_as_the_photo() {
+        use crate::app::test_support::settled;
+        let (mut app, dir, paths) = folder_app("nav-strip-aspect", 3);
+        app.thumb_aspect.insert(paths[0].clone(), 3.0 / 2.0);
+        app.thumb_aspect.insert(paths[1].clone(), 2.0 / 3.0);
+        app.strip_layout = None;
+        app.select_single(0);
+        app.enter_loupe();
+        let _ = settled(&mut app);
+
+        let landscape = app.cell_rect(0).expect("the landscape cell is drawn");
+        let portrait = app.cell_rect(1).expect("the portrait cell is drawn");
+        assert_eq!(landscape.height(), portrait.height());
+        assert!(
+            landscape.width() > 2.0 * portrait.width(),
+            "landscape {landscape:?} vs portrait {portrait:?}"
+        );
+        assert!(
+            portrait.left() > landscape.right(),
+            "the cells don't overlap"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Cmd-click and Shift-click in the filmstrip build a multi-selection, the
     /// Loupe shows the photo clicked last, and the strip outlines every
     /// selected cell.
@@ -1887,26 +1916,26 @@ pub(in crate::app) mod tests {
         app.select_single(0);
         app.enter_loupe();
 
-        click_strip_cell(&mut app, 2, egui::Modifiers::COMMAND);
-        assert_eq!(app.selected_cells(), vec![0, 2]);
-        assert_eq!(app.selected_path().as_ref(), Some(&paths[2]));
+        click_strip_cell(&mut app, 1, egui::Modifiers::COMMAND);
+        assert_eq!(app.selected_cells(), vec![0, 1]);
+        assert_eq!(app.selected_path().as_ref(), Some(&paths[1]));
 
-        click_strip_cell(&mut app, 4, egui::Modifiers::SHIFT);
+        click_strip_cell(&mut app, 3, egui::Modifiers::SHIFT);
         assert_eq!(
             app.selected_cells(),
-            vec![2, 3, 4],
+            vec![1, 2, 3],
             "the range runs from the last Cmd-click"
         );
-        assert_eq!(app.selected_path().as_ref(), Some(&paths[4]));
+        assert_eq!(app.selected_path().as_ref(), Some(&paths[3]));
         assert_eq!(
             app.selected_paths(),
-            paths[2..5].to_vec(),
+            paths[1..4].to_vec(),
             "bulk actions act on the range"
         );
 
         let selection = crate::ui::theme::colors(&app.egui_ctx).selection;
         let outlined = settled(&mut app).outlined(selection);
-        for pos in [2, 3, 4] {
+        for pos in [1, 2, 3] {
             let cell = app.cell_rect(pos).unwrap();
             assert!(
                 outlined.contains(&cell),
@@ -1915,10 +1944,10 @@ pub(in crate::app) mod tests {
         }
         assert!(!outlined.contains(&app.cell_rect(0).unwrap()));
 
-        click_strip_cell(&mut app, 6, egui::Modifiers::NONE);
+        click_strip_cell(&mut app, 4, egui::Modifiers::NONE);
         assert_eq!(
             app.selected_cells(),
-            vec![6],
+            vec![4],
             "a plain click collapses the selection"
         );
         let _ = std::fs::remove_dir_all(&dir);
