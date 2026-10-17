@@ -72,13 +72,6 @@ impl App {
     /// place of the lit one. Leaving a Develop page ends its tool the way
     /// switching pages does: a crop is kept and the brush is put down.
     pub(super) fn click_rail(&mut self, item: RailItem) {
-        // A page open behind the full-screen view is shown, not turned off.
-        if self.fullscreen_shown() {
-            self.exit_fullscreen();
-            if self.rail_lit() == Some(item) {
-                return;
-            }
-        }
         if self.mode == ViewMode::Grid && !item.in_grid() {
             return;
         }
@@ -133,9 +126,6 @@ impl App {
     /// opened in the Loupe from the Grid. Unlike the rail icon, a second
     /// press leaves them open.
     pub(super) fn open_develop(&mut self) {
-        // Develop may already be open behind the full-screen view, where
-        // this would change nothing `sync_fullscreen` could see.
-        self.exit_fullscreen();
         let sliders = RailItem::Develop(DevelopTab::Sliders);
         if self.mode != ViewMode::Loupe {
             self.enter_loupe();
@@ -178,7 +168,6 @@ impl App {
     /// Brings Develop back in front of Presets or Info, for a key that
     /// starts one of its tools.
     pub(super) fn reveal_develop(&mut self) {
-        self.exit_fullscreen();
         self.develop_open = true;
         self.side_page = SidePage::Develop;
     }

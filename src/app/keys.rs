@@ -191,14 +191,6 @@ impl App {
             return;
         }
 
-        // Entering the full-screen view put the tools above away, so past
-        // the dialogs Esc leaves it before the export form or focus behind
-        // it can take the key.
-        if code == KeyCode::Escape && self.fullscreen_shown() {
-            self.exit_fullscreen();
-            return;
-        }
-
         // While the export form is open, Enter runs it and Escape closes it.
         // Other keys still act, so the selection can change under the form.
         if self.export_form_open() {
@@ -233,6 +225,13 @@ impl App {
         if self.show_help && code == KeyCode::Escape {
             self.show_help = false;
             self.request_redraw();
+            return;
+        }
+
+        // Past the dialogs shown over the view, Esc leaves it before focus
+        // can take the key.
+        if code == KeyCode::Escape && self.fullscreen_shown() {
+            self.exit_fullscreen(super::fullscreen::Leave::App);
             return;
         }
 
@@ -838,6 +837,7 @@ mod tests {
         press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
         press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
         press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        app.sync_fullscreen();
         assert!(!app.fullscreen_shown());
         assert!(app.info_open(), "I shows the Info page it was hiding");
 
@@ -881,9 +881,100 @@ mod tests {
         let cmd_shift = ModifiersState::SUPER | ModifiersState::SHIFT;
         press(&mut app, cmd_shift, KeyCode::KeyE);
         press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        assert!(!app.export_form_open(), "the view hides the form");
+        press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+        assert!(!app.export_running(), "Enter ran a hidden export");
         press(&mut app, ModifiersState::empty(), KeyCode::Escape);
         assert!(!app.fullscreen_shown(), "the export form took Esc");
+        assert!(app.export_form_open(), "leaving shows the form again");
+    }
+
+    #[test]
+    fn a_panel_opened_in_full_screen_keeps_what_it_covers() {
+        let cmd_shift = ModifiersState::SUPER | ModifiersState::SHIFT;
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, cmd_shift, KeyCode::KeyE);
+        app.sync_fullscreen();
+        assert!(!app.fullscreen_shown());
         assert!(app.export_form_open());
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(
+            app.develop_page_shown().is_some(),
+            "closing the form shows the Develop page under it"
+        );
+
+        let (mut app, _) = editor_app();
+        app.side_page = SidePage::Info;
+        press(&mut app, cmd_shift, KeyCode::KeyE);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyD);
+        app.sync_fullscreen();
+        assert!(!app.export_form_open(), "the form covers the page D opened");
+        assert!(app.develop_page_shown().is_some(), "Info took D's place");
+    }
+
+    #[test]
+    fn enter_leaves_focus_on_the_photo_when_develop_is_hidden() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        let before = app.current_adjustments();
+        press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+        assert_eq!(app.focus, Region::Detail);
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowRight);
+        assert_eq!(app.current_adjustments(), before, "a hidden slider moved");
+        assert_eq!(app.sel, Some(1));
+    }
+
+    #[test]
+    fn esc_closes_a_dialog_over_full_screen_first() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, ModifiersState::SUPER, KeyCode::Comma);
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(!app.show_settings);
+        assert!(app.fullscreen_shown(), "Esc left the view under Settings");
+
+        press(&mut app, ModifiersState::SHIFT, KeyCode::Slash);
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(!app.show_help);
+        assert!(app.fullscreen_shown(), "Esc left the view under Help");
+    }
+
+    #[test]
+    fn view_loupe_in_full_screen_brings_back_develop() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        app.enter_loupe();
+        app.sync_fullscreen();
+        assert!(!app.fullscreen_shown());
+        assert!(app.develop_page_shown().is_some());
+    }
+
+    #[test]
+    fn leaving_full_screen_keeps_focus_as_if_it_never_opened() {
+        let (mut app, _) = editor_app();
+        app.focus = Region::Develop;
+        app.focus_level = FocusLevel::Entered;
+        app.develop_focus = 3;
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        assert_eq!(app.focus, Region::Develop);
+        assert_eq!(app.develop_focus, 3, "the Develop cursor went home");
+
+        // D from the view keeps focus where D outside it would.
+        let d_focus = |full_screen: bool| {
+            let (mut app, _) = editor_app();
+            app.focus = Region::Filmstrip;
+            app.focus_level = FocusLevel::Entered;
+            if full_screen {
+                press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+            }
+            press(&mut app, ModifiersState::empty(), KeyCode::KeyD);
+            app.sync_fullscreen();
+            (app.focus, app.focus_level)
+        };
+        assert_eq!(d_focus(true), d_focus(false));
     }
 
     #[test]
@@ -907,10 +998,12 @@ mod tests {
         let (mut app, _) = editor_app();
         app.enter_crop();
         assert!(app.cropping());
+        let saved = app.current_adjustments();
         // Crop owns the keys, so only the title's button gets here.
         app.toggle_fullscreen();
-        assert!(app.fullscreen_shown());
-        assert!(!app.cropping(), "the crop is kept and its handles go");
+        assert!(!app.fullscreen_shown(), "Crop keeps the Loupe");
+        assert!(app.cropping());
+        assert_eq!(app.current_adjustments(), saved, "the draft was saved");
 
         let (mut app, _) = editor_app();
         app.develop_tab = DevelopTab::Masks;
@@ -929,6 +1022,7 @@ mod tests {
         press(&mut app, cmd_shift, KeyCode::KeyE);
         press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
         press(&mut app, cmd_shift, KeyCode::KeyE);
+        app.sync_fullscreen();
         assert!(!app.fullscreen_shown());
         assert!(
             app.export_form_open(),

@@ -1109,6 +1109,23 @@ mod tests {
     }
 
     #[test]
+    fn compare_opened_in_full_screen_stays_in_front() {
+        use crate::app::{RailItem, SidePage};
+        let (mut app, dir, _) = grouped_loupe("fullscreen-compare");
+        app.side_page = SidePage::Info;
+        app.toggle_fullscreen();
+        act(&mut app, UiAction::ClickRail(RailItem::GroupCompare));
+        app.sync_fullscreen();
+        assert!(!app.fullscreen_shown());
+        assert_eq!(
+            app.rail_lit(),
+            Some(RailItem::GroupCompare),
+            "Info came back over it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn compare_takes_develops_place_on_the_rail_and_needs_a_group() {
         use crate::app::{DevelopTab, RailItem};
         let (mut app, dir, _) = grouped_loupe("rail-compare");

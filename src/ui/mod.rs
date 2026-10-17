@@ -571,10 +571,12 @@ fn loupe_title(ui: &mut egui::Ui, app: &App, folder: String, out: &mut FrameOutp
     // signal bars and the dimensions before it.
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.add_space(gap);
-        if fullscreen_button(ui, size).clicked() {
-            out.actions.push(UiAction::ToggleFullscreen);
+        if app.fullscreen_available() {
+            if fullscreen_button(ui, size).clicked() {
+                out.actions.push(UiAction::ToggleFullscreen);
+            }
+            ui.add_space(2.0 * gap);
         }
-        ui.add_space(2.0 * gap);
         if let Some(tier) = app.shown_tier() {
             shown_tier_bars(ui, tier, size);
             ui.add_space(2.0 * gap);

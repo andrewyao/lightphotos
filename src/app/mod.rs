@@ -435,8 +435,8 @@ pub(crate) type SignalLoad = (
 
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
-    /// The Loupe's full-screen view.
-    fullscreen: fullscreen::Fullscreen,
+    /// The Loupe's full-screen view, while it is on.
+    fullscreen: Option<fullscreen::Shown>,
     pub(crate) renderer: Option<Renderer>,
     /// Group compare's pane: its tiles, zoom square, view and picks.
     group_compare: group_compare::GroupCompare,
@@ -890,7 +890,7 @@ impl App {
         };
         let mut app = Self {
             window: None,
-            fullscreen: fullscreen::Fullscreen::Off,
+            fullscreen: None,
             renderer: None,
             #[cfg(test)]
             pushed_adj: None,
@@ -1166,9 +1166,14 @@ impl App {
     /// captured by a mode meant for the previous image.
     fn teardown_loupe_state(&mut self) {
         self.abandon_crop_draft();
+        self.put_down_loupe_tool();
+        self.mask_selected = None;
+    }
+
+    /// Puts down the brush, the pickers and Touch Up.
+    fn put_down_loupe_tool(&mut self) {
         self.tool = LoupeTool::None;
         self.touchup_selected = None;
-        self.mask_selected = None;
     }
 
     /// List `dir`'s subfolders into `subdirs` if not cached. Async on wasm32.

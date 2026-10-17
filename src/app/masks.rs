@@ -330,10 +330,9 @@ impl App {
     }
 
     /// Whether the Loupe shows the mask overlay: the Masks page is open and
-    /// Touch Up, compare and the full-screen view aren't using the photo.
+    /// Touch Up and compare aren't using the photo.
     pub(crate) fn masks_shown(&self) -> bool {
         self.mode == ViewMode::Loupe
-            && !self.fullscreen_shown()
             && self.develop_open
             && self.develop_tab == DevelopTab::Masks
             && !self.touchup_active()

@@ -96,7 +96,7 @@ pub(crate) struct Exports {
     /// What the export form is set to, remembered across launches.
     settings: ExportSettings,
     /// The export form is showing in the right-hand panel.
-    form_open: bool,
+    pub(super) form_open: bool,
     /// `settings` holds typing that has not been saved yet: a text field
     /// saves when it loses focus, not on every keystroke.
     unsaved: bool,
@@ -196,13 +196,9 @@ impl App {
     }
 
     /// Open the export form, or close it if it is showing. Opening it is what
-    /// the toolbar's Export button and `X` do; Export in the form runs it.
+    /// the toolbar's Export button and Cmd-Shift-E do; Export in the form
+    /// runs it.
     pub(super) fn toggle_export_form(&mut self) {
-        // A form open behind the full-screen view is shown, not closed.
-        if self.fullscreen_shown() && self.exports.form_open {
-            self.exit_fullscreen();
-            return;
-        }
         self.save_export_edits();
         self.exports.form_open = !self.exports.form_open;
         if self.exports.form_open {
