@@ -7,7 +7,7 @@ use super::*;
 
 use super::coverage;
 use crate::develop::brush::{self, BrushRaster};
-use crate::develop::mask::{BRUSH_RADIUS_RANGE, MAX_BRUSH_POINTS};
+use crate::develop::mask::{BRUSH_RADIUS_RANGE, MAX_BRUSH_POINTS, STROKE_POINTS};
 use crate::develop::{
     DetectTarget, Mask, MaskInput, MaskSet, MaskShape, RasterId, Stroke, MAX_MASKS,
 };
@@ -76,7 +76,7 @@ pub(crate) struct Painting {
     /// Mask `index`'s raster, stamped a dab at a time as points arrive.
     raster: BrushRaster,
     aspect: f32,
-    /// Points the photo may still take toward `MAX_BRUSH_POINTS`.
+    /// Points this stroke may still take toward `MAX_BRUSH_POINTS`.
     points_left: usize,
 }
 
@@ -487,7 +487,9 @@ impl App {
         let t = crate::i18n::t();
         let mut masks = self.current_masks().to_vec();
         let used: usize = masks.iter().map(Mask::brush_points).sum();
-        let points_left = MAX_BRUSH_POINTS.saturating_sub(used);
+        let points_left = MAX_BRUSH_POINTS
+            .saturating_sub(used)
+            .saturating_sub(STROKE_POINTS);
         if points_left == 0 {
             self.set_status(StatusKind::Error, t.brush_point_limit.into());
             return;
@@ -1100,7 +1102,7 @@ mod tests {
                     feather: 0.5,
                     flow: 1.0,
                     erase: false,
-                    points: vec![[0.5, 0.5]; MAX_BRUSH_POINTS - 2],
+                    points: vec![[0.5, 0.5]; MAX_BRUSH_POINTS - 2 * STROKE_POINTS - 2],
                 };
                 1
             ]

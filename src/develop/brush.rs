@@ -29,7 +29,7 @@ use crate::hash::Fnv1a;
 pub const MAX_BRUSH_TEXELS: usize = 1 << 20;
 
 /// The most texel visits one raster spends on its dabs. A sidecar's strokes
-/// come from whoever supplied the folder, and 20,000 photo-wide dabs would
+/// come from whoever supplied the folder, and 8,000 photo-wide dabs would
 /// otherwise take minutes. Real painting stays far below: a 500-dab stroke
 /// of a tenth of the shorter side visits about 16 million.
 const MAX_STAMP_TEXELS: u64 = 1 << 28;

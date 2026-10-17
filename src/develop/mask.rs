@@ -32,11 +32,16 @@ const COORD_RANGE: std::ops::RangeInclusive<f32> = -10.0..=11.0;
 
 /// The most strokes one brush mask holds.
 pub const MAX_STROKES_PER_MASK: usize = 512;
-/// The most stroke points one photo's brush masks hold between them. With
-/// points thinned to a quarter radius apart and rounded to five decimals,
-/// each takes about 20 bytes of sidecar, so the cap stays well inside
-/// `sidecar::MAX_SIDECAR_BYTES`.
-pub const MAX_BRUSH_POINTS: usize = 20_000;
+/// The most stroke points one photo's brush masks hold between them, each
+/// stroke counting [`STROKE_POINTS`] more for its settings. The sidecar is
+/// pretty-printed JSON, where a point takes about 85 bytes and a stroke's
+/// settings about 250, so a photo at the cap writes under 700 KiB, inside
+/// `sidecar::MAX_SIDECAR_BYTES` with room for the rest of its record. With
+/// points a quarter radius apart that is still some 150 strokes across the
+/// photo.
+pub const MAX_BRUSH_POINTS: usize = 8_000;
+/// What one stroke's own settings weigh against [`MAX_BRUSH_POINTS`].
+pub const STROKE_POINTS: usize = 3;
 /// The smallest and largest brush radius, as a fraction of the photo's
 /// shorter side.
 pub const BRUSH_RADIUS_RANGE: std::ops::RangeInclusive<f32> = 1e-3..=1.0;
@@ -302,10 +307,12 @@ impl Mask {
         }
     }
 
-    /// How many stroke points this mask holds, toward [`MAX_BRUSH_POINTS`].
+    /// What this mask's strokes weigh toward [`MAX_BRUSH_POINTS`]: their
+    /// points, and [`STROKE_POINTS`] for each.
     pub fn brush_points(&self) -> usize {
-        self.strokes()
-            .map_or(0, |s| s.iter().map(|s| s.points.len()).sum())
+        self.strokes().map_or(0, |s| {
+            s.iter().map(|s| s.points.len() + STROKE_POINTS).sum()
+        })
     }
 
     /// This mask with every number in range, or `None` if one isn't a
@@ -314,11 +321,11 @@ impl Mask {
         self.sanitized_within(&mut { MAX_BRUSH_POINTS })
     }
 
-    /// [`sanitized`](Self::sanitized), keeping at most `points_left` brush
-    /// points and taking those kept from it, so a photo's masks share one
-    /// [`MAX_BRUSH_POINTS`]. A stroke whose settings aren't numbers is
-    /// dropped, as is a point that isn't; strokes and points past a cap are
-    /// cut.
+    /// [`sanitized`](Self::sanitized), keeping at most `points_left` of
+    /// [`brush_points`](Self::brush_points) and taking those kept from it,
+    /// so a photo's masks share one [`MAX_BRUSH_POINTS`]. A stroke whose
+    /// settings aren't numbers is dropped, as is a point that isn't; strokes
+    /// and points past a cap are cut.
     pub fn sanitized_within(self, points_left: &mut usize) -> Option<Mask> {
         let point = |p: [f32; 2]| {
             p.iter()
@@ -334,8 +341,9 @@ impl Mask {
                     .iter()
                     .take(MAX_STROKES_PER_MASK)
                     .filter_map(|s| {
-                        let stroke = s.sanitized(*points_left)?;
-                        *points_left = points_left.saturating_sub(stroke.points.len());
+                        let room = points_left.checked_sub(STROKE_POINTS)?;
+                        let stroke = s.sanitized(room)?;
+                        *points_left = room.saturating_sub(stroke.points.len());
                         Some(stroke)
                     })
                     .collect(),
@@ -1055,7 +1063,7 @@ mod tests {
             r#"{"shape":{"kind":"brush","strokes":[{"radius":0.1,"feather":0.5,"flow":1.0,"points":[[0.1,0.2],[0.3,0.4]]},{"radius":0.1,"feather":0.5,"flow":1.0,"erase":true,"points":[[0.5,0.5]]}]}}"#
         );
         assert_eq!(serde_json::from_str::<Mask>(&json).unwrap(), m);
-        assert_eq!(m.brush_points(), 3);
+        assert_eq!(m.brush_points(), 3 + 2 * STROKE_POINTS);
         assert_eq!(m.target(), None);
     }
 
@@ -1085,11 +1093,15 @@ mod tests {
             many.sanitized().unwrap().strokes().unwrap().len(),
             MAX_STROKES_PER_MASK
         );
-        let mut left = 5;
+        let mut left = 2 * STROKE_POINTS + 5;
         let long = brush_of(vec![stroke(&[[0.5, 0.5]; 4]); 3]);
         let cut = long.sanitized_within(&mut left).unwrap();
-        assert_eq!(cut.brush_points(), 5, "points past the budget are cut");
-        assert_eq!(cut.strokes().unwrap().len(), 2);
+        assert_eq!(
+            cut.brush_points(),
+            2 * STROKE_POINTS + 5,
+            "points past the budget are cut"
+        );
+        assert_eq!(cut.strokes().unwrap()[1].points.len(), 1);
         assert_eq!(left, 0);
     }
 

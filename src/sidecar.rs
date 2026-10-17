@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn a_sidecar_over_the_brush_point_cap_loads_truncated() {
-        use crate::develop::mask::MAX_BRUSH_POINTS;
+        use crate::develop::mask::{MAX_BRUSH_POINTS, STROKE_POINTS};
         let points = vec!["[0.5,0.5]"; MAX_BRUSH_POINTS / 2 + 10].join(",");
         let mask = format!(
             r#"{{"shape":{{"kind":"brush","strokes":[{{"radius":0.05,"feather":0.5,"flow":1,"points":[{points}]}}]}}}}"#
@@ -697,13 +697,62 @@ mod tests {
         let rec = parse_record(body.as_bytes(), || None).unwrap();
         let total: usize = rec.masks.iter().map(Mask::brush_points).sum();
         assert_eq!(total, MAX_BRUSH_POINTS);
-        assert_eq!(rec.masks[0].brush_points(), MAX_BRUSH_POINTS / 2 + 10);
+        assert_eq!(
+            rec.masks[0].brush_points(),
+            MAX_BRUSH_POINTS / 2 + 10 + STROKE_POINTS
+        );
         assert_eq!(
             rec.masks.len(),
             3,
             "the last keeps its amounts, if no strokes"
         );
         assert!(rec.masks[2].strokes().unwrap().is_empty());
+    }
+
+    /// The defect: the point cap once let a photo's strokes write a sidecar
+    /// past `MAX_SIDECAR_BYTES`, which the next read refuses whole, rating
+    /// and all. Both ways to spend the cap must still read back.
+    #[test]
+    fn a_sidecar_at_the_brush_cap_writes_under_the_size_limit() {
+        use crate::develop::mask::{MAX_BRUSH_POINTS, STROKE_POINTS};
+        use crate::develop::{MaskShape, Stroke};
+        let stroke = |n: usize| Stroke {
+            radius: 0.12345,
+            feather: 0.12345,
+            flow: 0.12345,
+            erase: true,
+            points: vec![[-9.12345, -9.12345]; n],
+        };
+        let brush = |strokes: Vec<Stroke>| {
+            let mut m = Mask::brush();
+            m.shape = MaskShape::Brush {
+                strokes: strokes.into(),
+            };
+            m.amounts.exposure = -1.2345;
+            m
+        };
+        let singles = MAX_BRUSH_POINTS / (1 + STROKE_POINTS);
+        for masks in [
+            vec![brush(vec![stroke(MAX_BRUSH_POINTS - STROKE_POINTS)])],
+            (0..MAX_MASKS)
+                .map(|_| brush(vec![stroke(1); singles / MAX_MASKS]))
+                .collect(),
+        ] {
+            let rec = ImageRecord {
+                rating: Some(5),
+                masks: masks.into(),
+                ..ImageRecord::default()
+            };
+            let total: usize = rec.masks.iter().map(Mask::brush_points).sum();
+            assert!(total <= MAX_BRUSH_POINTS);
+            let bytes = serde_json::to_vec_pretty(&rec).unwrap();
+            assert!(
+                bytes.len() < MAX_SIDECAR_BYTES * 3 / 4,
+                "{} bytes",
+                bytes.len()
+            );
+            assert_eq!(parse_record(&bytes, || None).unwrap().masks, rec.masks);
+        }
     }
 
     #[test]
