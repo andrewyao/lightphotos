@@ -7,7 +7,9 @@ use super::*;
 
 use super::coverage;
 use crate::develop::brush::{self, BrushRaster};
-use crate::develop::mask::{BRUSH_RADIUS_RANGE, MAX_BRUSH_POINTS, STROKE_POINTS};
+use crate::develop::mask::{
+    BRUSH_RADIUS_RANGE, MAX_BRUSH_POINTS, MAX_STROKES_PER_MASK, STROKE_POINTS,
+};
 use crate::develop::{
     DetectTarget, Mask, MaskInput, MaskSet, MaskShape, RasterId, Stroke, MAX_MASKS,
 };
@@ -78,6 +80,17 @@ pub(crate) struct Painting {
     aspect: f32,
     /// Points this stroke may still take toward `MAX_BRUSH_POINTS`.
     points_left: usize,
+    /// The point limit was reported, so a drag past it says so once.
+    capped: bool,
+}
+
+/// The last stroke's raster, still in floats, with the strokes it holds.
+/// The next stroke on that mask starts from it instead of re-stamping every
+/// stroke before it.
+pub(crate) struct KeptRaster {
+    strokes: Arc<[Stroke]>,
+    aspect: f32,
+    raster: BrushRaster,
 }
 
 impl Painting {
@@ -507,6 +520,14 @@ impl App {
         let picked = self
             .selected_mask()
             .filter(|&i| masks.get(i).is_some_and(|m| m.strokes().is_some()));
+        let full = picked
+            .and_then(|i| masks.get(i))
+            .and_then(Mask::strokes)
+            .is_some_and(|s| s.len() >= MAX_STROKES_PER_MASK);
+        if full {
+            self.set_status(StatusKind::Error, t.brush_stroke_limit.into());
+            return;
+        }
         let index = match picked {
             Some(i) => i,
             None if masks.len() >= MAX_MASKS => {
@@ -534,15 +555,20 @@ impl App {
             points: Vec::new(),
         };
         brush::push_point(&mut stroke, uv, aspect);
+        let raster = match self.kept_raster.take() {
+            Some(k) if Arc::ptr_eq(&k.strokes, &before) && k.aspect == aspect => k.raster,
+            _ => BrushRaster::of(&before, aspect),
+        };
         let mut painting = Painting {
             path,
             masks,
             index,
-            raster: BrushRaster::of(&before, aspect),
+            raster,
             before,
             stroke,
             aspect,
             points_left,
+            capped: false,
         };
         painting.stamp_from(0);
         self.painting = Some(painting);
@@ -563,8 +589,10 @@ impl App {
             return;
         };
         if p.stroke.points.len() >= p.points_left {
-            let t = crate::i18n::t();
-            self.set_status(StatusKind::Error, t.brush_point_limit.into());
+            if !std::mem::replace(&mut p.capped, true) {
+                let t = crate::i18n::t();
+                self.set_status(StatusKind::Error, t.brush_point_limit.into());
+            }
             return;
         }
         if brush::push_point(&mut p.stroke, uv, p.aspect) {
@@ -588,6 +616,13 @@ impl App {
             }
         }
         let index = p.index;
+        if let Some(strokes) = p.masks.get(index).and_then(Mask::strokes) {
+            self.kept_raster = Some(KeptRaster {
+                strokes: Arc::clone(strokes),
+                aspect: p.aspect,
+                raster: p.raster,
+            });
+        }
         self.put_masks(&p.path, p.masks);
         if self.shown.path() == Some(p.path.as_path()) {
             self.mask_selected = Some(index);
@@ -1036,6 +1071,40 @@ mod tests {
             app.extend_stroke(*p);
         }
         app.end_stroke(points.last().copied());
+    }
+
+    /// The defect: strokes past `MAX_STROKES_PER_MASK` were painted and
+    /// saved, then cut on the next load, changing the mask.
+    #[test]
+    fn a_full_brush_mask_refuses_another_stroke() {
+        let (mut app, dir, _) = brushing("brush-stroke-cap", 1);
+        paint(&mut app, &[[0.5, 0.5]]);
+        let one = app.current_masks()[0].strokes().unwrap()[0].clone();
+        let mut full = app.current_masks()[0].clone();
+        full.shape = MaskShape::Brush {
+            strokes: vec![one; MAX_STROKES_PER_MASK].into(),
+        };
+        app.set_mask(0, full.clone());
+        paint(&mut app, &[[0.2, 0.2], [0.3, 0.3]]);
+        assert!(!app.painting());
+        assert_eq!(app.current_masks(), &[full]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stroke_painted_on_the_last_one_matches_painting_them_all_at_once() {
+        let (mut app, dir, _) = brushing("brush-kept", 1);
+        paint(&mut app, &[[0.2, 0.5], [0.6, 0.5]]);
+        paint(&mut app, &[[0.4, 0.2], [0.4, 0.8]]);
+        app.begin_stroke([0.3, 0.3], true);
+        app.end_stroke(Some([0.5, 0.6]));
+        let strokes = app.current_masks()[0].strokes().unwrap().clone();
+        assert_eq!(strokes.len(), 3);
+        let (w, h) = app.image_size();
+        let shown = brush::coverage(&strokes, w / h);
+        let fresh = BrushRaster::of(&strokes, w / h).coverage();
+        assert_eq!(shown.id(), fresh.id());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::develop::copy::{CopyItem, CopyItems};
 use crate::develop::{
-    mask::MAX_BRUSH_POINTS, Adjustments, Crop, LocalAmounts, Mask, MaskShape, SliderId, Straighten,
-    MAX_MASKS, SLIDERS, STRAIGHTEN_RANGE,
+    mask::{MAX_BRUSH_POINTS, MAX_STROKES_PER_MASK},
+    Adjustments, Crop, LocalAmounts, Mask, MaskShape, SliderId, Straighten, MAX_MASKS, SLIDERS,
+    STRAIGHTEN_RANGE,
 };
 use crate::export::ExportSettings;
 use crate::sidecar::{ColorLabel, ImageRecord, MAX_RATING};
@@ -741,6 +742,15 @@ fn valid_mask<'a>(
         return Err(CommandError::bad_params(
             id,
             format!("a photo's brush masks hold at most {MAX_BRUSH_POINTS} points"),
+        ));
+    }
+    if mask
+        .strokes()
+        .is_some_and(|s| s.len() > MAX_STROKES_PER_MASK)
+    {
+        return Err(CommandError::bad_params(
+            id,
+            format!("a brush mask holds at most {MAX_STROKES_PER_MASK} strokes"),
         ));
     }
     mask.sanitized()
@@ -1922,6 +1932,16 @@ mod tests {
         let err = on_record(&mut rec, over).unwrap_err();
         assert!(err.to_string().contains("points"), "{err}");
         assert_eq!(rec, before, "a refused add changes nothing");
+
+        let strokes: Vec<_> = (0..=MAX_STROKES_PER_MASK)
+            .map(|_| stroke(json!([[0.5, 0.5]])))
+            .collect();
+        let over = json!({"id": "mask.add", "params": {
+            "shape": {"kind": "brush", "strokes": strokes}
+        }});
+        let err = on_record(&mut rec, over).unwrap_err();
+        assert!(err.to_string().contains("strokes"), "{err}");
+        assert_eq!(rec, before, "nor does one with too many strokes");
     }
 
     #[test]

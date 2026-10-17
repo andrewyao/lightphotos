@@ -28,7 +28,7 @@ pub const RADIUS_RANGE: std::ops::RangeInclusive<f32> = 1e-4..=4.0;
 /// How far off the photo a mask's points may sit, in UV. A gradient may start
 /// or end past an edge; anything further is no different on screen, and the
 /// bound keeps squared distances finite.
-const COORD_RANGE: std::ops::RangeInclusive<f32> = -10.0..=11.0;
+pub(super) const COORD_RANGE: std::ops::RangeInclusive<f32> = -10.0..=11.0;
 
 /// The most strokes one brush mask holds.
 pub const MAX_STROKES_PER_MASK: usize = 512;
@@ -336,8 +336,8 @@ impl Mask {
             return None;
         }
         let shape = match self.shape {
-            MaskShape::Brush { strokes } => MaskShape::Brush {
-                strokes: strokes
+            MaskShape::Brush { strokes } => {
+                let kept: Arc<[Stroke]> = strokes
                     .iter()
                     .take(MAX_STROKES_PER_MASK)
                     .filter_map(|s| {
@@ -346,8 +346,14 @@ impl Mask {
                         *points_left = room.saturating_sub(stroke.points.len());
                         Some(stroke)
                     })
-                    .collect(),
-            },
+                    .collect();
+                // A painted mask that lost every stroke would cover nothing,
+                // or everything when inverted: neither is what was painted.
+                if kept.is_empty() && !strokes.is_empty() {
+                    return None;
+                }
+                MaskShape::Brush { strokes: kept }
+            }
             MaskShape::Linear { start, end } => MaskShape::Linear {
                 start: point(start)?,
                 end: point(end)?,

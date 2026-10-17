@@ -693,7 +693,8 @@ mod tests {
         let mask = format!(
             r#"{{"shape":{{"kind":"brush","strokes":[{{"radius":0.05,"feather":0.5,"flow":1,"points":[{points}]}}]}}}}"#
         );
-        let body = format!(r#"{{"masks":[{mask},{mask},{mask}]}}"#);
+        let inverted = mask.replacen(r#"{"shape""#, r#"{"invert":true,"shape""#, 1);
+        let body = format!(r#"{{"masks":[{mask},{mask},{inverted}]}}"#);
         let rec = parse_record(body.as_bytes(), || None).unwrap();
         let total: usize = rec.masks.iter().map(Mask::brush_points).sum();
         assert_eq!(total, MAX_BRUSH_POINTS);
@@ -701,12 +702,8 @@ mod tests {
             rec.masks[0].brush_points(),
             MAX_BRUSH_POINTS / 2 + 10 + STROKE_POINTS
         );
-        assert_eq!(
-            rec.masks.len(),
-            3,
-            "the last keeps its amounts, if no strokes"
-        );
-        assert!(rec.masks[2].strokes().unwrap().is_empty());
+        // Kept with no strokes, the inverted mask would cover the photo.
+        assert_eq!(rec.masks.len(), 2, "a brush cut to nothing is dropped");
     }
 
     /// The defect: the point cap once let a photo's strokes write a sidecar

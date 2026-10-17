@@ -20,7 +20,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use super::coverage::{Coverage, MAX_COVERAGE_SIDE};
-use super::mask::{falloff, Stroke};
+use super::mask::{falloff, Stroke, COORD_RANGE};
 use crate::hash::Fnv1a;
 
 /// The most texels one brush raster holds: 1024², about 1254x836 on a 3:2
@@ -28,12 +28,14 @@ use crate::hash::Fnv1a;
 /// coverage buffer small; see `coverage::MAX_COVERAGE_BYTES`.
 pub const MAX_BRUSH_TEXELS: usize = 1 << 20;
 
-/// The most texel visits one raster spends on its dabs. A sidecar's strokes
-/// come from whoever supplied the folder, and 8,000 photo-wide dabs, or a
-/// hundred million tiny ones along far-apart points, would otherwise take
-/// minutes. Real painting stays far below: a 500-dab stroke of a tenth of
-/// the shorter side visits about 16 million.
-const MAX_STAMP_TEXELS: u64 = 1 << 28;
+/// The most texel visits one raster spends on all its strokes' dabs. A
+/// sidecar's strokes come from whoever supplied the folder, and 8,000
+/// photo-wide dabs, or a hundred million tiny ones along far-apart points,
+/// would otherwise take minutes; this holds the worst to about a second in
+/// a release build. Real painting stays below: the panel's largest brush,
+/// half the shorter side, visits about 700,000 a dab, so this allows some
+/// 750 of them, sixty sweeps across the photo.
+const MAX_STAMP_TEXELS: u64 = 1 << 29;
 /// What one dab costs against [`MAX_STAMP_TEXELS`] besides its texels, so
 /// a raster places at most 4 million dabs however small they are.
 const DAB_COST: u64 = 64;
@@ -304,11 +306,15 @@ fn remember_key(key: u64, raster: Arc<Coverage>) {
 /// bytes a point and what the Loupe stamps is what is saved. Returns
 /// whether `p` was kept.
 pub fn push_point(stroke: &mut Stroke, p: [f32; 2], aspect: f32) -> bool {
-    let p = p.map(|v| (v * 100_000.0).round() / 100_000.0);
-    if !(p[0].is_finite() && p[1].is_finite()) {
+    let Some(p) = recorded(p) else {
         return false;
-    }
+    };
     if let Some(last) = stroke.points.last() {
+        let aspect = if aspect.is_finite() && aspect > 0.0 {
+            aspect
+        } else {
+            1.0
+        };
         let (sx, sy) = if aspect >= 1.0 {
             (aspect, 1.0)
         } else {
@@ -328,17 +334,29 @@ pub fn push_point(stroke: &mut Stroke, p: [f32; 2], aspect: f32) -> bool {
 /// may have skipped: a stroke always ends where the pointer let go. Returns
 /// whether `p` was added.
 pub fn finish_at(stroke: &mut Stroke, p: [f32; 2]) -> bool {
-    let p = p.map(|v| (v * 100_000.0).round() / 100_000.0);
-    if !(p[0].is_finite() && p[1].is_finite()) || stroke.points.last() == Some(&p) {
+    let Some(p) = recorded(p) else {
+        return false;
+    };
+    if stroke.points.last() == Some(&p) {
         return false;
     }
     stroke.points.push(p);
     true
 }
 
+/// `p` as a stroke records it: rounded to five decimals and held to the
+/// range a sidecar load clamps to, so a stroke reloads as it was painted.
+fn recorded(p: [f32; 2]) -> Option<[f32; 2]> {
+    let (lo, hi) = (*COORD_RANGE.start(), *COORD_RANGE.end());
+    p.iter()
+        .all(|v| v.is_finite())
+        .then(|| p.map(|v| ((v * 100_000.0).round() / 100_000.0).clamp(lo, hi)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::develop::mask::{Mask, MaskShape};
 
     fn stroke(points: &[[f32; 2]]) -> Stroke {
         Stroke {
@@ -465,6 +483,42 @@ mod tests {
     }
 
     #[test]
+    fn a_point_far_off_the_photo_records_as_a_sidecar_reloads_it() {
+        let mut s = stroke(&[]);
+        assert!(push_point(&mut s, [-14.0, 0.5], f32::NAN));
+        assert!(finish_at(&mut s, [0.5, 30.0]));
+        assert_eq!(s.points, vec![[-10.0, 0.5], [0.5, 11.0]]);
+        let reloaded = Mask {
+            shape: MaskShape::Brush {
+                strokes: Arc::from([s.clone()]),
+            },
+            ..Mask::brush()
+        }
+        .sanitized();
+        assert_eq!(
+            reloaded.and_then(|m| m.strokes().cloned()),
+            Some(Arc::from([s]))
+        );
+    }
+
+    #[test]
+    fn an_erase_after_many_sweeps_of_the_largest_brush_still_lands() {
+        let sweep = Stroke {
+            radius: 0.5,
+            ..stroke(&[[0.0, 0.5], [1.0, 0.5]])
+        };
+        let mut strokes = vec![sweep; 40];
+        strokes.push(Stroke {
+            erase: true,
+            ..stroke(&[[0.5, 0.5]])
+        });
+        let r = BrushRaster::of(&strokes, 1.5);
+        assert!(r.budget > 0, "painting this much must not run out");
+        assert_eq!(r.coverage().at_uv([0.5, 0.5]), 0.0, "the erase landed");
+        assert_eq!(r.coverage().at_uv([0.1, 0.5]), 1.0);
+    }
+
+    #[test]
     fn hostile_strokes_are_bounded_and_never_panic() {
         let wild = Stroke {
             radius: 1.0,
@@ -484,7 +538,8 @@ mod tests {
         let start = std::time::Instant::now();
         let r = BrushRaster::of(&[wild], 1.5);
         assert_eq!(r.budget, 0, "the budget ran out");
-        assert!(start.elapsed() < std::time::Duration::from_secs(20));
+        // Generous for a debug build; unbounded work would take minutes.
+        assert!(start.elapsed() < std::time::Duration::from_secs(60));
         // The thinnest brush zigzagging far past the photo's corners: each
         // segment is mostly off the photo, which must cost nothing.
         let thin = Stroke {

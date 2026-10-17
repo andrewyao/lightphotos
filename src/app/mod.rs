@@ -518,6 +518,8 @@ pub(crate) struct App {
     brush: masks::BrushSettings,
     /// The brush stroke from press to release. See `masks::Painting`.
     painting: Option<masks::Painting>,
+    /// See `masks::KeptRaster`.
+    kept_raster: Option<masks::KeptRaster>,
     /// O hides the spot circles in Touch Up to judge the fix unobstructed.
     touchup_spots_hidden: bool,
     /// Per-image spot lists as they were before each Touch Up add or delete,
@@ -933,6 +935,7 @@ impl App {
             mask_selected: None,
             brush: masks::BrushSettings::default(),
             painting: None,
+            kept_raster: None,
             touchup_spots_hidden: false,
             touchup_undo: HashMap::new(),
             develop_open: false,
