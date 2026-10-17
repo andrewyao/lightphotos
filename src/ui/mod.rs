@@ -222,6 +222,15 @@ pub enum UiAction {
     RetryDetection(usize),
     /// Mask `.0` of the shown photo becomes `.1`.
     SetMask(usize, crate::develop::Mask),
+    /// The mask Brush's size, feather, flow and Erase.
+    SetBrush(crate::app::BrushSettings),
+    /// A press on the photo with the Brush armed, at source UV `.0`, with
+    /// Alt held for `.1`: a stroke starts.
+    BrushPress([f32; 2], bool),
+    /// The pointer moved to source UV `.0` while painting.
+    BrushDrag([f32; 2]),
+    /// The pointer let go, at source UV `.0` when it is over the photo.
+    BrushRelease(Option<[f32; 2]>),
     SelectMask(Option<usize>),
     DeleteMask(usize),
     SetAdjustments(Box<Adjustments>),

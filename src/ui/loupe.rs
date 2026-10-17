@@ -222,28 +222,18 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
             if let Some(p) = resp.hover_pos() {
                 // The brush itself is the cursor: a circle the size of the
                 // spot a click would add.
-                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-                let (u, v) = app.loupe_screen_to_source(central, p);
-                let r = touchup_screen_radius(app, central, [u, v], app.touchup_radius()).max(3.0);
                 let painter = ui.painter_at(central);
-                // Dark under light, so the ring reads on bright and dark photos.
-                painter.circle_stroke(
+                let radius = app.touchup_radius();
+                brush_cursor(
+                    ui,
+                    &painter,
+                    app,
+                    central,
                     p,
-                    r,
-                    egui::Stroke::new(2.5_f32, egui::Color32::from_black_alpha(160)),
+                    radius,
+                    app.touchup_feather(),
+                    false,
                 );
-                painter.circle_stroke(p, r, egui::Stroke::new(1.2_f32, egui::Color32::WHITE));
-                // The inner ring is where the feather ends and the fix is at
-                // full strength.
-                let feather = app.touchup_feather();
-                if feather < 1.0 {
-                    painter.circle_stroke(
-                        p,
-                        r * (1.0 - feather),
-                        egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(170)),
-                    );
-                }
-                painter.circle_filled(p, 1.5, egui::Color32::WHITE);
 
                 // The wheel sizes the brush instead of zooming, and Shift+wheel
                 // feathers it. Alt still pans through `App::on_scroll`.
@@ -289,6 +279,45 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
 /// On-screen radius of a touch-up of `radius` centered at texture `center`,
 /// averaged across the two axes since the stored radius is relative to the
 /// image's shorter side.
+/// A brush as the pointer: a ring the size of what a click paints, with an
+/// inner ring where the feather ends and the brush is at full strength, and
+/// a minus when it erases. Hides the system cursor. `radius` is in
+/// shorter-side units.
+#[allow(clippy::too_many_arguments)] // Each is one aspect of the drawn ring.
+pub(super) fn brush_cursor(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    app: &App,
+    central: egui::Rect,
+    p: egui::Pos2,
+    radius: f32,
+    feather: f32,
+    erase: bool,
+) {
+    ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+    let (u, v) = app.loupe_screen_to_source(central, p);
+    let r = touchup_screen_radius(app, central, [u, v], radius).max(3.0);
+    // Dark under light, so the ring reads on bright and dark photos.
+    let dark = egui::Stroke::new(2.5_f32, egui::Color32::from_black_alpha(160));
+    let light = egui::Stroke::new(1.2_f32, egui::Color32::WHITE);
+    painter.circle_stroke(p, r, dark);
+    painter.circle_stroke(p, r, light);
+    if feather < 1.0 {
+        painter.circle_stroke(
+            p,
+            r * (1.0 - feather),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(170)),
+        );
+    }
+    if erase {
+        let half = egui::vec2(4.0, 0.0);
+        painter.line_segment([p - half, p + half], dark);
+        painter.line_segment([p - half, p + half], light);
+    } else {
+        painter.circle_filled(p, 1.5, egui::Color32::WHITE);
+    }
+}
+
 fn touchup_screen_radius(app: &App, central: egui::Rect, center: [f32; 2], radius: f32) -> f32 {
     let c = app.loupe_source_to_screen(central, center[0], center[1]);
     let (radius_u, radius_v) = app.touchup_uv_radii(radius);

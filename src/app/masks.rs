@@ -1,26 +1,113 @@
 //! Local adjustment masks on the shown photo: the one writer of the masks
-//! mirror, the draw tool, and the selected mask. Every change goes through
-//! the main undo history, so a drag is one step like a slider drag.
+//! mirror, the draw tool, the brush, and the selected mask. Every change
+//! goes through the main undo history, so a drag is one step like a slider
+//! drag, and so is a brush stroke.
 
 use super::*;
 
 use super::coverage;
-use crate::develop::{DetectTarget, Mask, MaskInput, MaskSet, RasterId, MAX_MASKS};
+use crate::develop::brush::{self, BrushRaster};
+use crate::develop::mask::{BRUSH_RADIUS_RANGE, MAX_BRUSH_POINTS};
+use crate::develop::{
+    DetectTarget, Mask, MaskInput, MaskSet, MaskShape, RasterId, Stroke, MAX_MASKS,
+};
 
 /// The shape the armed mask tool draws.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum MaskKind {
     Linear,
     Radial,
+    /// Paints: each press-to-release is one stroke.
+    Brush,
+}
+
+/// The largest brush the panel and keys allow, as a fraction of the
+/// shorter side. A sidecar or command may hold up to the full range.
+pub(crate) const BRUSH_MAX_RADIUS: f32 = 0.5;
+
+/// What the next stroke paints with. Kept apart from Touch Up's brush, as
+/// Lightroom keeps them.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct BrushSettings {
+    /// A fraction of the photo's shorter side.
+    pub radius: f32,
+    pub feather: f32,
+    pub flow: f32,
+    /// Erases without Alt held.
+    pub erase: bool,
+}
+
+impl Default for BrushSettings {
+    fn default() -> Self {
+        BrushSettings {
+            radius: 0.05,
+            feather: 0.5,
+            flow: 1.0,
+            erase: false,
+        }
+    }
+}
+
+impl BrushSettings {
+    fn clamped(self) -> Self {
+        let finite = |v: f32, or: f32| if v.is_finite() { v } else { or };
+        let d = BrushSettings::default();
+        BrushSettings {
+            radius: finite(self.radius, d.radius)
+                .clamp(*BRUSH_RADIUS_RANGE.start(), BRUSH_MAX_RADIUS),
+            feather: finite(self.feather, d.feather).clamp(0.0, 1.0),
+            flow: finite(self.flow, d.flow).clamp(0.01, 1.0),
+            erase: self.erase,
+        }
+    }
+}
+
+/// A stroke from press to release. The photo's masks as they will be
+/// saved, this stroke included, show in the Loupe and the panel while it is
+/// painted; the release saves them as one undo step.
+pub(crate) struct Painting {
+    path: PathBuf,
+    /// The photo's masks with this stroke in mask `index`.
+    masks: Vec<Mask>,
+    index: usize,
+    /// Mask `index`'s strokes before this one.
+    before: Arc<[Stroke]>,
+    stroke: Stroke,
+    /// Mask `index`'s raster, stamped a dab at a time as points arrive.
+    raster: BrushRaster,
+    aspect: f32,
+    /// Points the photo may still take toward `MAX_BRUSH_POINTS`.
+    points_left: usize,
+}
+
+impl Painting {
+    /// Stamps the points from `from` on and puts the masks and their raster
+    /// where the next render finds them.
+    fn stamp_from(&mut self, from: usize) {
+        self.raster.stamp(&self.stroke, from);
+        let strokes: Arc<[Stroke]> = self
+            .before
+            .iter()
+            .chain(std::iter::once(&self.stroke))
+            .cloned()
+            .collect();
+        brush::remember(&strokes, self.aspect, Arc::new(self.raster.coverage()));
+        if let Some(m) = self.masks.get_mut(self.index) {
+            m.shape = MaskShape::Brush { strokes };
+        }
+    }
 }
 
 impl App {
+    /// The shown photo's masks, with a stroke being painted on it.
     pub(crate) fn current_masks(&self) -> &[Mask] {
-        self.shown
-            .path()
-            .and_then(|p| self.masks.get(p))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        let Some(path) = self.shown.path() else {
+            return &[];
+        };
+        if let Some(p) = self.painting.as_ref().filter(|p| p.path == path) {
+            return &p.masks;
+        }
+        self.masks.get(path).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// The shown photo's masks with their coverage, for the Loupe and the
@@ -30,7 +117,11 @@ impl App {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return MaskSet::default();
         };
-        let masks = self.masks.get(&path).map_or(&[][..], Vec::as_slice);
+        let painting = self.painting.as_ref().filter(|p| p.path == path);
+        let masks = match painting {
+            Some(p) => &p.masks[..],
+            None => self.masks.get(&path).map_or(&[][..], Vec::as_slice),
+        };
         let recorded = self.detections.get(&path);
         MaskSet::new(masks, |t| {
             match self.coverage.ask(&path, t, recorded.and_then(|d| d.get(t))) {
@@ -197,6 +288,11 @@ impl App {
     /// the mask, but the detection still records, so Redo brings the mask
     /// back with no second detection.
     pub(crate) fn poll_coverage(&mut self) {
+        // A stroke whose brush was put down mid-drag (Esc, another tool or
+        // page) ends where it got to, so it is saved and never left open.
+        if self.painting.is_some() && !(self.brush_armed() && self.masks_shown()) {
+            self.end_stroke(None);
+        }
         let selection = self.action_paths();
         self.coverage
             .kick(&selection, &self.masks, &self.detections);
@@ -334,6 +430,158 @@ impl App {
             LoupeTool::Mask(kind) => Some(kind),
             _ => None,
         }
+    }
+
+    /// Whether the armed tool is the Brush.
+    pub(crate) fn brush_armed(&self) -> bool {
+        self.mask_tool() == Some(MaskKind::Brush)
+    }
+
+    /// Whether a stroke is being painted.
+    pub(crate) fn painting(&self) -> bool {
+        self.painting.is_some()
+    }
+
+    pub(crate) fn brush(&self) -> BrushSettings {
+        self.brush
+    }
+
+    pub(super) fn set_brush(&mut self, brush: BrushSettings) {
+        self.brush = brush.clamped();
+        self.request_redraw();
+    }
+
+    /// Multiplicative, so each press is the same visible step at any size,
+    /// as Touch Up's brackets are.
+    pub(super) fn step_brush_radius(&mut self, grow: bool) {
+        let factor = if grow { 1.15 } else { 1.0 / 1.15 };
+        self.set_brush(BrushSettings {
+            radius: self.brush.radius * factor,
+            ..self.brush
+        });
+    }
+
+    pub(super) fn step_brush_feather(&mut self, delta: f32) {
+        self.set_brush(BrushSettings {
+            feather: self.brush.feather + delta,
+            ..self.brush
+        });
+    }
+
+    /// The brush's radius in source pixels, for the panel's Size readout.
+    pub(crate) fn brush_radius_px(&self) -> f32 {
+        let (w, h) = self.image_size();
+        self.brush.radius * w.min(h)
+    }
+
+    /// A press with the Brush armed starts a stroke at source `uv`. It adds
+    /// to the picked brush mask, or makes a new one when none is picked;
+    /// `erase` is Alt, which erases as the panel's Erase does.
+    pub(super) fn begin_stroke(&mut self, uv: [f32; 2], erase: bool) {
+        if !self.brush_armed() || self.painting.is_some() {
+            return;
+        }
+        let Some(path) = self.shown.path().map(Path::to_path_buf) else {
+            return;
+        };
+        let t = crate::i18n::t();
+        let mut masks = self.current_masks().to_vec();
+        let used: usize = masks.iter().map(Mask::brush_points).sum();
+        let points_left = MAX_BRUSH_POINTS.saturating_sub(used);
+        if points_left == 0 {
+            self.set_status(StatusKind::Error, t.brush_point_limit.into());
+            return;
+        }
+        let picked = self
+            .selected_mask()
+            .filter(|&i| masks.get(i).is_some_and(|m| m.strokes().is_some()));
+        let index = match picked {
+            Some(i) => i,
+            None if masks.len() >= MAX_MASKS => {
+                self.set_status(StatusKind::Error, t.mask_limit.into());
+                return;
+            }
+            None => {
+                masks.push(Mask::brush());
+                masks.len() - 1
+            }
+        };
+        let before = masks
+            .get(index)
+            .and_then(Mask::strokes)
+            .cloned()
+            .unwrap_or_else(|| Arc::from([]));
+        let (w, h) = self.image_size();
+        let aspect = w / h;
+        let b = self.brush;
+        let mut stroke = Stroke {
+            radius: b.radius,
+            feather: b.feather,
+            flow: b.flow,
+            erase: b.erase || erase,
+            points: Vec::new(),
+        };
+        brush::push_point(&mut stroke, uv, aspect);
+        let mut painting = Painting {
+            path,
+            masks,
+            index,
+            raster: BrushRaster::of(&before, aspect),
+            before,
+            stroke,
+            aspect,
+            points_left,
+        };
+        painting.stamp_from(0);
+        self.painting = Some(painting);
+        self.mask_selected = Some(index);
+        self.painted();
+    }
+
+    /// The pointer moved to `uv` while painting: the stroke gains it, unless
+    /// it lies within a quarter radius of the last point or the photo is out
+    /// of points.
+    pub(super) fn extend_stroke(&mut self, uv: [f32; 2]) {
+        let Some(p) = self.painting.as_mut() else {
+            return;
+        };
+        if p.stroke.points.len() >= p.points_left {
+            let t = crate::i18n::t();
+            self.set_status(StatusKind::Error, t.brush_point_limit.into());
+            return;
+        }
+        if brush::push_point(&mut p.stroke, uv, p.aspect) {
+            let last = p.stroke.points.len() - 1;
+            p.stamp_from(last);
+            self.painted();
+        }
+    }
+
+    /// The pointer let go, at `uv` when it is known: the stroke ends there
+    /// and the masks are saved, one undo step.
+    pub(super) fn end_stroke(&mut self, uv: Option<[f32; 2]>) {
+        let Some(mut p) = self.painting.take() else {
+            return;
+        };
+        let room = p.stroke.points.len() < p.points_left;
+        if let Some(uv) = uv.filter(|_| room) {
+            if brush::finish_at(&mut p.stroke, uv) {
+                let last = p.stroke.points.len() - 1;
+                p.stamp_from(last);
+            }
+        }
+        let index = p.index;
+        self.put_masks(&p.path, p.masks);
+        if self.shown.path() == Some(p.path.as_path()) {
+            self.mask_selected = Some(index);
+        }
+    }
+
+    /// A stroke changed what the Loupe shows: upload it and its tint.
+    fn painted(&mut self) {
+        self.push_adjustments();
+        self.sync_mask_overlay();
+        self.request_redraw();
     }
 
     /// Whether the Loupe shows the mask overlay: the Masks page is open and
@@ -739,6 +987,159 @@ mod tests {
             "a sky mask is pending or unsupported, never silently ready"
         );
         assert_eq!(app.folder_store.masks(&photo).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An app showing photo 0 of `n` in the Loupe, with K pressed: the Brush
+    /// armed on the Masks page.
+    fn brushing(tag: &str, n: usize) -> (App, PathBuf, Vec<PathBuf>) {
+        let (mut app, dir, paths) = folder_app(tag, n);
+        app.select_single(0);
+        app.shown = Shown::Preview(paths[0].clone(), 1500, 1000);
+        app.mode = ViewMode::Loupe;
+        app.handle_key(KeyCode::KeyK);
+        (app, dir, paths)
+    }
+
+    fn paint(app: &mut App, points: &[[f32; 2]]) {
+        let (first, rest) = points.split_first().unwrap();
+        app.begin_stroke(*first, false);
+        for p in rest {
+            app.extend_stroke(*p);
+        }
+        app.end_stroke(points.last().copied());
+    }
+
+    #[test]
+    fn k_arms_the_brush_on_the_masks_page_and_k_again_puts_it_down() {
+        let (mut app, dir, _) = brushing("brush-k", 1);
+        assert!(app.brush_armed());
+        assert!(app.develop_open && app.develop_tab == DevelopTab::Masks);
+        assert!(app.masks_shown());
+        app.handle_key(KeyCode::KeyK);
+        assert!(!app.brush_armed());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_stroke_is_one_undo_step_and_the_next_adds_to_the_picked_mask() {
+        let (mut app, dir, paths) = brushing("brush-undo", 1);
+        paint(&mut app, &[[0.2, 0.5], [0.4, 0.5], [0.6, 0.55]]);
+        app.save_edit_unless_dragging();
+        assert_eq!(app.current_masks().len(), 1, "the first stroke made a mask");
+        assert_eq!(app.selected_mask(), Some(0), "and picked it");
+        let strokes = app.current_masks()[0].strokes().unwrap().clone();
+        assert_eq!(strokes.len(), 1);
+        assert_eq!(strokes[0].points.first(), Some(&[0.2, 0.5]));
+        assert_eq!(strokes[0].points.last(), Some(&[0.6, 0.55]));
+        assert!(!app.painting());
+
+        app.begin_stroke([0.5, 0.2], true);
+        assert!(app.painting());
+        assert_eq!(
+            app.current_masks()[0].strokes().unwrap().len(),
+            2,
+            "the Loupe shows the stroke while it is painted"
+        );
+        app.extend_stroke([0.5, 0.8]);
+        app.end_stroke(None);
+        app.save_edit_unless_dragging();
+        assert_eq!(app.current_masks().len(), 1, "added to the picked mask");
+        let strokes = app.current_masks()[0].strokes().unwrap().clone();
+        assert_eq!(strokes.len(), 2);
+        assert!(strokes[1].erase, "Alt erases");
+
+        app.modifiers = winit::keyboard::ModifiersState::SUPER;
+        app.handle_key(KeyCode::KeyZ);
+        assert_eq!(
+            app.current_masks()[0].strokes().unwrap().len(),
+            1,
+            "Cmd+Z took back one stroke"
+        );
+        app.handle_key(KeyCode::KeyZ);
+        assert!(app.current_masks().is_empty(), "then the first");
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(10));
+        assert!(app.folder_store.masks(&paths[0]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stroke_reaches_the_renderer_as_coverage() {
+        let (mut app, dir, _) = brushing("brush-render", 1);
+        let mut m = Mask::brush();
+        m.amounts.exposure = 1.0;
+        app.add_mask(m);
+        paint(&mut app, &[[0.3, 0.5], [0.7, 0.5]]);
+        let placed = app.current_photo_masks();
+        let c = placed.coverage(0).expect("a raster");
+        assert_eq!(c.at_uv([0.5, 0.5]), 1.0);
+        assert_eq!(c.at_uv([0.5, 0.95]), 0.0);
+        let base = crate::develop::LocalAmounts::default();
+        assert_eq!(placed.local_tone(base, [0.5, 0.5]).exposure, 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_brush_respects_max_masks_and_the_point_cap() {
+        let (mut app, dir, _) = brushing("brush-caps", 1);
+        for _ in 0..MAX_MASKS {
+            assert!(app.add_mask(radial()).is_some());
+        }
+        app.select_mask(None);
+        app.begin_stroke([0.5, 0.5], false);
+        assert!(!app.painting(), "no room for a new mask");
+        assert_eq!(app.current_masks().len(), MAX_MASKS);
+
+        app.delete_mask(0);
+        let mut nearly = Mask::brush();
+        nearly.shape = MaskShape::Brush {
+            strokes: vec![
+                Stroke {
+                    radius: 0.01,
+                    feather: 0.5,
+                    flow: 1.0,
+                    erase: false,
+                    points: vec![[0.5, 0.5]; MAX_BRUSH_POINTS - 2],
+                };
+                1
+            ]
+            .into(),
+        };
+        app.add_mask(nearly);
+        paint(&mut app, &[[0.1, 0.1], [0.2, 0.1], [0.3, 0.1], [0.4, 0.1]]);
+        let total: usize = app.current_masks().iter().map(Mask::brush_points).sum();
+        assert_eq!(total, MAX_BRUSH_POINTS, "the stroke stopped at the cap");
+        app.begin_stroke([0.5, 0.5], false);
+        assert!(!app.painting(), "and a full photo takes no new stroke");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn paste_carries_brush_strokes_to_another_photo() {
+        use crate::develop::copy::{CopyItem, CopyItems};
+        let (mut app, dir, paths) = brushing("brush-paste", 2);
+        paint(&mut app, &[[0.2, 0.5], [0.6, 0.5]]);
+        let painted = app.current_masks().to_vec();
+        app.copied_settings = Some(super::super::folder_store::CopiedSettings {
+            path: paths[0].clone(),
+            adj: Adjustments::default(),
+            masks: painted.clone(),
+            touchups: Vec::new(),
+            items: CopyItems::NONE.with(CopyItem::Masks, true),
+        });
+        app.sel = Some(1);
+        app.selected = [1].into_iter().collect();
+        app.apply_settings_to_selection();
+        app.save_edit_unless_dragging();
+        assert_eq!(app.masks[&paths[1]], painted);
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(10));
+        assert_eq!(
+            app.folder_store.masks(&paths[1]),
+            painted,
+            "and the sidecar"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

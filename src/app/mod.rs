@@ -514,6 +514,10 @@ pub(crate) struct App {
     /// The mask the Masks page and the Loupe overlay edit. See
     /// `App::selected_mask`.
     mask_selected: Option<usize>,
+    /// What the mask Brush paints with.
+    brush: masks::BrushSettings,
+    /// The brush stroke from press to release. See `masks::Painting`.
+    painting: Option<masks::Painting>,
     /// O hides the spot circles in Touch Up to judge the fix unobstructed.
     touchup_spots_hidden: bool,
     /// Per-image spot lists as they were before each Touch Up add or delete,
@@ -799,7 +803,7 @@ mod session;
 mod sort;
 mod state;
 pub(crate) use coverage::{Failure, MaskStatus};
-pub(crate) use masks::MaskKind;
+pub(crate) use masks::{BrushSettings, MaskKind, BRUSH_MAX_RADIUS};
 pub(crate) use presets::FolderState;
 pub(crate) use sort::{GridSort, SortOrder};
 pub(crate) use state::{PhotoList, State};
@@ -927,6 +931,8 @@ impl App {
             touchup_opacity: 1.0,
             touchup_selected: None,
             mask_selected: None,
+            brush: masks::BrushSettings::default(),
+            painting: None,
             touchup_spots_hidden: false,
             touchup_undo: HashMap::new(),
             develop_open: false,
@@ -1672,6 +1678,10 @@ impl App {
                 }
                 ui::UiAction::RetryDetection(i) => self.retry_detection(i),
                 ui::UiAction::SetMask(i, m) => self.set_mask(i, m),
+                ui::UiAction::SetBrush(b) => self.set_brush(b),
+                ui::UiAction::BrushPress(uv, erase) => self.begin_stroke(uv, erase),
+                ui::UiAction::BrushDrag(uv) => self.extend_stroke(uv),
+                ui::UiAction::BrushRelease(uv) => self.end_stroke(uv),
                 ui::UiAction::SelectMask(i) => self.select_mask(i),
                 ui::UiAction::DeleteMask(i) => self.delete_mask(i),
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(*adj),

@@ -1,7 +1,7 @@
 //! The Loupe's mask overlay: each mask's pin, the selected mask's lines or
-//! ellipse with handles to drag, and the draw tool's drag-to-create. Each
-//! handle is its own small area, so a press anywhere else still pans the
-//! photo; only the armed draw tool covers the whole image.
+//! ellipse with handles to drag, the draw tool's drag-to-create, and the
+//! Brush. Each handle is its own small area, so a press anywhere else still
+//! pans the photo; only an armed draw tool or Brush covers the whole image.
 
 use super::*;
 
@@ -179,8 +179,10 @@ pub(super) fn loupe_mask_overlay(
         }
     }
 
-    if let Some(kind) = app.mask_tool() {
-        draw_tool(&ctx, &space, kind, masks.len(), drag_id, out);
+    match app.mask_tool() {
+        Some(MaskKind::Brush) => brush_tool(ui, app, &space, out),
+        Some(kind) => draw_tool(&ctx, &space, kind, masks.len(), drag_id, out),
+        None => {}
     }
 
     if !ctx.input(|i| i.pointer.any_down()) {
@@ -256,11 +258,97 @@ fn draw_tool(
         });
 }
 
+/// The whole-image area the Brush paints on. Each press-to-release is one
+/// stroke: it starts where the button went down, gains each place the
+/// pointer moves to, and ends at the release, which saves it as one undo
+/// step. The wheel sizes the brush and Shift+wheel feathers it, as under
+/// Touch Up; Alt erases.
+fn brush_tool(ui: &egui::Ui, app: &App, space: &Space, out: &mut FrameOutput) {
+    let ctx = ui.ctx();
+    egui::Area::new(egui::Id::new("loupe_mask_brush"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(space.central.min)
+        .show(ctx, |ui| {
+            let (_id, resp) =
+                ui.allocate_exact_size(space.central.size(), egui::Sense::click_and_drag());
+            let (alt, shift, down, scroll) = ui.input(|i| {
+                (
+                    i.modifiers.alt,
+                    i.modifiers.shift,
+                    i.pointer.primary_down(),
+                    i.smooth_scroll_delta,
+                )
+            });
+            let b = app.brush();
+            if let Some(p) = resp.hover_pos() {
+                let painter = ui.painter_at(space.central);
+                let erase = b.erase || alt;
+                super::loupe::brush_cursor(
+                    ui,
+                    &painter,
+                    app,
+                    space.central,
+                    p,
+                    b.radius,
+                    b.feather,
+                    erase,
+                );
+                // macOS turns a Shift+wheel into horizontal scrolling.
+                let d = if shift && scroll.y == 0.0 {
+                    scroll.x
+                } else {
+                    scroll.y
+                };
+                if !alt && d != 0.0 {
+                    let next = if shift {
+                        crate::app::BrushSettings {
+                            feather: b.feather + d * 0.0025,
+                            ..b
+                        }
+                    } else {
+                        crate::app::BrushSettings {
+                            radius: b.radius * (d * 0.0025).exp(),
+                            ..b
+                        }
+                    };
+                    out.actions.push(UiAction::SetBrush(next));
+                }
+            }
+            let at = ctx.pointer_latest_pos();
+            if app.painting() {
+                match at {
+                    Some(p) if down => out.actions.push(UiAction::BrushDrag(space.uv(p))),
+                    _ if down => {}
+                    _ => out.actions.push(UiAction::BrushRelease(
+                        at.filter(|p| space.central.contains(*p))
+                            .map(|p| space.uv(p)),
+                    )),
+                }
+            } else if down && resp.is_pointer_button_down_on() {
+                if let Some(origin) = press_origin(ctx, &resp) {
+                    out.actions
+                        .push(UiAction::BrushPress(space.uv(origin), alt));
+                    if let Some(p) = at.filter(|p| *p != origin) {
+                        out.actions.push(UiAction::BrushDrag(space.uv(p)));
+                    }
+                }
+            } else if resp.clicked() {
+                // A press and release inside one frame: a single dab.
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let uv = space.uv(p);
+                    out.actions.push(UiAction::BrushPress(uv, alt));
+                    out.actions.push(UiAction::BrushRelease(Some(uv)));
+                }
+            }
+        });
+}
+
 /// The mask a draw from `origin` to `to` makes: a linear one from where the
 /// drag starts to where it ends, or a radial one centered on the start with
-/// the pointer on its edge.
+/// the pointer on its edge. The Brush paints instead of drawing.
 fn drawn(space: &Space, kind: MaskKind, origin: [f32; 2], to: [f32; 2]) -> Option<Mask> {
     let m = match kind {
+        MaskKind::Brush => return None,
         MaskKind::Linear => Mask::linear(origin, to),
         MaskKind::Radial => {
             let q = space.units(to, origin);

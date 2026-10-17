@@ -146,10 +146,22 @@ impl App {
         }
 
         // Esc puts the mask tool down, then lets go of the selected mask, and
-        // Delete removes that mask rather than the photo.
+        // Delete removes that mask rather than the photo. With the Brush
+        // armed, the brackets size and feather it, as they do Touch Up's.
         let mask_selected = self.selected_mask().filter(|_| self.masks_shown());
         if self.mask_tool().is_some() || mask_selected.is_some() {
             match code {
+                KeyCode::BracketLeft | KeyCode::BracketRight
+                    if self.brush_armed() && !cmd && !alt =>
+                {
+                    let up = code == KeyCode::BracketRight;
+                    if shift {
+                        self.step_brush_feather(if up { 0.1 } else { -0.1 });
+                    } else {
+                        self.step_brush_radius(up);
+                    }
+                    return;
+                }
                 KeyCode::Escape => {
                     if self.mask_tool().is_some() {
                         self.tool = LoupeTool::None;
@@ -304,10 +316,8 @@ impl App {
 
             KeyCode::KeyO if cmd && !alt => self.open_folder_picker(),
             KeyCode::KeyO if loupe && !cmd && !alt => self.selection_key(shift),
-            KeyCode::KeyK if loupe && !cmd && !alt => {
-                self.reveal_develop();
-                self.set_develop_tab(DevelopTab::Masks);
-            }
+            // Lightroom's K: the Brush, on the Masks page.
+            KeyCode::KeyK if !cmd && !alt => self.toggle_mask_tool(super::masks::MaskKind::Brush),
             KeyCode::KeyQ if loupe && !cmd && !alt => {
                 self.reveal_develop();
                 self.set_develop_tab(DevelopTab::Masks);

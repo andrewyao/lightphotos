@@ -271,8 +271,9 @@ impl App {
 
     /// A scroll of `(dx, dy)` physical pixels over the loupe. Shift pans
     /// horizontally, Alt pans vertically, and plain or Shift+Alt zooms at the
-    /// cursor, except under Touch Up, where the Loupe's overlay turns the
-    /// plain wheel into brush size and Shift+wheel into feather.
+    /// cursor, except under Touch Up and the mask Brush, where the Loupe's
+    /// overlay turns the plain wheel into brush size and Shift+wheel into
+    /// feather.
     pub(crate) fn on_scroll(&mut self, dx: f32, dy: f32) {
         let shift = self.modifiers.shift_key();
         let alt = self.modifiers.alt_key();
@@ -281,16 +282,17 @@ impl App {
         if s == 0.0 {
             return;
         }
+        let brush = self.touchup_active() || (self.brush_armed() && self.masks_shown());
         match (shift, alt) {
             // Shift+wheel over the zoom marker resizes it; scrolling
             // up shrinks it, which zooms the tiles in, as the wheel does.
             (true, false) if self.resize_compare_square((s * 0.0025).exp()) => {
                 self.request_redraw();
             }
-            (true, false) if self.touchup_active() => {}
+            (true, false) if brush => {}
             (true, false) => self.pan_by(s, 0.0),
             (false, true) => self.pan_by(0.0, s),
-            _ if self.touchup_active() => {}
+            _ if brush => {}
             _ => {
                 let (cx, cy) = self.cursor_in_loupe();
                 self.zoom_at((s * 0.0025).exp(), cx, cy);
@@ -497,10 +499,10 @@ impl App {
 
     /// Push the current mask, or its absence, to the renderer. The mask stays
     /// at Vision's resolution. The shader samples it by image UV, so it needs
-    /// no update on zoom or pan. A detected mask picked on the Masks page
-    /// takes the overlay over Show Selection, in Lightroom's red.
+    /// no update on zoom or pan. A detected or brush mask picked on the
+    /// Masks page takes the overlay over Show Selection, in Lightroom's red.
     fn sync_selection_overlay(&mut self) {
-        if let Some((coverage, inverted)) = self.selected_detected_coverage() {
+        if let Some((coverage, inverted)) = self.selected_mask_coverage() {
             if let Some(r) = &mut self.renderer {
                 r.set_selection_style(inverted, MASK_TINT);
                 r.set_selection_mask(Some((
@@ -527,17 +529,22 @@ impl App {
         }
     }
 
-    /// The coverage to tint for the picked detected mask, with its invert,
-    /// while the Masks page shows the photo and the coverage is in memory.
-    fn selected_detected_coverage(
-        &self,
-    ) -> Option<(std::sync::Arc<crate::develop::Coverage>, bool)> {
+    /// The coverage to tint for the picked detected or brush mask, with its
+    /// invert, while the Masks page shows the photo and the coverage is in
+    /// memory. A brush's raster comes from the cache the render just filled.
+    fn selected_mask_coverage(&self) -> Option<(std::sync::Arc<crate::develop::Coverage>, bool)> {
         if !self.masks_shown() {
             return None;
         }
         let path = self.shown.path()?;
         let mask = self.current_masks().get(self.selected_mask()?)?;
-        let coverage = self.coverage.ready(path, mask.target()?)?;
+        let coverage = match mask.strokes() {
+            Some(strokes) => {
+                let (w, h) = self.image_size();
+                crate::develop::brush::coverage(strokes, w / h)
+            }
+            None => self.coverage.ready(path, mask.target()?)?,
+        };
         if coverage.is_nothing() {
             return None;
         }
@@ -548,7 +555,7 @@ impl App {
     /// coverage or invert changed, or when it stopped showing.
     pub(crate) fn sync_mask_overlay(&mut self) {
         let key = self
-            .selected_detected_coverage()
+            .selected_mask_coverage()
             .map(|(c, inverted)| (c.id(), inverted));
         if key != self.mask_overlay {
             self.mask_overlay = key;

@@ -863,11 +863,17 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
                 for (kind, label, tip) in [
                     (MaskKind::Linear, t.linear_gradient, t.linear_gradient_tip),
                     (MaskKind::Radial, t.radial_gradient, t.radial_gradient_tip),
+                    (MaskKind::Brush, t.brush_mask, t.brush_mask_tip),
                 ] {
                     let armed = app.mask_tool() == Some(kind);
                     let add =
                         ui.add_enabled(room, egui::Button::selectable(armed, format!("+ {label}")));
                     if add.on_hover_text(tip).clicked() {
+                        // `+ Brush` starts a new mask, as Lightroom's does;
+                        // K keeps painting the picked one.
+                        if kind == MaskKind::Brush && !armed {
+                            out.actions.push(UiAction::SelectMask(None));
+                        }
                         out.actions.push(UiAction::ToggleMaskTool(kind));
                     }
                 }
@@ -896,7 +902,9 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
                     }
                 }
             });
-            if app.mask_tool().is_some() {
+            if app.brush_armed() {
+                form::hint(ui, t.brush_paint_hint);
+            } else if app.mask_tool().is_some() {
                 form::hint(ui, t.mask_draw_hint);
             }
         });
@@ -980,6 +988,9 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
             });
         });
     });
+    if app.brush_armed() {
+        draw_brush_controls(ui, app, out);
+    }
     let Some((i, mask)) = selected.and_then(|i| masks.get(i).map(|m| (i, m))) else {
         return;
     };
@@ -1006,6 +1017,53 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
         }
         if next != *mask {
             out.actions.push(UiAction::SetMask(i, next));
+        }
+    });
+}
+
+/// The mask Brush's Size, Feather, Flow and Erase, while it is armed.
+fn draw_brush_controls(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = t();
+    let b = app.brush();
+    let percent = |v: f32| format!("{:.0}%", v * 100.0);
+    ui.add_space(font_size::px(ui.style(), form::SLIDER_GAP));
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), form::SLIDER_GAP);
+        let mut next = b;
+        let size_px = format!("{:.0} px", app.brush_radius_px());
+        let range =
+            *crate::develop::mask::BRUSH_RADIUS_RANGE.start()..=crate::app::BRUSH_MAX_RADIUS;
+        brush_slider(
+            ui,
+            true,
+            t.brush_size,
+            &size_px,
+            t.brush_size_tip,
+            &mut next.radius,
+            range,
+        );
+        brush_slider(
+            ui,
+            true,
+            t.feather,
+            &percent(b.feather),
+            t.feather_tip,
+            &mut next.feather,
+            0.0..=1.0,
+        );
+        brush_slider(
+            ui,
+            true,
+            t.flow,
+            &percent(b.flow),
+            t.flow_tip,
+            &mut next.flow,
+            0.01..=1.0,
+        );
+        ui.checkbox(&mut next.erase, t.brush_erase)
+            .on_hover_text(t.brush_erase_tip);
+        if next != b {
+            out.actions.push(UiAction::SetBrush(next));
         }
     });
 }
