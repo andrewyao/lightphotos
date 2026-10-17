@@ -21,6 +21,8 @@
 //! move 40 60               pointer to (x, y) points, no click
 //! scroll 0 5 [shift]       wheel lines; up is positive, so this zooms the Loupe in
 //! drag 100 100 300 200
+//! stroke 100,100 200,150 300,140 [alt]
+//!                          press at the first point, move through the rest a frame each, release
 //! idle                     wait until decodes, sidecar writes, batches and animations settle
 //! shot grid                write <out dir>/grid.png
 //! state                    print one JSON line of the app's state
@@ -67,6 +69,8 @@ const DEFAULT_SIZE: (u32, u32) = (1200, 800);
 /// back-to-back clicks on different cells would read as a triple click on
 /// the second. A person cannot click that fast; the driver waits it out.
 const CLICK_GAP: Duration = Duration::from_millis(650);
+/// The most points one `stroke` step takes, a frame each.
+const MAX_STROKE_POINTS: usize = 10_000;
 
 #[derive(Debug)]
 pub(crate) struct Args {
@@ -169,6 +173,10 @@ pub(crate) enum Step {
     Drag {
         from: (f32, f32),
         to: (f32, f32),
+    },
+    Stroke {
+        points: Vec<(f32, f32)>,
+        mods: ModifiersState,
     },
     Idle,
     Shot(String),
@@ -378,6 +386,25 @@ fn parse_step(line: &str) -> Result<Step, String> {
             Step::Drag {
                 from: (coord(Some(args[0]), "x0")?, coord(Some(args[1]), "y0")?),
                 to: (coord(Some(args[2]), "x1")?, coord(Some(args[3]), "y1")?),
+            }
+        }
+        "stroke" => {
+            let (points, mods): (Vec<&str>, Vec<&str>) = args.iter().partition(|w| w.contains(','));
+            if points.is_empty() || points.len() > MAX_STROKE_POINTS {
+                return Err(format!(
+                    "stroke takes 1 to {MAX_STROKE_POINTS} x,y points, then modifiers"
+                ));
+            }
+            let points = points
+                .iter()
+                .map(|p| {
+                    let (x, y) = p.split_once(',').unwrap_or_default();
+                    Ok((coord(Some(x), "x")?, coord(Some(y), "y")?))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Step::Stroke {
+                points,
+                mods: parse_mods(&mods)?,
             }
         }
         "idle" => Step::Idle,
@@ -599,6 +626,7 @@ impl Driver {
                     );
                 }
                 Step::Drag { from, to } => self.drag(el, *from, *to),
+                Step::Stroke { points, mods } => self.stroke(el, points, *mods),
                 Step::Idle => self.idle()?,
                 Step::Shot(slug) => self.shot(slug)?,
                 Step::State => println!("{}", self.state_json()?),
@@ -818,6 +846,29 @@ impl Driver {
         self.last_click = Some(Instant::now());
     }
 
+    /// A press at the first point, a move and a frame at each of the rest,
+    /// and a release, with `mods` held throughout: a brush stroke.
+    fn stroke(&mut self, el: &ActiveEventLoop, points: &[(f32, f32)], mods: ModifiersState) {
+        let Some((&(x, y), rest)) = points.split_first() else {
+            return;
+        };
+        self.window_event(el, WindowEvent::ModifiersChanged(mods.into()));
+        self.move_to(el, x, y);
+        self.frame();
+        self.button(el, ElementState::Pressed);
+        for &(x, y) in rest {
+            self.move_to(el, x, y);
+            self.frame();
+        }
+        self.button(el, ElementState::Released);
+        self.window_event(
+            el,
+            WindowEvent::ModifiersChanged(ModifiersState::empty().into()),
+        );
+        self.frame();
+        self.last_click = Some(Instant::now());
+    }
+
     fn shot(&mut self, slug: &str) -> Result<(), String> {
         let frame = self
             .app
@@ -866,6 +917,8 @@ rclick-cell 4
 click-badge 5
 scroll 0 -5 shift
 drag 100 100 300 200
+stroke 10,20 30.5,40 50,60 alt
+stroke 5,5
 idle
 shot grid-1
 state
@@ -925,6 +978,14 @@ quit
                     from: (100.0, 100.0),
                     to: (300.0, 200.0),
                 },
+                Step::Stroke {
+                    points: vec![(10.0, 20.0), (30.5, 40.0), (50.0, 60.0)],
+                    mods: ModifiersState::ALT,
+                },
+                Step::Stroke {
+                    points: vec![(5.0, 5.0)],
+                    mods: ModifiersState::empty(),
+                },
                 Step::Idle,
                 Step::Shot("grid-1".into()),
                 Step::State,
@@ -956,6 +1017,11 @@ quit
             ("click 1", 1),
             ("idle now", 1),
             ("drag 1 2 3", 1),
+            ("stroke", 1),
+            ("stroke alt", 1),
+            ("stroke 1,2 3", 1),
+            ("stroke 1,NaN", 1),
+            ("stroke 1,2,3", 1),
             ("click NaN 5", 1),
             ("move 5 inf", 1),
             ("scroll 0 1e39", 1),

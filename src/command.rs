@@ -1155,7 +1155,9 @@ impl Command {
                 "Add a mask with its own tone and color sliders: a linear or radial \
                  gradient (points are 0..1 of the uncropped photo), or a detected one, \
                  {\"kind\":\"detected\",\"target\":\"subject\"|\"sky\"}, whose shape is \
-                 found for each photo.",
+                 found for each photo, or a painted one, {\"kind\":\"brush\",\"strokes\":[{\
+                 \"radius\",\"feather\",\"flow\",\"erase\",\"points\":[[u,v],...]}]}, with the \
+                 radius a fraction of the shorter side.",
                 true,
             ),
             SetMask(_) => ("Change one mask's shape, invert or sliders.", true),
@@ -1885,6 +1887,41 @@ mod tests {
         assert_eq!(rec.masks.len(), 1);
         on_record(&mut rec, json!({"id": "mask.clear", "params": {}})).unwrap();
         assert!(rec.masks.is_empty());
+    }
+
+    #[test]
+    fn mask_commands_take_brush_strokes_and_refuse_past_the_point_cap() {
+        use crate::develop::mask::MAX_BRUSH_POINTS;
+        let mut rec = ImageRecord::default();
+        let stroke = |points: serde_json::Value| json!({"radius": 0.05, "feather": 0.5, "flow": 0.8, "points": points});
+        let add = json!({"id": "mask.add", "params": {
+            "shape": {"kind": "brush", "strokes": [stroke(json!([[0.2, 0.5], [0.8, 0.5]]))]},
+            "amounts": {"exposure": 1}
+        }});
+        on_record(&mut rec, add).unwrap();
+        assert_eq!(rec.masks[0].strokes().unwrap()[0].points.len(), 2);
+        assert_eq!(rec.masks[0].amounts.exposure, 1.0);
+
+        let set = json!({"id": "mask.set", "params": {"index": 0, "shape": {
+            "kind": "brush",
+            "strokes": [stroke(json!([[0.1, 0.1]])), stroke(json!([[0.9, 0.9], [f32::MAX, 0.5]]))]
+        }}});
+        on_record(&mut rec, set).unwrap();
+        assert_eq!(rec.masks[0].strokes().unwrap().len(), 2);
+        assert_eq!(rec.masks[0].amounts.exposure, 1.0, "the sliders stay");
+        let MaskShape::Brush { strokes } = &rec.masks[0].shape else {
+            panic!("a brush mask");
+        };
+        assert_eq!(strokes[1].points[1], [11.0, 0.5], "held to range");
+
+        let before = rec.clone();
+        let too_many = vec![[0.5, 0.5]; MAX_BRUSH_POINTS];
+        let over = json!({"id": "mask.add", "params": {
+            "shape": {"kind": "brush", "strokes": [stroke(json!(too_many))]}
+        }});
+        let err = on_record(&mut rec, over).unwrap_err();
+        assert!(err.to_string().contains("points"), "{err}");
+        assert_eq!(rec, before, "a refused add changes nothing");
     }
 
     #[test]
