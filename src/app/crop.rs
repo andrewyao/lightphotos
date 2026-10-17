@@ -401,7 +401,8 @@ impl App {
     /// Enter crop mode on the Develop panel's Crop tab, opening the loupe
     /// first if needed. The draft starts from the saved crop, with the ratio
     /// it already has, and the GPU shows the full frame while editing. A
-    /// saved box the saved turn leaves corners in is shrunk to fit.
+    /// saved box the saved turn leaves corners in is shrunk to fit. Before/after
+    /// compare turns off.
     pub(super) fn enter_crop(&mut self) {
         if self.mode != ViewMode::Loupe {
             self.enter_loupe();
@@ -413,6 +414,11 @@ impl App {
             return;
         }
         self.tool = LoupeTool::None;
+        // The crop box covers one whole image, so leave before/after as
+        // Lightroom does.
+        if self.compare {
+            self.toggle_compare();
+        }
         let saved = self.current_adjustments().crop.unwrap_or(FULL_CROP);
         let (img_w, img_h) = self.image_size();
         let (disp_w, disp_h) = self.crop_display_px(saved);
@@ -686,6 +692,18 @@ mod tests {
         assert!(
             !app.wb_picker_active(),
             "the picker must not return after a crop"
+        );
+    }
+
+    #[test]
+    fn cropping_leaves_before_after_compare() {
+        let mut app = photo_app(0, None);
+        app.toggle_compare();
+        assert!(app.compare());
+        app.enter_crop();
+        assert!(
+            !app.compare(),
+            "the crop box must span one whole image, not both halves"
         );
     }
 

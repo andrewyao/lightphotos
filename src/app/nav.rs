@@ -764,6 +764,9 @@ impl App {
         if self.selected_path().is_none() {
             return;
         }
+        // A new Loupe starts with its chrome, even before a frame has seen
+        // the last one leave.
+        self.exit_fullscreen();
         let compare =
             self.mode == ViewMode::Grid && self.sel.is_some_and(|pos| self.opens_in_compare(pos));
         self.mode = ViewMode::Loupe;
@@ -781,6 +784,7 @@ impl App {
     /// Crop, Masks and Compare stay in the Loupe, so leaving it ends them and
     /// Develop comes back on Sliders.
     pub(super) fn enter_grid(&mut self) {
+        self.exit_fullscreen();
         if self.mode != ViewMode::Grid {
             if self.develop_tab != DevelopTab::Sliders {
                 self.set_develop_tab(DevelopTab::Sliders);
@@ -852,7 +856,11 @@ impl App {
             Region::Detail => self.mode == ViewMode::Loupe,
             Region::Filmstrip => self.mode == ViewMode::Loupe && self.filmstrip_visible(),
             Region::Folders => self.left_panel_visible(),
-            Region::Develop => self.mode == ViewMode::Loupe && self.develop_page_shown().is_some(),
+            Region::Develop => {
+                self.mode == ViewMode::Loupe
+                    && self.develop_page_shown().is_some()
+                    && !self.fullscreen_shown()
+            }
         }
     }
 

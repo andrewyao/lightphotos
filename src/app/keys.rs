@@ -191,6 +191,14 @@ impl App {
             return;
         }
 
+        // Entering the full-screen view put the tools above away, so past
+        // the dialogs Esc leaves it before the export form or focus behind
+        // it can take the key.
+        if code == KeyCode::Escape && self.fullscreen_shown() {
+            self.exit_fullscreen();
+            return;
+        }
+
         // While the export form is open, Enter runs it and Escape closes it.
         // Other keys still act, so the selection can change under the form.
         if self.export_form_open() {
@@ -342,7 +350,6 @@ impl App {
             }
             KeyCode::KeyY if self.mode == ViewMode::Loupe && !cmd && !alt => self.toggle_compare(),
             KeyCode::KeyF if loupe && !cmd && !alt => self.toggle_fullscreen(),
-            KeyCode::Escape if self.fullscreen_shown() => self.exit_fullscreen(),
             // Escape undoes Enter one step per press and stops at the Grid
             // or Folders. Leaving the Grid for Folders also clears the selection.
             KeyCode::Escape => {
@@ -844,6 +851,111 @@ mod tests {
             !app.fullscreen_shown(),
             "a new Loupe starts with its chrome"
         );
+    }
+
+    #[test]
+    fn full_screen_takes_focus_off_the_hidden_develop_page() {
+        let (mut app, _) = editor_app();
+        app.focus = Region::Develop;
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        assert_eq!(app.focus, Region::Detail);
+        let before = app.current_adjustments();
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowRight);
+        assert_eq!(app.current_adjustments(), before);
+        assert_eq!(app.sel, Some(1));
+    }
+
+    #[test]
+    fn esc_leaves_full_screen_before_anything_behind_it() {
+        let (mut app, _) = editor_app();
+        app.develop_tab = DevelopTab::Masks;
+        assert_eq!(
+            app.add_mask(crate::develop::Mask::radial([0.5, 0.5], [0.2, 0.1])),
+            Some(0)
+        );
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(!app.fullscreen_shown(), "a selected mask kept the view");
+        assert_eq!(app.selected_mask(), Some(0));
+
+        let cmd_shift = ModifiersState::SUPER | ModifiersState::SHIFT;
+        press(&mut app, cmd_shift, KeyCode::KeyE);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(!app.fullscreen_shown(), "the export form took Esc");
+        assert!(app.export_form_open());
+    }
+
+    #[test]
+    fn full_screen_shows_only_the_photo_and_its_keys_open_what_they_name() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyY);
+        app.sync_fullscreen();
+        assert!(app.fullscreen_shown(), "Y compares inside the view");
+        assert!(app.compare());
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyY);
+        app.sync_fullscreen();
+        assert!(app.fullscreen_shown());
+        assert!(!app.compare());
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyY);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        assert!(app.compare(), "leaving keeps Compare");
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        assert!(app.compare(), "entering keeps Compare");
+
+        let (mut app, _) = editor_app();
+        app.enter_crop();
+        assert!(app.cropping());
+        // Crop owns the keys, so only the title's button gets here.
+        app.toggle_fullscreen();
+        assert!(app.fullscreen_shown());
+        assert!(!app.cropping(), "the crop is kept and its handles go");
+
+        let (mut app, _) = editor_app();
+        app.develop_tab = DevelopTab::Masks;
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyM);
+        assert!(app.mask_tool().is_some());
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        assert!(app.mask_tool().is_none());
+        assert!(!app.masks_shown(), "mask pins hide");
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyM);
+        app.sync_fullscreen();
+        assert!(!app.fullscreen_shown());
+        assert!(app.mask_tool().is_some(), "M arms the tool it names");
+
+        let (mut app, _) = editor_app();
+        let cmd_shift = ModifiersState::SUPER | ModifiersState::SHIFT;
+        press(&mut app, cmd_shift, KeyCode::KeyE);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, cmd_shift, KeyCode::KeyE);
+        assert!(!app.fullscreen_shown());
+        assert!(
+            app.export_form_open(),
+            "the hidden form is shown, not closed"
+        );
+    }
+
+    #[test]
+    fn leaving_and_reopening_the_loupe_in_one_batch_ends_full_screen() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyG);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyE);
+        assert_eq!(app.mode, ViewMode::Loupe);
+        assert!(!app.fullscreen_shown());
+    }
+
+    #[test]
+    fn leaving_full_screen_gives_focus_back() {
+        let (mut app, _) = editor_app();
+        app.focus = Region::Filmstrip;
+        app.focus_level = FocusLevel::Entered;
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        assert_eq!(app.focus, Region::Detail);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        assert_eq!(app.focus, Region::Filmstrip);
+        assert_eq!(app.focus_level, FocusLevel::Entered);
     }
 
     #[test]
