@@ -233,6 +233,14 @@ pub fn remember(strokes: &[Stroke], aspect: f32, raster: Arc<Coverage>) {
     remember_key(key(strokes, aspect), raster);
 }
 
+/// Drops the raster of `strokes` at `aspect`, which no render will ask for
+/// again, so it doesn't push out one that will.
+pub fn forget(strokes: &[Stroke], aspect: f32) {
+    let key = key(strokes, aspect);
+    let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    cache.retain(|(k, _)| *k != key);
+}
+
 fn cached(key: u64) -> Option<Arc<Coverage>> {
     let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
     let at = cache.iter().position(|(k, _)| *k == key)?;

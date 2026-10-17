@@ -91,10 +91,16 @@ impl Painting {
             .chain(std::iter::once(&self.stroke))
             .cloned()
             .collect();
-        brush::remember(&strokes, self.aspect, Arc::new(self.raster.coverage()));
-        if let Some(m) = self.masks.get_mut(self.index) {
-            m.shape = MaskShape::Brush { strokes };
+        let Some(m) = self.masks.get_mut(self.index) else {
+            return;
+        };
+        // The raster one point ago is never drawn again; the committed one
+        // is, after an undo.
+        if let Some(old) = m.strokes().filter(|old| !Arc::ptr_eq(old, &self.before)) {
+            brush::forget(old, self.aspect);
         }
+        brush::remember(&strokes, self.aspect, Arc::new(self.raster.coverage()));
+        m.shape = MaskShape::Brush { strokes };
     }
 }
 
