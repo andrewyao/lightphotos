@@ -96,7 +96,7 @@ struct TouchUp {
 struct Mask {
     // Linear: start, end. Radial: center, radii.
     geom: vec4<f32>,
-    // Kind (0 linear, 1 radial), invert, angle, feather.
+    // Kind (0 linear, 1 radial, 2 coverage), invert, angle, feather.
     params: vec4<f32>,
     // Exposure, contrast, highlights, shadows.
     a0: vec4<f32>,
@@ -104,6 +104,8 @@ struct Mask {
     a1: vec4<f32>,
     // Saturation, then padding.
     a2: vec4<f32>,
+    // A coverage mask's byte offset into `coverage`, width, height, 0.
+    cov: vec4<u32>,
 };
 
 // The sliders a mask can move, at one pixel.
@@ -134,7 +136,7 @@ struct LocalTone {
 // Bindings 4 and 5, past the overlay's 1 to 3 in shader.wgsl, which share
 // group 3.
 @group(3) @binding(4) var<storage, read> masks: array<Mask>;
-// Detected masks' coverage, packed by `MaskSet::pack_coverage`: one byte per
+// Detected and brush masks' coverage, packed by `PhotoMasks::pack_coverage`: one byte per
 // texel, four per word, little-endian, rows unpadded. A storage buffer, not
 // a texture array: coverages differ in size, and the manual bilinear below
 // is what CPU parity needs anyway.
@@ -415,13 +417,12 @@ fn coverageTexel(off: u32, w: u32, x: u32, y: u32) -> f32 {
     return f32((word >> ((i & 3u) * 8u)) & 0xffu) / 255.0;
 }
 
-// Bilinear coverage of detected mask `m` at source `uv`: the four texels
+// Bilinear coverage of coverage mask `m` at source `uv`: the four texels
 // around `uv * size - 0.5`, clamped at the edge, blended as `fieldAt`
-// blends. `geom` is [byte offset, width, height, 0] as exact-integer floats.
-// Must match `Coverage::at_uv` in develop/coverage.rs.
+// blends. Must match `Coverage::at_uv` in develop/coverage.rs.
 fn coverageAt(m: Mask, uv: vec2<f32>) -> f32 {
-    let off = u32(m.geom.x);
-    let size = vec2<i32>(i32(m.geom.y), i32(m.geom.z));
+    let off = m.cov.x;
+    let size = vec2<i32>(i32(m.cov.y), i32(m.cov.z));
     let p = uv * vec2<f32>(size) - vec2<f32>(0.5);
     let f = floor(p);
     let t = p - f;
@@ -451,7 +452,7 @@ fn maskWeight(m: Mask, uv: vec2<f32>) -> f32 {
     if (kind == 2u) {
         // A detected mask with no coverage yet arrives with size 0: it
         // covers nothing, inverted or not, like a zero-length gradient.
-        if (m.geom.y <= 0.0 || m.geom.z <= 0.0) {
+        if (m.cov.y == 0u || m.cov.z == 0u) {
             return 0.0;
         }
         w = coverageAt(m, uv);

@@ -29,7 +29,7 @@ enum Handle {
 }
 
 /// A drag in progress, kept in egui's memory between frames.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Drag {
     Edit {
         index: usize,
@@ -83,15 +83,16 @@ impl Space<'_> {
     }
 }
 
-/// Where a mask's pin sits: a radial's center, a linear's midpoint. A
-/// detected mask has no geometry, so no pin: the panel is where it is
-/// picked.
+/// Where a mask's pin sits: a radial's center, a linear's midpoint, where a
+/// brush's first stroke began. A detected mask has no geometry, so no pin:
+/// the panel is where it is picked.
 fn pin_of(m: &Mask) -> Option<[f32; 2]> {
-    match m.shape {
+    match &m.shape {
         MaskShape::Linear { start, end } => {
             Some([(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0])
         }
-        MaskShape::Radial { center, .. } => Some(center),
+        MaskShape::Radial { center, .. } => Some(*center),
+        MaskShape::Brush { strokes } => strokes.first()?.points.first().copied(),
         MaskShape::Detected { .. } => None,
     }
 }
@@ -133,8 +134,8 @@ pub(super) fn loupe_mask_overlay(
         }
     }
 
-    if let Some((i, m)) = selected.and_then(|i| masks.get(i).map(|m| (i, *m))) {
-        for (k, (handle, at)) in handles(&space, &m).into_iter().enumerate() {
+    if let Some((i, m)) = selected.and_then(|i| masks.get(i).map(|m| (i, m))) {
+        for (k, (handle, at)) in handles(&space, m).into_iter().enumerate() {
             let id = egui::Id::new(("mask_handle", i, k));
             let Some(resp) = handle_area(&ctx, id, at, central) else {
                 continue;
@@ -150,7 +151,7 @@ pub(super) fn loupe_mask_overlay(
                     let drag = Drag::Edit {
                         index: i,
                         handle,
-                        from: m,
+                        from: m.clone(),
                         origin: space.uv(p),
                     };
                     ctx.data_mut(|d| d.insert_temp(drag_id, drag));
@@ -158,7 +159,7 @@ pub(super) fn loupe_mask_overlay(
             }
             if resp.hovered() && handle == Handle::Move {
                 if let MaskShape::Radial { feather, .. } = m.shape {
-                    feather_wheel(ui, i, m, feather, out);
+                    feather_wheel(ui, i, m.clone(), feather, out);
                 }
             }
         }
@@ -281,7 +282,7 @@ fn dragged(
 ) -> Option<Mask> {
     let d = [to[0] - origin[0], to[1] - origin[1]];
     let shift = |p: [f32; 2]| [p[0] + d[0], p[1] + d[1]];
-    let shape = match (from.shape, handle) {
+    let shape = match (from.shape.clone(), handle) {
         (MaskShape::Linear { start, end }, Handle::Move) => MaskShape::Linear {
             start: shift(start),
             end: shift(end),
@@ -314,7 +315,9 @@ fn dragged(
                 feather,
             }
         }
-        (MaskShape::Linear { .. } | MaskShape::Detected { .. }, _) => return None,
+        (MaskShape::Linear { .. } | MaskShape::Detected { .. } | MaskShape::Brush { .. }, _) => {
+            return None
+        }
     };
     Mask { shape, ..from }.sanitized()
 }
@@ -330,7 +333,7 @@ fn handles(space: &Space, m: &Mask) -> Vec<(Handle, egui::Pos2)> {
                 space.screen([(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0]),
             ),
         ],
-        MaskShape::Detected { .. } => Vec::new(),
+        MaskShape::Detected { .. } | MaskShape::Brush { .. } => Vec::new(),
         MaskShape::Radial {
             center,
             radii,
@@ -436,7 +439,7 @@ fn draw_selected(painter: &egui::Painter, space: &Space, m: &Mask, accent: egui:
             pin(painter, a + along / 2.0, accent);
         }
         // Its coverage shows through the Loupe's tint overlay instead.
-        MaskShape::Detected { .. } => {}
+        MaskShape::Detected { .. } | MaskShape::Brush { .. } => {}
         MaskShape::Radial {
             center,
             radii,

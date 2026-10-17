@@ -120,7 +120,7 @@ impl App {
             return;
         }
         let adj = self.current_adjustments();
-        let masks = self.current_mask_set();
+        let masks = self.current_photo_masks();
         // Count only cells inside the crop, matching what the loupe and export show.
         let crop = adj
             .crop
@@ -143,7 +143,6 @@ impl App {
         let fine = layers.fine.as_ref().filter(|_| adj.texture != 0.0);
         let dev = develop::Develop::framed(&adj, dw as u32, dh as u32);
         let global = develop::LocalAmounts::of(&adj);
-        let aspect = dw as f32 / dh as f32;
         let mut bins = [[0f32; 256]; 3];
         for cy in 0..dh {
             for cx in 0..dw {
@@ -178,7 +177,7 @@ impl App {
                     base.map(|b| b.at_uv(su, sv)),
                     fine.map(|f| f.at_uv(su, sv).mid),
                 );
-                let tone = (!masks.is_empty()).then(|| masks.local_tone(global, [su, sv], aspect));
+                let tone = (!masks.is_empty()).then(|| masks.local_tone(global, [su, sv]));
                 let out = dev.display_at(self.hist.pixel_format, px, u, v, tone.as_ref());
                 for ch in 0..3 {
                     let v = out[ch].clamp(0.0, 1.0);

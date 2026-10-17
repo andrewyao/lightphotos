@@ -6,6 +6,7 @@
 //! same math in `shader.wgsl`; the two must stay in sync.
 
 pub mod base;
+pub mod brush;
 pub mod chroma;
 pub mod color;
 pub mod copy;
@@ -27,7 +28,8 @@ pub use coverage::{Coverage, CoverageError, Detections, RasterId};
 pub use effects::{Effects, Grain, Vignette};
 pub use grade::{ColorGrade, GradeOps, Wheel, Zone};
 pub use mask::{
-    DetectTarget, GpuMask, LocalAmounts, Mask, MaskInput, MaskSet, MaskShape, MAX_MASKS,
+    DetectTarget, GpuMask, LocalAmounts, Mask, MaskInput, MaskSet, MaskShape, PhotoMasks, Stroke,
+    MAX_MASKS,
 };
 pub use sharpen::{Sharpen, Sharpening};
 
@@ -973,6 +975,14 @@ pub fn edit_signature_with_touchups(
             if let Some(target) = m.target() {
                 h.write(&[target.index() as u8]);
                 h.write(&detections.get(target).map_or([0; 8], RasterId::to_le_bytes));
+            }
+            for s in m.strokes().into_iter().flat_map(|s| s.iter()) {
+                h.write(&[u8::from(s.erase)]);
+                h.write(&(s.points.len() as u64).to_le_bytes());
+                let settings = [s.radius, s.feather, s.flow];
+                for v in settings.iter().chain(s.points.iter().flatten()) {
+                    h.write(&((v * 100_000.0).round() as i32).to_le_bytes());
+                }
             }
         }
     }

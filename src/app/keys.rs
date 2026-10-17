@@ -1492,7 +1492,7 @@ mod tests {
         use crate::develop::copy::{CopyItem, CopyItems};
         let (mut app, paths) = folder_app(2);
         let mask = crate::develop::Mask::radial([0.4, 0.5], [0.2, 0.2]);
-        app.masks.insert(paths[0].clone(), vec![mask]);
+        app.masks.insert(paths[0].clone(), vec![mask.clone()]);
         for (items, want) in [
             (CopyItems::LOOK, vec![]),
             (CopyItems::LOOK.with(CopyItem::Masks, true), vec![mask]),

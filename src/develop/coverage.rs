@@ -30,13 +30,15 @@ pub const MAX_COVERAGE_SIDE: u32 = 2048;
 /// gray PNG at the largest side is 4 MiB uncompressed, so this holds one
 /// that compresses badly and refuses anything that isn't a coverage.
 pub const MAX_COVERAGE_FILE_BYTES: u64 = 8 << 20;
-/// The most bytes the Loupe's packed coverage buffer can hold: one coverage
-/// per target at the largest side, since a photo has one detection per
-/// target and every mask of that target shares it. 8 MiB, so every byte
-/// offset is exact as an f32 (below 2^24) and the buffer is well inside
-/// WebGPU's 128 MiB storage binding default.
+/// The most bytes the Loupe's packed coverage buffer can hold. A photo has
+/// one detection per target, which every mask of that target shares, at up
+/// to the largest side; each other mask may be a brush, whose raster is at
+/// most `brush::MAX_BRUSH_TEXELS`. The worst case, both targets and 14
+/// brushes, is 22 MiB, well inside WebGPU's 128 MiB storage binding
+/// default. Offsets reach the GPU as u32s, so passing 2^24 is fine.
 pub const MAX_COVERAGE_BYTES: usize =
-    DetectTarget::ALL.len() * (MAX_COVERAGE_SIDE as usize) * (MAX_COVERAGE_SIDE as usize);
+    DetectTarget::ALL.len() * (MAX_COVERAGE_SIDE as usize) * (MAX_COVERAGE_SIDE as usize)
+        + (super::MAX_MASKS - DetectTarget::ALL.len()) * super::brush::MAX_BRUSH_TEXELS;
 /// The subdirectory of `.lightphotos/` that holds coverage files. Its own
 /// directory, so neither the thumbnail cache's name parser nor the sidecar
 /// scan ever sees one.
@@ -550,9 +552,12 @@ mod tests {
                 .unwrap(),
             only_extra
         );
-        assert_eq!(MAX_COVERAGE_BYTES, 8 << 20);
+        assert_eq!(MAX_COVERAGE_BYTES, 22 << 20);
         const {
-            assert!(MAX_COVERAGE_BYTES <= 1 << 24, "offsets must be exact f32s");
+            assert!(
+                MAX_COVERAGE_BYTES <= u32::MAX as usize,
+                "offsets must fit a u32"
+            );
         }
     }
 

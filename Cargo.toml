@@ -54,7 +54,7 @@ skrifa = "0.40"
 egui = "0.34"
 egui-wgpu = "0.34"
 
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["raw_value"] }
 # Detected masks' coverage files (`develop/coverage.rs`), on every target.
 png = "0.18"

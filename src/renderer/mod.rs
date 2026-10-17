@@ -14,7 +14,7 @@ use winit::window::Window;
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::curve::ToneCurve;
-use crate::develop::{BaseProbe, GpuAdjust, GpuCurve, GpuMask, GpuTouchUp, Grid, MaskSet};
+use crate::develop::{BaseProbe, GpuAdjust, GpuCurve, GpuMask, GpuTouchUp, Grid, PhotoMasks};
 
 /// A storage binding can't be empty, so the coverage buffer starts at one
 /// word and grows with the first detected mask.
@@ -235,9 +235,10 @@ pub struct Renderer {
     touch_buf: wgpu::Buffer,
     /// The masks, beside the touch-ups in group 3. See `set_masks`.
     mask_buf: wgpu::Buffer,
-    /// Detected masks' coverage, packed by `MaskSet::pack_coverage`. Grows
-    /// by powers of two up to `MAX_COVERAGE_BYTES`; `coverage_key` is the
-    /// `MaskSet::coverage_key` of the last upload, so a slider tick that
+    /// Detected and brush masks' coverage, packed by
+    /// `PhotoMasks::pack_coverage`. Grows by powers of two up to
+    /// `MAX_COVERAGE_BYTES`; `coverage_key` is the
+    /// `PhotoMasks::coverage_key` of the last upload, so a slider tick that
     /// changes no coverage uploads none.
     coverage_buf: wgpu::Buffer,
     coverage_key: u64,
@@ -1734,7 +1735,7 @@ impl Renderer {
     /// reads. The masks go up on every call, since sliders change them; the
     /// coverage only when its key changed, and the buffer grows (and the
     /// bind group is rebuilt) only when it must.
-    pub fn set_masks(&mut self, masks: &MaskSet) {
+    pub fn set_masks(&mut self, masks: &PhotoMasks) {
         let gpu = masks.gpu_masks();
         let gpu = gpu.get(..crate::develop::MAX_MASKS).unwrap_or(&gpu);
         if !gpu.is_empty() {

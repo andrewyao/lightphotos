@@ -803,8 +803,8 @@ mod tests {
         m.amounts.exposure = 1.0;
         {
             let mut cat = FolderStore::with_dir(dir.clone());
-            cat.set_masks(&p, &[m]);
-            assert_eq!(cat.masks(&p), vec![m]);
+            cat.set_masks(&p, &[m.clone()]);
+            assert_eq!(cat.masks(&p), vec![m.clone()]);
         }
         let mut reloaded = FolderStore::with_dir(dir.clone());
         assert_eq!(reloaded.masks(&p), vec![m]);

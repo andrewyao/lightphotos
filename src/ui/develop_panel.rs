@@ -910,6 +910,7 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
                         MaskShape::Linear { .. } => t.linear_gradient,
                         MaskShape::Radial { .. } => t.radial_gradient,
                         MaskShape::Detected { target } => t.target(target),
+                        MaskShape::Brush { .. } => t.brush_mask,
                     };
                     let status = app.mask_status(i);
                     let mut label = format!("{kind} {}", i + 1);
@@ -947,15 +948,20 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
                 }
             });
         });
-        let Some((i, mask)) = selected.and_then(|i| masks.get(i).map(|m| (i, *m))) else {
+        let Some((i, mask)) = selected.and_then(|i| masks.get(i).map(|m| (i, m))) else {
             return;
         };
         form.row(ui, "", |ui| {
             ui.horizontal_wrapped(|ui| {
                 let mut invert = mask.invert;
                 if ui.checkbox(&mut invert, t.mask_invert).changed() {
-                    out.actions
-                        .push(UiAction::SetMask(i, Mask { invert, ..mask }));
+                    out.actions.push(UiAction::SetMask(
+                        i,
+                        Mask {
+                            invert,
+                            ..mask.clone()
+                        },
+                    ));
                 }
                 let retry = matches!(
                     app.mask_status(i),
@@ -974,13 +980,13 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
             });
         });
     });
-    let Some((i, mask)) = selected.and_then(|i| masks.get(i).map(|m| (i, *m))) else {
+    let Some((i, mask)) = selected.and_then(|i| masks.get(i).map(|m| (i, m))) else {
         return;
     };
     ui.add_space(font_size::px(ui.style(), form::SLIDER_GAP));
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), form::SLIDER_GAP);
-        let mut next = mask;
+        let mut next = mask.clone();
         for s in &crate::develop::mask::LOCAL_SLIDERS {
             let field = (s.field)(&mut next.amounts);
             develop_slider(
@@ -998,7 +1004,7 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
             develop_slider(ui, t.feather, &mut percent, 0.0..=100.0, 50.0, 0, false);
             *feather = (percent / 100.0).clamp(0.0, 1.0);
         }
-        if next != mask {
+        if next != *mask {
             out.actions.push(UiAction::SetMask(i, next));
         }
     });

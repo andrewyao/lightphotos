@@ -40,6 +40,13 @@ impl App {
         })
     }
 
+    /// [`current_mask_set`](Self::current_mask_set) placed on the shown
+    /// photo, brush rasters and all: what the Loupe and the histogram draw.
+    pub(crate) fn current_photo_masks(&mut self) -> crate::develop::PhotoMasks {
+        let (w, h) = self.image_size();
+        self.current_mask_set().on_photo(w / h)
+    }
+
     /// The panel's mark on mask `i` of the shown photo: `None` for a
     /// parametric mask, or a detected one whose coverage is in hand.
     pub(crate) fn mask_status(&self, i: usize) -> Option<coverage::MaskStatus> {

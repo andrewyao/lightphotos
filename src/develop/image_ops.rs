@@ -288,7 +288,7 @@ fn bake_samples<S: Sample>(
     let (cw, ch) = (x1 - x0, y1 - y0);
     let dev = develop::Develop::framed(adj, w, h);
     let global = develop::LocalAmounts::of(adj);
-    let aspect = w as f32 / h as f32;
+    let masks = masks.on_photo(w as f32 / h as f32);
     let pre = |x: u32, y: u32| pre_at(&src, touchups, x, y);
     // Each layer only for an edit or probe that reads it.
     let base = if probe.reads_base() {
@@ -345,7 +345,7 @@ fn bake_samples<S: Sample>(
                     pre,
                 )
             };
-            let tone = (!masks.is_empty()).then(|| masks.local_tone(global, [u, v], aspect));
+            let tone = (!masks.is_empty()).then(|| masks.local_tone(global, [u, v]));
             let (cu, cv) = canvas;
             let out = match (img.pixel_format, &tone) {
                 (PixelFormat::Srgb8 | PixelFormat::TonedF16, None) => {
@@ -737,7 +737,7 @@ mod tests {
         let mut m = crate::develop::Mask::detected(DetectTarget::Subject);
         m.amounts.exposure = -2.0;
         let plain = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0).2;
-        let set = MaskSet::new(&[m], |t| {
+        let set = MaskSet::new(&[m.clone()], |t| {
             (t == DetectTarget::Subject).then(|| coverage.clone())
         });
         let masked = bake_edited(&img, &Adjustments::default(), &[], &set, 0).2;
@@ -750,7 +750,7 @@ mod tests {
                 assert_eq!(px(&masked, x, y), px(&plain, x, y), "uncovered ({x}, {y})");
             }
         }
-        let pending = MaskSet::new(&[m], |_| None);
+        let pending = MaskSet::new(&[m.clone()], |_| None);
         assert_eq!(
             bake_edited(&img, &Adjustments::default(), &[], &pending, 0).2,
             plain,
@@ -764,7 +764,7 @@ mod tests {
         let mut left = crate::develop::Mask::linear([0.2, 0.5], [0.4, 0.5]);
         left.amounts.exposure = 1.0;
         let plain = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0).2;
-        let masked = bake_edited(&img, &Adjustments::default(), &[], &only(left), 0).2;
+        let masked = bake_edited(&img, &Adjustments::default(), &[], &only(left.clone()), 0).2;
         let px = |buf: &[u8], x: usize, y: usize| buf[(y * 60 + x) * 4 + 1];
         for y in [5, 20, 35] {
             assert!(

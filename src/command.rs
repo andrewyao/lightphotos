@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::develop::copy::{CopyItem, CopyItems};
 use crate::develop::{
-    Adjustments, Crop, LocalAmounts, Mask, MaskShape, SliderId, Straighten, MAX_MASKS, SLIDERS,
-    STRAIGHTEN_RANGE,
+    mask::MAX_BRUSH_POINTS, Adjustments, Crop, LocalAmounts, Mask, MaskShape, SliderId, Straighten,
+    MAX_MASKS, SLIDERS, STRAIGHTEN_RANGE,
 };
 use crate::export::ExportSettings;
 use crate::sidecar::{ColorLabel, ImageRecord, MAX_RATING};
@@ -728,8 +728,21 @@ pub struct MaskClearParams {
     pub photos: Photos,
 }
 
-/// A mask from a caller, held to range, or why it can't be one.
-fn valid_mask(id: &str, mask: Mask) -> Result<Mask, CommandError> {
+/// A mask from a caller, held to range, or why it can't be one. `others`
+/// are the photo's other masks, whose brush points count toward
+/// [`MAX_BRUSH_POINTS`].
+fn valid_mask<'a>(
+    id: &str,
+    mask: Mask,
+    others: impl Iterator<Item = &'a Mask>,
+) -> Result<Mask, CommandError> {
+    let used: usize = others.map(Mask::brush_points).sum();
+    if used.saturating_add(mask.brush_points()) > MAX_BRUSH_POINTS {
+        return Err(CommandError::bad_params(
+            id,
+            format!("a photo's brush masks hold at most {MAX_BRUSH_POINTS} points"),
+        ));
+    }
     mask.sanitized()
         .ok_or_else(|| CommandError::bad_params(id, "every mask number must be finite".to_string()))
 }
@@ -743,12 +756,12 @@ impl MaskAddParams {
             ));
         }
         let mask = Mask {
-            shape: self.shape,
+            shape: self.shape.clone(),
             invert: self.invert,
             amounts: self.amounts,
         };
         let mut out = masks.to_vec();
-        out.push(valid_mask("mask.add", mask)?);
+        out.push(valid_mask("mask.add", mask, masks.iter())?);
         Ok(out)
     }
 }
@@ -760,11 +773,16 @@ impl MaskSetParams {
             .get_mut(self.index)
             .ok_or_else(|| no_mask("mask.set", self.index, masks.len()))?;
         let mask = Mask {
-            shape: self.shape.unwrap_or(slot.shape),
+            shape: self.shape.clone().unwrap_or_else(|| slot.shape.clone()),
             invert: self.invert.unwrap_or(slot.invert),
             amounts: self.amounts.unwrap_or(slot.amounts),
         };
-        *slot = valid_mask("mask.set", mask)?;
+        let others = masks
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != self.index)
+            .map(|(_, m)| m);
+        *slot = valid_mask("mask.set", mask, others)?;
         Ok(out)
     }
 }

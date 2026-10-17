@@ -30,8 +30,19 @@ pub const RADIUS_RANGE: std::ops::RangeInclusive<f32> = 1e-4..=4.0;
 /// bound keeps squared distances finite.
 const COORD_RANGE: std::ops::RangeInclusive<f32> = -10.0..=11.0;
 
+/// The most strokes one brush mask holds.
+pub const MAX_STROKES_PER_MASK: usize = 512;
+/// The most stroke points one photo's brush masks hold between them. With
+/// points thinned to a quarter radius apart and rounded to five decimals,
+/// each takes about 20 bytes of sidecar, so the cap stays well inside
+/// `sidecar::MAX_SIDECAR_BYTES`.
+pub const MAX_BRUSH_POINTS: usize = 20_000;
+/// The smallest and largest brush radius, as a fraction of the photo's
+/// shorter side.
+pub const BRUSH_RADIUS_RANGE: std::ops::RangeInclusive<f32> = 1e-3..=1.0;
+
 /// One local adjustment.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Mask {
     pub shape: MaskShape,
     /// Swaps where the mask applies and where it doesn't.
@@ -43,7 +54,7 @@ pub struct Mask {
 
 /// Where a mask applies. Points are 0..1 source UV; lengths are fractions of
 /// the photo's shorter side, so a circle stays round on any aspect.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MaskShape {
     /// Full strength on the `start` side, fading to nothing at `end`, as a
@@ -63,12 +74,34 @@ pub enum MaskShape {
     /// photo's [`Detections`]. No geometry: nothing to drag, nothing to
     /// sanitize. A photo without that detection yet renders it as nothing.
     Detected { target: DetectTarget },
+    /// Painted strokes, applied in order: each adds to or erases what the
+    /// ones before it painted. `develop::brush` rasterizes them into a
+    /// coverage that renders like a detected mask's. An `Arc`, so undo
+    /// snapshots and every render's copy share one list.
+    Brush { strokes: Arc<[Stroke]> },
 }
 
 impl MaskShape {
     /// The `kind` tags this build reads. A sidecar entry with any other tag
     /// is a later build's mask, which `sidecar::MaskList` keeps verbatim.
-    pub const KINDS: &[&str] = &["linear", "radial", "detected"];
+    pub const KINDS: &[&str] = &["linear", "radial", "detected", "brush"];
+}
+
+/// One press-to-release drag of the brush. Every dab along `points` has the
+/// same size, feather and flow.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Stroke {
+    /// Dab radius, as a fraction of the photo's shorter side.
+    pub radius: f32,
+    /// The outer share of the radius that fades out, 0..1.
+    pub feather: f32,
+    /// How much one dab adds, 0..1. Overlapping dabs build toward 1.
+    pub flow: f32,
+    /// Removes coverage instead of adding it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub erase: bool,
+    /// The path in source UV, thinned to about a quarter radius apart.
+    pub points: Vec<[f32; 2]>,
 }
 
 /// What a detected mask selects. One variant per detector; a photo holds at
@@ -240,17 +273,53 @@ impl Mask {
         }
     }
 
+    /// A brush mask with nothing painted yet and no amounts.
+    pub fn brush() -> Self {
+        Mask {
+            shape: MaskShape::Brush {
+                strokes: Arc::from([]),
+            },
+            invert: false,
+            amounts: LocalAmounts::default(),
+        }
+    }
+
     /// The detection this mask reads, if it is a detected one.
     pub fn target(&self) -> Option<DetectTarget> {
         match self.shape {
             MaskShape::Detected { target } => Some(target),
-            MaskShape::Linear { .. } | MaskShape::Radial { .. } => None,
+            MaskShape::Linear { .. } | MaskShape::Radial { .. } | MaskShape::Brush { .. } => None,
         }
+    }
+
+    /// The painted strokes, if this is a brush mask.
+    pub fn strokes(&self) -> Option<&Arc<[Stroke]>> {
+        match &self.shape {
+            MaskShape::Brush { strokes } => Some(strokes),
+            MaskShape::Linear { .. } | MaskShape::Radial { .. } | MaskShape::Detected { .. } => {
+                None
+            }
+        }
+    }
+
+    /// How many stroke points this mask holds, toward [`MAX_BRUSH_POINTS`].
+    pub fn brush_points(&self) -> usize {
+        self.strokes()
+            .map_or(0, |s| s.iter().map(|s| s.points.len()).sum())
     }
 
     /// This mask with every number in range, or `None` if one isn't a
     /// number at all. Masks come from sidecars and drive scripts.
     pub fn sanitized(self) -> Option<Mask> {
+        self.sanitized_within(&mut { MAX_BRUSH_POINTS })
+    }
+
+    /// [`sanitized`](Self::sanitized), keeping at most `points_left` brush
+    /// points and taking those kept from it, so a photo's masks share one
+    /// [`MAX_BRUSH_POINTS`]. A stroke whose settings aren't numbers is
+    /// dropped, as is a point that isn't; strokes and points past a cap are
+    /// cut.
+    pub fn sanitized_within(self, points_left: &mut usize) -> Option<Mask> {
         let point = |p: [f32; 2]| {
             p.iter()
                 .all(|v| v.is_finite())
@@ -260,6 +329,17 @@ impl Mask {
             return None;
         }
         let shape = match self.shape {
+            MaskShape::Brush { strokes } => MaskShape::Brush {
+                strokes: strokes
+                    .iter()
+                    .take(MAX_STROKES_PER_MASK)
+                    .filter_map(|s| {
+                        let stroke = s.sanitized(*points_left)?;
+                        *points_left = points_left.saturating_sub(stroke.points.len());
+                        Some(stroke)
+                    })
+                    .collect(),
+            },
             MaskShape::Linear { start, end } => MaskShape::Linear {
                 start: point(start)?,
                 end: point(end)?,
@@ -293,11 +373,41 @@ impl Mask {
     }
 }
 
+impl Stroke {
+    /// This stroke with its numbers in range and at most `max_points`
+    /// points, or `None` if a setting isn't a number or no point is left.
+    fn sanitized(&self, max_points: usize) -> Option<Stroke> {
+        if !(self.radius.is_finite() && self.feather.is_finite() && self.flow.is_finite()) {
+            return None;
+        }
+        let points: Vec<[f32; 2]> = self
+            .points
+            .iter()
+            .filter(|p| p.iter().all(|v| v.is_finite()))
+            .take(max_points)
+            .map(|p| p.map(|v| v.clamp(*COORD_RANGE.start(), *COORD_RANGE.end())))
+            .collect();
+        if points.is_empty() {
+            return None;
+        }
+        Some(Stroke {
+            radius: self
+                .radius
+                .clamp(*BRUSH_RADIUS_RANGE.start(), *BRUSH_RADIUS_RANGE.end()),
+            feather: self.feather.clamp(0.0, 1.0),
+            flow: self.flow.clamp(0.0, 1.0),
+            erase: self.erase,
+            points,
+        })
+    }
+}
+
 /// How much of `mask` applies at source UV `uv`, 0..1, on a photo whose
 /// width over height is `aspect`. `coverage` is the photo's coverage for a
 /// detected mask's target, `None` when it has none yet (pending, unsupported,
 /// missing): such a mask covers nothing, inverted or not, like a zero-length
-/// gradient. Must match `maskWeight` in loupe_common.wgsl.
+/// gradient. A brush mask's `coverage` is its strokes' raster. Must match
+/// `maskWeight` in loupe_common.wgsl.
 pub fn mask_weight(mask: &Mask, coverage: Option<&Coverage>, uv: [f32; 2], aspect: f32) -> f32 {
     // UV to units of the shorter side.
     let scale = if aspect >= 1.0 {
@@ -336,7 +446,7 @@ pub fn mask_weight(mask: &Mask, coverage: Option<&Coverage>, uv: [f32; 2], aspec
             let y = (c * q[1] - s * q[0]) / radii[1];
             falloff(x.hypot(y), feather)
         }
-        MaskShape::Detected { .. } => match coverage {
+        MaskShape::Detected { .. } | MaskShape::Brush { .. } => match coverage {
             Some(c) => c.at_uv(uv),
             None => return 0.0,
         },
@@ -351,7 +461,7 @@ pub fn mask_weight(mask: &Mask, coverage: Option<&Coverage>, uv: [f32; 2], aspec
 /// 1 inside `1 - feather` of the radius, 0 at and past the radius, and a
 /// smoothstep between. A zero feather is a hard edge, not a division by zero.
 /// Must match `maskFalloff` in loupe_common.wgsl.
-fn falloff(d: f32, feather: f32) -> f32 {
+pub(super) fn falloff(d: f32, feather: f32) -> f32 {
     if d >= 1.0 {
         return 0.0;
     }
@@ -362,9 +472,11 @@ fn falloff(d: f32, feather: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// A photo's masks ready to render: each mask with the coverage its target
-/// resolved to. What every renderer reads: the Loupe upload, `bake_edited`,
-/// the histogram. Private, so a layer can't carry another target's coverage.
+/// A photo's masks with the coverage each detected target resolved to:
+/// what a bake job carries and every renderer takes. A brush mask's raster
+/// depends on the photo's shape, so [`on_photo`](Self::on_photo) adds it
+/// where the renderer knows that. Private, so a layer can't carry another
+/// target's coverage.
 #[derive(Clone, Default)]
 pub struct MaskSet {
     layers: Vec<(Mask, Option<Arc<Coverage>>)>,
@@ -383,7 +495,7 @@ impl MaskSet {
                 let c = m
                     .target()
                     .and_then(|t| asked[t.index()].get_or_insert_with(|| coverage(t)).clone());
-                (*m, c)
+                (m.clone(), c)
             })
             .collect();
         MaskSet { layers }
@@ -429,6 +541,45 @@ impl MaskSet {
         self.layers.iter().map(|(m, _)| m)
     }
 
+    /// The detected coverage layer `i` renders with, if it has one.
+    pub fn coverage(&self, i: usize) -> Option<&Arc<Coverage>> {
+        self.layers.get(i).and_then(|(_, c)| c.as_ref())
+    }
+
+    /// The masks placed on a photo whose width over height is `aspect`, each
+    /// brush mask with its strokes' raster. What the Loupe uploads and every
+    /// bake and histogram samples, so none can render a brush mask without
+    /// its strokes.
+    pub fn on_photo(&self, aspect: f32) -> PhotoMasks {
+        let layers = self
+            .layers
+            .iter()
+            .map(|(m, c)| {
+                let c = match m.strokes() {
+                    Some(strokes) => Some(super::brush::coverage(strokes, aspect)),
+                    None => c.clone(),
+                };
+                (m.clone(), c)
+            })
+            .collect();
+        PhotoMasks { layers, aspect }
+    }
+}
+
+/// A [`MaskSet`] on a photo of a known shape: every mask with the coverage
+/// it renders with, detected or painted.
+#[derive(Clone, Default)]
+pub struct PhotoMasks {
+    layers: Vec<(Mask, Option<Arc<Coverage>>)>,
+    /// The photo's width over height, which lengths in a mask are scaled by.
+    aspect: f32,
+}
+
+impl PhotoMasks {
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
     /// The coverage layer `i` renders with, if it has one.
     pub fn coverage(&self, i: usize) -> Option<&Arc<Coverage>> {
         self.layers.get(i).and_then(|(_, c)| c.as_ref())
@@ -437,10 +588,10 @@ impl MaskSet {
     /// The sliders at source UV `uv`: `base` plus every mask's weighted
     /// amounts, each held to its range. Must match `localTone` in
     /// loupe_common.wgsl.
-    pub fn local_tone(&self, base: LocalAmounts, uv: [f32; 2], aspect: f32) -> LocalAmounts {
+    pub fn local_tone(&self, base: LocalAmounts, uv: [f32; 2]) -> LocalAmounts {
         let mut out = base;
         for (m, c) in &self.layers {
-            let w = mask_weight(m, c.as_deref(), uv, aspect);
+            let w = mask_weight(m, c.as_deref(), uv, self.aspect);
             if w > 0.0 {
                 out.add_weighted(&m.amounts, w);
             }
@@ -460,8 +611,8 @@ impl MaskSet {
         out
     }
 
-    /// GPU records, detected ones pointing into `pack_coverage`'s layout.
-    /// Two masks of one target share one copy of its bytes.
+    /// GPU records, coverage ones pointing into `pack_coverage`'s layout.
+    /// Two masks of one raster share one copy of its bytes.
     pub fn gpu_masks(&self) -> Vec<GpuMask> {
         let mut offsets: Vec<(RasterId, usize)> = Vec::new();
         let mut next = 0usize;
@@ -478,7 +629,9 @@ impl MaskSet {
                         .iter()
                         .find(|(id, _)| *id == c.id())
                         .map_or(0, |(_, off)| *off);
-                    g.geom = [off as f32, c.width() as f32, c.height() as f32, 0.0];
+                    // Below `MAX_COVERAGE_BYTES`, so it fits.
+                    let off = u32::try_from(off).unwrap_or(u32::MAX);
+                    g.coverage = [off, c.width(), c.height(), 0];
                 }
                 g
             })
@@ -556,13 +709,10 @@ impl MaskInput {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuMask {
-    /// Linear: start, end. Radial: center, radii. Detected: byte offset into
-    /// the coverage buffer, width, height, 0, as exact-integer floats (all
-    /// below 2^24 by `MAX_COVERAGE_BYTES`; a bit-cast would make small
-    /// integers denormals, which GPUs may flush to zero). `From<&Mask>`
-    /// writes zeros; only `MaskSet::gpu_masks` knows offsets.
+    /// Linear: start, end. Radial: center, radii.
     pub geom: [f32; 4],
-    /// Kind (0 linear, 1 radial, 2 detected), invert (0 or 1), angle, feather.
+    /// Kind (0 linear, 1 radial, 2 coverage: detected or brush), invert (0
+    /// or 1), angle, feather.
     pub params: [f32; 4],
     /// Exposure, contrast, highlights, shadows.
     pub a0: [f32; 4],
@@ -570,6 +720,11 @@ pub struct GpuMask {
     pub a1: [f32; 4],
     /// Saturation, then padding.
     pub a2: [f32; 4],
+    /// A coverage mask's byte offset into the coverage buffer, width,
+    /// height, 0; all 0 while it has none. Integers, since offsets pass
+    /// 2^24, past where an f32 counts exactly. `From<&Mask>` writes zeros;
+    /// only `PhotoMasks::gpu_masks` knows offsets.
+    pub coverage: [u32; 4],
 }
 
 impl From<&Mask> for GpuMask {
@@ -589,7 +744,9 @@ impl From<&Mask> for GpuMask {
                 [center[0], center[1], radii[0], radii[1]],
                 [1.0, invert, angle, feather],
             ),
-            MaskShape::Detected { .. } => ([0.0; 4], [2.0, invert, 0.0, 0.0]),
+            MaskShape::Detected { .. } | MaskShape::Brush { .. } => {
+                ([0.0; 4], [2.0, invert, 0.0, 0.0])
+            }
         };
         let a = &m.amounts;
         GpuMask {
@@ -598,6 +755,7 @@ impl From<&Mask> for GpuMask {
             a0: [a.exposure, a.contrast, a.highlights, a.shadows],
             a1: [a.whites, a.blacks, a.temp, a.tint],
             a2: [a.saturation, 0.0, 0.0, 0.0],
+            coverage: [0; 4],
         }
     }
 }
@@ -617,10 +775,10 @@ mod tests {
             }
             self
         }
-        fn inverted(self) -> Self {
+        fn inverted(&self) -> Self {
             Mask {
                 invert: true,
-                ..self
+                ..self.clone()
             }
         }
     }
@@ -696,11 +854,11 @@ mod tests {
             temp: 10.0,
             ..LocalAmounts::default()
         };
-        let plain = |masks: &[Mask]| MaskSet::new(masks, |_| None);
-        let inside = plain(&[m, m]).local_tone(base, [0.5, 0.5], 1.0);
+        let plain = |masks: &[Mask]| MaskSet::new(masks, |_| None).on_photo(1.0);
+        let inside = plain(&[m.clone(), m.clone()]).local_tone(base, [0.5, 0.5]);
         assert_eq!(inside.exposure, 5.0, "held to the slider's range");
         assert_eq!(inside.temp, -70.0);
-        let outside = plain(&[m]).local_tone(base, [0.0, 0.0], 1.0);
+        let outside = plain(&[m]).local_tone(base, [0.0, 0.0]);
         assert_eq!(outside, base);
     }
 
@@ -723,7 +881,7 @@ mod tests {
             0.0,
             "no coverage covers nothing, inverted or not"
         );
-        assert_eq!(m.sanitized(), Some(m), "nothing to clamp");
+        assert_eq!(m.clone().sanitized(), Some(m.clone()), "nothing to clamp");
         assert_eq!(m.target(), Some(DetectTarget::Subject));
         assert_eq!(Mask::linear([0.0; 2], [1.0; 2]).target(), None);
     }
@@ -735,39 +893,43 @@ mod tests {
         let sky = Mask::detected(DetectTarget::Sky);
         let c = half_left();
         let mut asked = Vec::new();
-        let set = MaskSet::new(&[m, sky, m.inverted(), radial(0.5)], |t| {
+        let set = MaskSet::new(&[m.clone(), sky.clone(), m.inverted(), radial(0.5)], |t| {
             asked.push(t);
             (t == DetectTarget::Subject).then(|| Arc::clone(&c))
         });
         assert_eq!(asked, [DetectTarget::Subject, DetectTarget::Sky]);
         assert_eq!(set.len(), 4);
         assert!(set.coverage(0).is_some() && set.coverage(1).is_none());
+        let set = set.on_photo(2.0);
 
         let packed = set.pack_coverage();
         assert_eq!(packed.len(), 2, "one 8-byte coverage, four bytes a word");
         assert_eq!(packed[0], u32::from_le_bytes([255, 255, 0, 0]));
         let gpu = set.gpu_masks();
         assert_eq!(gpu[0].params[0], 2.0);
-        assert_eq!(gpu[0].geom, [0.0, 4.0, 2.0, 0.0]);
+        assert_eq!(gpu[0].coverage, [0, 4, 2, 0]);
         assert_eq!(
-            gpu[2].geom, gpu[0].geom,
+            gpu[2].coverage, gpu[0].coverage,
             "the second subject mask shares the bytes"
         );
         assert_eq!(gpu[2].params[1], 1.0, "but keeps its own invert");
-        assert_eq!(gpu[1].geom, [0.0; 4], "a pending target has size 0");
+        assert_eq!(gpu[1].coverage, [0; 4], "a pending target has size 0");
         assert_eq!(gpu[3].params[0], 1.0);
         assert_ne!(set.coverage_key(), 0);
-        assert_eq!(MaskSet::new(&[sky], |_| None).coverage_key(), 0);
+        assert_eq!(
+            MaskSet::new(&[sky], |_| None).on_photo(2.0).coverage_key(),
+            0
+        );
 
         let base = LocalAmounts::default();
-        assert_eq!(set.local_tone(base, [0.2, 0.5], 2.0).exposure, 1.0);
+        assert_eq!(set.local_tone(base, [0.2, 0.5]).exposure, 1.0);
         assert_eq!(
-            set.local_tone(base, [0.8, 0.5], 2.0).exposure,
+            set.local_tone(base, [0.8, 0.5]).exposure,
             1.0,
             "the inverted one"
         );
         assert_eq!(
-            set.local_tone(base, [0.5, 0.5], 2.0).exposure,
+            set.local_tone(base, [0.5, 0.5]).exposure,
             1.0,
             "half of each"
         );
@@ -838,6 +1000,7 @@ mod tests {
             Mask::linear([0.0; 2], [1.0; 2]),
             Mask::radial([0.5; 2], [0.1; 2]),
             Mask::detected(DetectTarget::Subject),
+            Mask::brush(),
         ] {
             let v = serde_json::to_value(m.shape).unwrap();
             let kind = v["kind"].as_str().unwrap();
@@ -860,5 +1023,99 @@ mod tests {
         );
         let back: Mask = serde_json::from_str(&json).unwrap();
         assert_eq!(back, m);
+    }
+
+    fn brush_of(strokes: Vec<Stroke>) -> Mask {
+        Mask {
+            shape: MaskShape::Brush {
+                strokes: strokes.into(),
+            },
+            ..Mask::brush()
+        }
+    }
+
+    fn stroke(points: &[[f32; 2]]) -> Stroke {
+        Stroke {
+            radius: 0.1,
+            feather: 0.5,
+            flow: 1.0,
+            erase: false,
+            points: points.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_brush_mask_round_trips_through_its_tagged_json() {
+        let mut erase = stroke(&[[0.5, 0.5]]);
+        erase.erase = true;
+        let m = brush_of(vec![stroke(&[[0.1, 0.2], [0.3, 0.4]]), erase]);
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(
+            json,
+            r#"{"shape":{"kind":"brush","strokes":[{"radius":0.1,"feather":0.5,"flow":1.0,"points":[[0.1,0.2],[0.3,0.4]]},{"radius":0.1,"feather":0.5,"flow":1.0,"erase":true,"points":[[0.5,0.5]]}]}}"#
+        );
+        assert_eq!(serde_json::from_str::<Mask>(&json).unwrap(), m);
+        assert_eq!(m.brush_points(), 3);
+        assert_eq!(m.target(), None);
+    }
+
+    #[test]
+    fn sanitizing_a_brush_drops_bad_strokes_and_points_and_holds_the_caps() {
+        let mut nan = stroke(&[[0.5, 0.5]]);
+        nan.radius = f32::NAN;
+        let mut wild = stroke(&[[f32::NAN, 0.5], [1e9, -1e9], [0.5, f32::INFINITY]]);
+        wild.radius = 50.0;
+        wild.flow = -2.0;
+        wild.feather = 9.0;
+        let empty = stroke(&[]);
+        let only_nan = stroke(&[[f32::NAN, f32::NAN]]);
+        let m = brush_of(vec![nan, wild, empty, only_nan])
+            .sanitized()
+            .unwrap();
+        let strokes = m.strokes().unwrap();
+        assert_eq!(strokes.len(), 1, "{strokes:?}");
+        assert_eq!(strokes[0].points, vec![[11.0, -10.0]]);
+        assert_eq!(
+            (strokes[0].radius, strokes[0].flow, strokes[0].feather),
+            (1.0, 0.0, 1.0)
+        );
+
+        let many = brush_of(vec![stroke(&[[0.5, 0.5]]); MAX_STROKES_PER_MASK + 9]);
+        assert_eq!(
+            many.sanitized().unwrap().strokes().unwrap().len(),
+            MAX_STROKES_PER_MASK
+        );
+        let mut left = 5;
+        let long = brush_of(vec![stroke(&[[0.5, 0.5]; 4]); 3]);
+        let cut = long.sanitized_within(&mut left).unwrap();
+        assert_eq!(cut.brush_points(), 5, "points past the budget are cut");
+        assert_eq!(cut.strokes().unwrap().len(), 2);
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn a_brush_mask_renders_its_raster_and_an_empty_one_inverted_covers_all() {
+        let mut m = brush_of(vec![stroke(&[[0.2, 0.5], [0.4, 0.5]])]);
+        m.amounts.exposure = 1.0;
+        let mut empty = Mask::brush();
+        empty.invert = true;
+        empty.amounts.temp = 10.0;
+        let set = MaskSet::new(&[m.clone(), empty], |_| None);
+        assert!(set.coverage(0).is_none(), "no raster until it has a shape");
+        let placed = set.on_photo(1.5);
+        let base = LocalAmounts::default();
+        assert_eq!(placed.local_tone(base, [0.3, 0.5]).exposure, 1.0);
+        assert_eq!(placed.local_tone(base, [0.8, 0.5]).exposure, 0.0);
+        assert_eq!(placed.local_tone(base, [0.8, 0.9]).temp, 10.0);
+        let gpu = placed.gpu_masks();
+        let raster = placed.coverage(0).unwrap();
+        assert_eq!(gpu[0].params[0], 2.0);
+        assert_eq!(gpu[0].coverage, [0, raster.width(), raster.height(), 0]);
+        let after = raster.alpha().len() as u32;
+        assert_eq!(gpu[1].coverage, [after, 1, 1, 0], "packed after the first");
+        assert_eq!(
+            placed.pack_coverage().len(),
+            (raster.alpha().len() + 1).div_ceil(4)
+        );
     }
 }

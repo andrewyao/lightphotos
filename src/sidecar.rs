@@ -240,6 +240,7 @@ impl Serialize for MaskList {
 impl<'de> Deserialize<'de> for MaskList {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut list = MaskList::default();
+        let mut points_left = crate::develop::mask::MAX_BRUSH_POINTS;
         for (at, raw) in Vec::<Box<RawValue>>::deserialize(deserializer)?
             .into_iter()
             .enumerate()
@@ -247,7 +248,7 @@ impl<'de> Deserialize<'de> for MaskList {
             match serde_json::from_str::<Mask>(raw.get()) {
                 Ok(m) => {
                     if list.known.len() < MAX_MASKS {
-                        list.known.extend(m.sanitized());
+                        list.known.extend(m.sanitized_within(&mut points_left));
                     }
                 }
                 Err(_) if MaskList::is_foreign(&raw) && list.foreign.len() < MAX_MASKS => {
@@ -664,6 +665,48 @@ mod tests {
     }
 
     #[test]
+    fn a_brush_mask_round_trips_and_a_malformed_one_is_dropped() {
+        let brush = r#"{"shape":{"kind":"brush","strokes":[{"radius":0.05,"feather":0.5,"flow":0.8,"points":[[0.1,0.2],[0.3,0.4]]},{"radius":0.02,"feather":0,"flow":1,"erase":true,"points":[[0.2,0.3]]}]},"amounts":{"exposure":1}}"#;
+        let body = format!(
+            r#"{{"rating":3,"masks":[
+                {brush},
+                {{"shape":{{"kind":"brush","strokes":"lots"}}}},
+                {{"shape":{{"kind":"brush","strokes":[{{"radius":0.1}}]}}}},
+                {{"shape":{{"kind":"brush"}}}}
+            ]}}"#
+        );
+        let rec = parse_record(body.as_bytes(), || None).unwrap();
+        assert_eq!(rec.rating, Some(3));
+        assert_eq!(rec.masks.len(), 1, "{:?}", rec.masks);
+        let strokes = rec.masks[0].strokes().unwrap();
+        assert_eq!(strokes.len(), 2);
+        assert!(strokes[1].erase);
+        let written = serde_json::to_string(&rec).unwrap();
+        assert!(!written.contains("lots"), "garbage is dropped: {written}");
+        assert_eq!(parse_record(written.as_bytes(), || None).unwrap(), rec);
+    }
+
+    #[test]
+    fn a_sidecar_over_the_brush_point_cap_loads_truncated() {
+        use crate::develop::mask::MAX_BRUSH_POINTS;
+        let points = vec!["[0.5,0.5]"; MAX_BRUSH_POINTS / 2 + 10].join(",");
+        let mask = format!(
+            r#"{{"shape":{{"kind":"brush","strokes":[{{"radius":0.05,"feather":0.5,"flow":1,"points":[{points}]}}]}}}}"#
+        );
+        let body = format!(r#"{{"masks":[{mask},{mask},{mask}]}}"#);
+        let rec = parse_record(body.as_bytes(), || None).unwrap();
+        let total: usize = rec.masks.iter().map(Mask::brush_points).sum();
+        assert_eq!(total, MAX_BRUSH_POINTS);
+        assert_eq!(rec.masks[0].brush_points(), MAX_BRUSH_POINTS / 2 + 10);
+        assert_eq!(
+            rec.masks.len(),
+            3,
+            "the last keeps its amounts, if no strokes"
+        );
+        assert!(rec.masks[2].strokes().unwrap().is_empty());
+    }
+
+    #[test]
     fn a_sidecar_loads_at_most_max_masks() {
         let mask = r#"{"shape":{"kind":"radial","center":[0.5,0.5],"radii":[0.1,0.1]}}"#;
         let masks = vec![mask; 10_000].join(",");
@@ -717,9 +760,10 @@ mod tests {
         );
 
         let mut sky_mask = gradient.clone();
-        sky_mask
-            .masks
-            .set(vec![Mask::detected(DetectTarget::Sky), gradient.masks[0]]);
+        sky_mask.masks.set(vec![
+            Mask::detected(DetectTarget::Sky),
+            gradient.masks[0].clone(),
+        ]);
         let pending = sky_mask.edit_signature();
         assert_ne!(pending, gradient.edit_signature());
         sky_mask.detections.set(DetectTarget::Sky, id);

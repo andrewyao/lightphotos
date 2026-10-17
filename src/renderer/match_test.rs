@@ -14,7 +14,7 @@ use crate::develop::image_ops::bake_edited_probe;
 use crate::develop::{
     Adjustments, BandShift, BaseProbe, CaScale, ColorAxis, ColorGrade, ColorMixer, Coverage, Crop,
     DetectTarget, GpuAdjust, GpuTouchUp, Grain, GrayMix, Mask, MaskSet, MaskShape, Section,
-    Sharpening, SliderId, Straighten, TouchUp, Vignette, Wheel, SLIDERS,
+    Sharpening, SliderId, Straighten, Stroke, TouchUp, Vignette, Wheel, SLIDERS,
 };
 
 const W: u32 = 96;
@@ -274,7 +274,7 @@ fn cases() -> Vec<Case> {
         name: "mask_linear".into(),
         adj: Adjustments::default(),
         touchups: Vec::new(),
-        masks: vec![sky],
+        masks: vec![sky.clone()],
     });
     out.push(Case {
         name: "mask_radial_inverted".into(),
@@ -284,7 +284,7 @@ fn cases() -> Vec<Case> {
             ..Default::default()
         },
         touchups: Vec::new(),
-        masks: vec![spot],
+        masks: vec![spot.clone()],
     });
     spot.invert = false;
     out.push(Case {
@@ -295,7 +295,7 @@ fn cases() -> Vec<Case> {
             ..Default::default()
         },
         touchups: vec![touchup],
-        masks: vec![sky, spot],
+        masks: vec![sky.clone(), spot.clone()],
     });
     // Every detected mask resolves to `test_coverage`, whose odd size puts
     // every read between texels.
@@ -311,7 +311,7 @@ fn cases() -> Vec<Case> {
         name: "mask_raster".into(),
         adj: Adjustments::default(),
         touchups: Vec::new(),
-        masks: vec![subject],
+        masks: vec![subject.clone()],
     });
     subject.invert = true;
     out.push(Case {
@@ -321,7 +321,7 @@ fn cases() -> Vec<Case> {
             ..Default::default()
         },
         touchups: Vec::new(),
-        masks: vec![subject],
+        masks: vec![subject.clone()],
     });
     subject.invert = false;
     // A turned canvas reads UVs past 0..1 at the corners, which exercises
@@ -334,7 +334,71 @@ fn cases() -> Vec<Case> {
             ..Default::default()
         },
         touchups: Vec::new(),
-        masks: vec![sky, subject, spot],
+        masks: vec![sky.clone(), subject, spot.clone()],
+    });
+    // A brush mask renders its strokes' raster through the same coverage
+    // path, so these hold the raster's size and layout to the CPU's.
+    let paint = |radius: f32, flow: f32, erase: bool, points: &[[f32; 2]]| Stroke {
+        radius,
+        feather: 0.6,
+        flow,
+        erase,
+        points: points.to_vec(),
+    };
+    let band = paint(0.12, 0.8, false, &[[0.05, 0.3], [0.4, 0.55], [0.95, 0.6]]);
+    let mut brush = Mask {
+        shape: MaskShape::Brush {
+            strokes: vec![band.clone()].into(),
+        },
+        invert: false,
+        amounts: crate::develop::LocalAmounts {
+            exposure: 1.1,
+            shadows: 40.0,
+            temp: -30.0,
+            saturation: 25.0,
+            ..Default::default()
+        },
+    };
+    out.push(Case {
+        name: "mask_brush".into(),
+        adj: Adjustments::default(),
+        touchups: Vec::new(),
+        masks: vec![brush.clone()],
+    });
+    brush.invert = true;
+    out.push(Case {
+        name: "mask_brush_inverted".into(),
+        adj: Adjustments {
+            exposure: -0.2,
+            ..Default::default()
+        },
+        touchups: Vec::new(),
+        masks: vec![brush.clone()],
+    });
+    brush.invert = false;
+    out.push(Case {
+        name: "mask_brush+crop+straighten".into(),
+        adj: Adjustments {
+            straighten: 7.0,
+            crop: straighten_crop,
+            ..Default::default()
+        },
+        touchups: Vec::new(),
+        masks: vec![spot, brush.clone()],
+    });
+    brush.shape = MaskShape::Brush {
+        strokes: vec![
+            band,
+            paint(0.05, 1.0, true, &[[0.5, 0.1], [0.45, 0.9]]),
+            paint(0.08, 0.3, false, &[[0.2, 0.8], [0.3, 0.75]]),
+        ]
+        .into(),
+    };
+    out.push(Case {
+        name: "brush_erase".into(),
+        adj: Adjustments::default(),
+        touchups: Vec::new(),
+        masks: vec![brush],
     });
     out.push(case(
         "denoise+straighten".into(),
@@ -667,7 +731,7 @@ fn measure(r: &mut Renderer, fixture: &Fixture, case: &Case, probe: BaseProbe) -
     let gpu_touchups: Vec<GpuTouchUp> = case.touchups.iter().map(GpuTouchUp::from).collect();
     r.set_touchups(&gpu_touchups);
     let masks = MaskSet::new(&case.masks, |_| Some(test_coverage()));
-    r.set_masks(&masks);
+    r.set_masks(&masks.on_photo(w as f32 / h as f32));
     assert!(r.render(None, None, None), "{}: render failed", case.name);
     let gpu = r.read_offscreen_blocking().expect("offscreen readback");
     assert_eq!((gpu.width, gpu.height), (w, h));
