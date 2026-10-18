@@ -651,9 +651,7 @@ fn with_png_meta(png: &[u8], exif: Option<&[u8]>, xmp: Option<&[u8]>) -> Vec<u8>
     if !png.starts_with(SIGNATURE) {
         return png.to_vec();
     }
-    let tagged = [b"sRGB", b"iCCP"]
-        .iter()
-        .any(|kind| png.windows(4).any(|w| w == *kind));
+    let tagged = png_names_colour_space(png);
     let mut out = SIGNATURE.to_vec();
     let mut i = SIGNATURE.len();
     while let Some(head) = png.get(i..i + 8) {
@@ -700,6 +698,22 @@ fn with_png_meta(png: &[u8], exif: Option<&[u8]>, xmp: Option<&[u8]>) -> Vec<u8>
         i += chunk.len();
     }
     out
+}
+
+/// Whether `png` has an `sRGB` or `iCCP` chunk. Pixel data can spell either name.
+fn png_names_colour_space(png: &[u8]) -> bool {
+    let mut i = 8usize;
+    while let Some(head) = i.checked_add(8).and_then(|end| png.get(i..end)) {
+        if matches!(&head[4..8], b"sRGB" | b"iCCP") {
+            return true;
+        }
+        let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        let Some(next) = len.checked_add(12).and_then(|n| i.checked_add(n)) else {
+            return false;
+        };
+        i = next;
+    }
+    false
 }
 
 /// The iTXt keyword XMP goes under, with its terminating NUL.
@@ -975,6 +989,53 @@ mod tests {
         assert_eq!(with_png_meta(&png, Some(b"II*\0"), None), png);
         assert_eq!(with_png_meta(b"nope", Some(b"II*\0"), None), b"nope");
         assert_eq!(crc32(b"IEND"), 0xAE42_6082, "PNG's own IEND CRC");
+    }
+
+    fn png_with_idat(idat: &[u8], tag: Option<&[u8; 4]>) -> Vec<u8> {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut chunk = |kind: &[u8; 4], body: &[u8]| {
+            png.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+            png.extend_from_slice(kind);
+            png.extend_from_slice(body);
+            png.extend_from_slice(&[0; 4]);
+        };
+        chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+        if let Some(tag) = tag {
+            chunk(tag, &[0]);
+        }
+        chunk(b"IDAT", idat);
+        chunk(b"IEND", &[]);
+        png
+    }
+
+    fn png_chunk_kinds(png: &[u8]) -> Vec<[u8; 4]> {
+        let mut kinds = Vec::new();
+        let mut i = 8;
+        while let Some(head) = png.get(i..i + 8) {
+            kinds.push([head[4], head[5], head[6], head[7]]);
+            i += 12 + u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        }
+        kinds
+    }
+
+    #[test]
+    fn pixel_bytes_that_spell_a_colour_chunk_name_do_not_count_as_tagged() {
+        for name in [b"sRGB", b"iCCP"] {
+            let png = png_with_idat(name, None);
+            let kinds = png_chunk_kinds(&with_png_meta(&png, None, None));
+            assert_eq!(
+                kinds.iter().filter(|k| *k == b"sRGB").count(),
+                1,
+                "an untagged PNG gets its sRGB chunk"
+            );
+        }
+        let tagged = png_with_idat(b"pixels", Some(b"sRGB"));
+        let kinds = png_chunk_kinds(&with_png_meta(&tagged, None, None));
+        assert_eq!(
+            kinds.iter().filter(|k| *k == b"sRGB").count(),
+            1,
+            "a PNG that names its colour space keeps just that chunk"
+        );
     }
 
     /// The browser's export path: its worker holds only the source bytes, so
