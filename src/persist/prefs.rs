@@ -199,6 +199,24 @@ mod tests {
     }
 
     #[test]
+    fn save_at_leaves_no_temp_file_behind() {
+        let dir = std::env::temp_dir().join(format!("lp-prefs-tmp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("presets");
+
+        save_at(&path, "first").unwrap();
+        save_at(&path, "second").unwrap();
+
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [OsStr::new("presets")], "only the setting remains");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn save_at_reports_a_path_it_cannot_write() {
         let dir = std::env::temp_dir().join(format!("lp-prefs-err-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
