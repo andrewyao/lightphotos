@@ -840,6 +840,42 @@ mod tests {
     }
 
     #[test]
+    fn a_slide_show_fills_the_screen_and_pans_down_a_photo_taller_than_it_or_fits_it() {
+        use crate::app::SlideshowSettings;
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, _) = editor_app();
+        app.loupe_viewport = Some((0, 0, 800, 400));
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        let t0 = Instant::now();
+        let next = app.tick_slideshow(t0).unwrap_or(t0);
+        let start = next - Duration::from_secs(5);
+        // The 1000 px square photo fills the 800 px width, 800 px tall.
+        app.tick_slideshow(start);
+        assert_eq!(app.slide_view(), Some((0.8, (0.0, 0.0))), "the top first");
+        app.tick_slideshow(start + Duration::from_millis(2500));
+        assert_eq!(app.slide_view(), Some((0.8, (0.0, -200.0))));
+        // Zoom to Fill off fits the photo's height, 200 px in from each side.
+        app.set_slideshow_settings(SlideshowSettings {
+            fill: false,
+            ..SlideshowSettings::default()
+        });
+        assert_eq!(app.slide_view(), Some((0.4, (200.0, 0.0))));
+        app.set_slideshow_settings(SlideshowSettings::default());
+        app.tick_slideshow(next - Duration::from_millis(1));
+        let (_, (_, y)) = app.slide_view().unwrap_or_default();
+        assert!((y + 400.0).abs() < 0.1, "the bottom last: {y}");
+        app.tick_slideshow(next);
+        assert_eq!(app.sel, Some(1));
+        // The next photo hasn't loaded, so only its start is known.
+        let pan = app.slide_view().map(|(_, pan)| pan);
+        assert_eq!(pan, Some((0.0, 0.0)), "the next photo's top");
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert_eq!(app.slide_view(), None, "the show's zoom ends with it");
+    }
+
+    #[test]
     fn a_slide_show_from_the_grid_goes_back_to_it() {
         let (mut app, _) = folder_app(3);
         let panels = (app.develop_open, app.side_page);
@@ -877,6 +913,7 @@ mod tests {
         app.set_slideshow_settings(SlideshowSettings {
             secs: 2,
             random: true,
+            ..SlideshowSettings::default()
         });
         press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
         assert!(app.slideshow_playing());

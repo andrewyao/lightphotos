@@ -200,6 +200,7 @@ pub struct Strings {
     pub slideshow_play: &'static str,
     pub slideshow_duration: &'static str,
     pub slideshow_random: &'static str,
+    pub slideshow_fill: &'static str,
     pub seconds_suffix: &'static str,
     /// Hover text for the signal bars beside the Loupe's file name, one per decode.
     pub shown_thumb_tip: &'static str,
@@ -1030,6 +1031,7 @@ pub static EN: Strings = Strings {
     slideshow_play: "Play slide show (Cmd+Enter)",
     slideshow_duration: "Display Duration",
     slideshow_random: "Random",
+    slideshow_fill: "Zoom to Fill",
     seconds_suffix: " s",
     shown_thumb_tip: "Showing the thumbnail",
     shown_embedded_tip: "Showing the JPEG embedded in the file",
@@ -1928,6 +1930,7 @@ pub static ZH: Strings = Strings {
     slideshow_play: "放映幻灯片 (Cmd+Enter)",
     slideshow_duration: "显示时长",
     slideshow_random: "随机",
+    slideshow_fill: "缩放以填充",
     seconds_suffix: " 秒",
     shown_thumb_tip: "正在显示缩略图",
     shown_embedded_tip: "正在显示文件自带的 JPEG",

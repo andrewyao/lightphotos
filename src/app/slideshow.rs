@@ -17,6 +17,9 @@ pub(crate) struct SlideshowSettings {
     pub(crate) secs: u32,
     /// Shuffle the photos rather than show them in grid order.
     pub(crate) random: bool,
+    /// Zoom each photo to fill the screen and pan across what overflows,
+    /// rather than fit the whole photo.
+    pub(crate) fill: bool,
 }
 
 impl Default for SlideshowSettings {
@@ -24,6 +27,7 @@ impl Default for SlideshowSettings {
         SlideshowSettings {
             secs: 5,
             random: false,
+            fill: true,
         }
     }
 }

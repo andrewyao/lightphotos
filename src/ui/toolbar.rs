@@ -523,8 +523,8 @@ pub(super) fn slideshow_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOut
     }
 }
 
-/// The cog's menu: how long each photo shows, and whether the order is
-/// random.
+/// The cog's menu: how long each photo shows, whether the order is random,
+/// and whether each photo fills the screen.
 fn slideshow_settings(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let mut settings = app.slideshow_settings();
@@ -544,6 +544,9 @@ fn slideshow_settings(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             ui.end_row();
             ui.label(t.slideshow_random);
             ui.checkbox(&mut settings.random, "");
+            ui.end_row();
+            ui.label(t.slideshow_fill);
+            ui.checkbox(&mut settings.fill, "");
             ui.end_row();
         });
     if settings != before {

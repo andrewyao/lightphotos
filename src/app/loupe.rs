@@ -15,7 +15,7 @@ const MASK_TINT: [f32; 3] = [1.0, 0.08, 0.08];
 
 impl App {
     /// Image size after rotation, with w and h swapped for 90° and 270°.
-    fn display_size(&self) -> (f32, f32) {
+    pub(super) fn display_size(&self) -> (f32, f32) {
         let (w, h) = self.image_size();
         if self.current_rotation() % 2 == 1 {
             (h, w)
@@ -26,7 +26,7 @@ impl App {
 
     /// The loupe image area in physical pixels. While comparing, each side
     /// gets half the width. This must match the split the compare render uses.
-    fn loupe_area(&self) -> (f32, f32) {
+    pub(super) fn loupe_area(&self) -> (f32, f32) {
         match self.loupe_viewport {
             Some((_, _, w, h)) => {
                 if self.compare && self.mode == ViewMode::Loupe && w >= 2 && h > 0 {
@@ -92,7 +92,8 @@ impl App {
         if self.want.is_none() || self.shown.path() != self.want.as_deref() {
             return false;
         }
-        self.outruns_preview_at(self.zoom()) && !self.preview_is_complete()
+        let zoom = self.slide_view().map_or(self.zoom(), |(zoom, _)| zoom);
+        self.outruns_preview_at(zoom) && !self.preview_is_complete()
     }
 
     /// Whether the wanted photo's landed preview already holds every source
@@ -359,18 +360,20 @@ impl App {
 
     /// The `(scale, offset, rot)` shader transform that `push_transform`
     /// uploads. `rot` is a row-major 2×2 `[m00, m01, m10, m11]`.
+    /// A slide show that fills the screen sets its own zoom and pan.
     fn loupe_transform(&self) -> ([f32; 2], [f32; 2], [f32; 4]) {
+        let (zoom, pan) = self.slide_view().unwrap_or((self.zoom(), self.pan));
         loupe_xform(
             self.display_size(),
             self.loupe_area(),
-            self.zoom(),
-            self.pan,
+            zoom,
+            pan,
             self.rot_matrix(),
         )
     }
 
     /// The display-UV to texture-UV rotation matrix for the current rotation.
-    fn rot_matrix(&self) -> [f32; 4] {
+    pub(super) fn rot_matrix(&self) -> [f32; 4] {
         match self.current_rotation() {
             1 => [0.0, 1.0, -1.0, 0.0],
             2 => [-1.0, 0.0, 0.0, -1.0],
