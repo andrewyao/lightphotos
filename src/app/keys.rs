@@ -875,6 +875,55 @@ mod tests {
     }
 
     #[test]
+    fn a_slide_show_waits_while_a_dialog_is_open_and_gives_the_photo_its_time_after() {
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        let t0 = Instant::now();
+        let next = app.tick_slideshow(t0).unwrap_or(t0);
+
+        press(&mut app, ModifiersState::empty(), KeyCode::Delete);
+        assert!(app.confirm_open(), "Delete asks first");
+        for waited in [0, 6, 60] {
+            app.tick_slideshow(next + Duration::from_secs(waited));
+            assert_eq!(app.sel, Some(0), "the dialog is about this photo");
+        }
+
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(!app.confirm_open() && app.fullscreen_shown());
+        let closed = next + Duration::from_secs(60);
+        let resumed = app.tick_slideshow(closed).unwrap_or(closed);
+        assert_eq!(app.sel, Some(0), "it gets its full time after the dialog");
+        assert!(resumed > closed + Duration::from_secs(4));
+        app.tick_slideshow(resumed);
+        assert_eq!(app.sel, Some(1));
+    }
+
+    #[test]
+    fn a_slide_show_waits_while_a_preset_is_being_named() {
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        let t0 = Instant::now();
+        let next = app.tick_slideshow(t0).unwrap_or(t0);
+
+        press(
+            &mut app,
+            ModifiersState::SUPER | ModifiersState::SHIFT,
+            KeyCode::KeyN,
+        );
+        assert!(app.preset_name_edit().is_some(), "the prompt is open");
+        for waited in [0, 6, 60] {
+            app.tick_slideshow(next + Duration::from_secs(waited));
+            assert_eq!(app.sel, Some(0), "the preset takes this photo's look");
+        }
+    }
+
+    #[test]
     fn a_slide_show_fills_the_screen_and_pans_down_a_photo_taller_than_it_or_fits_it() {
         use crate::app::SlideshowSettings;
         use std::time::Duration;

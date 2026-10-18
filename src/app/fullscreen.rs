@@ -119,6 +119,8 @@ struct Slideshow {
     deck: Option<Deck>,
     /// How far through its time the photo is, 0 to 1, as of the last tick.
     progress: f32,
+    /// A dialog was open at the last tick; the photo gets its time again after.
+    held: bool,
 }
 
 /// How the view relates to the window's OS full screen.
@@ -259,6 +261,7 @@ impl App {
                 fade: None,
                 deck,
                 progress: 0.0,
+                held: false,
             });
         }
         self.push_transform();
@@ -315,7 +318,18 @@ impl App {
         }
         let (sel, n) = (self.sel, self.visible.len());
         let slide = self.slideshow_settings.slide();
+        let dialog = self.confirm_open() || self.preset_name_edit.is_some();
         let show = self.fullscreen.as_mut()?.slideshow.as_mut()?;
+        // These act on the photo shown when they are answered.
+        if dialog {
+            show.held = true;
+            return None;
+        }
+        if show.held {
+            show.held = false;
+            show.next_at = now + slide;
+            show.progress = 0.0;
+        }
         let fade_over = show
             .fade
             .is_some_and(|(_, at)| fade_opacity(now.saturating_duration_since(at)).is_none());
