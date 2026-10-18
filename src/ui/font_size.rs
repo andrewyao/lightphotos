@@ -39,6 +39,8 @@ fn base(style: &Style) -> f32 {
 }
 
 fn apply(ctx: &egui::Context, size: f32) -> f32 {
+    // A saved "NaN" parses, and `clamp` passes it through.
+    let size = if size.is_nan() { DEFAULT } else { size };
     let size = size.round().clamp(*RANGE.start(), *RANGE.end());
     let ratio = size / DEFAULT;
     let spacing = egui::style::Spacing::default();
@@ -76,5 +78,12 @@ mod tests {
         let ctx = egui::Context::default();
         assert_eq!(apply(&ctx, 100.0), *RANGE.end());
         assert_eq!(apply(&ctx, 1.0), *RANGE.start());
+    }
+
+    #[test]
+    fn a_saved_size_that_is_not_a_number_falls_back_to_the_default() {
+        let ctx = egui::Context::default();
+        assert_eq!(apply(&ctx, f32::NAN), DEFAULT);
+        assert_eq!(apply(&ctx, f32::INFINITY), *RANGE.end());
     }
 }

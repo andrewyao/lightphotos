@@ -788,6 +788,20 @@ impl Straighten {
 }
 
 impl Adjustments {
+    /// Every slider held to its range, a NaN put back to its default. A sidecar
+    /// is a file anyone can edit, so a render never trusts its values.
+    pub fn clamped(mut self) -> Self {
+        for s in &SLIDERS {
+            let v = (s.field)(&mut self);
+            *v = if v.is_nan() {
+                s.default
+            } else {
+                v.clamp(*s.range.start(), *s.range.end())
+            };
+        }
+        self
+    }
+
     /// True for no edit. The folder store skips storing these.
     pub fn is_identity(&self) -> bool {
         *self == Self::default()
@@ -1153,6 +1167,7 @@ impl GpuAdjust {
 impl From<&Adjustments> for GpuAdjust {
     /// Leaves `texel_w`/`texel_h` at 1.0; [`GpuAdjust::for_image`] sets them.
     fn from(a: &Adjustments) -> Self {
+        let a = &a.clamped();
         let (crop_l, crop_t, crop_r, crop_b) = match a.crop {
             Some(c) => (c.left, c.top, c.right, c.bottom),
             None => (0.0, 0.0, 1.0, 1.0),
@@ -1268,8 +1283,8 @@ pub fn apply_raw_display(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
 /// baked once instead of per pixel. Without a frame
 /// ([`Develop::framed`]) it leaves out Vignette and Grain, which depend on
 /// where a pixel sits; Auto Tone measures tone without them.
-pub struct Develop<'a> {
-    adj: &'a Adjustments,
+pub struct Develop {
+    adj: Adjustments,
     curve: Option<Box<curve::Lut>>,
     color: ColorOps,
     grade: GradeOps,
@@ -1283,28 +1298,31 @@ struct Frame {
     texel: [f32; 2],
 }
 
-impl<'a> Develop<'a> {
-    pub fn new(adj: &'a Adjustments) -> Self {
+impl Develop {
+    pub fn new(adj: &Adjustments) -> Self {
+        let adj = adj.clamped();
         let curve = (!adj.curve.is_linear()).then(|| Box::new(adj.curve.lut()));
         Develop {
-            adj,
-            curve,
             color: ColorOps::new(&adj.mixer, &adj.gray_mix, adj.is_monochrome()),
             grade: GradeOps::new(&adj.grade),
+            adj,
+            curve,
             frame: None,
         }
     }
 
     /// A render of a `w x h` canvas, one output pixel per canvas pixel, as
     /// the bake does: Vignette and Grain included.
-    pub fn framed(adj: &'a Adjustments, w: u32, h: u32) -> Self {
-        let effects = Effects::new(&adj.vignette, &adj.grain, adj.crop, w as f32, h as f32);
+    pub fn framed(adj: &Adjustments, w: u32, h: u32) -> Self {
+        let develop = Develop::new(adj);
+        let a = &develop.adj;
+        let effects = Effects::new(&a.vignette, &a.grain, a.crop, w as f32, h as f32);
         Develop {
             frame: (!effects.is_off()).then_some(Frame {
                 effects,
                 texel: [1.0 / w as f32, 1.0 / h as f32],
             }),
-            ..Develop::new(adj)
+            ..develop
         }
     }
 
@@ -1357,7 +1375,7 @@ fn apply_linear_impl(
     raw_display: bool,
     local: Option<&LocalAmounts>,
 ) -> [f32; 3] {
-    let adj = dev.adj;
+    let adj = &dev.adj;
     // The nine sliders a mask can move, here or for the whole photo.
     let l = local.copied().unwrap_or_else(|| LocalAmounts::of(adj));
     let [mut r, mut g, mut b] = rgb;
@@ -1810,6 +1828,30 @@ mod tests {
 
     fn luma709(px: [f32; 3]) -> f32 {
         0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2]
+    }
+
+    #[test]
+    fn a_slider_value_out_of_range_renders_as_the_slider_end() {
+        let px = [0.6, 0.3, 0.2];
+        let with = |exposure, contrast| Adjustments {
+            exposure,
+            contrast,
+            ..Adjustments::default()
+        };
+        let five = with(5.0, 100.0);
+        for bad in [1e30, f32::INFINITY] {
+            let adj = with(bad, bad);
+            assert_eq!(apply_linear(&adj, px), apply_linear(&five, px), "{bad}");
+            let gpu = GpuAdjust::from(&adj);
+            assert_eq!((gpu.exposure, gpu.contrast), (5.0, 100.0), "{bad}");
+        }
+        let nan = with(f32::NAN, f32::NAN);
+        assert_eq!(
+            apply_linear(&nan, px),
+            apply_linear(&Adjustments::default(), px)
+        );
+        let gpu = GpuAdjust::from(&nan);
+        assert_eq!((gpu.exposure, gpu.contrast), (0.0, 0.0));
     }
 
     #[test]
