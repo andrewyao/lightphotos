@@ -177,6 +177,8 @@ pub enum UiAction {
     EnterGrid,
     /// Show only the Loupe's photo, full screen, or leave that, as F does.
     ToggleFullscreen,
+    /// Show the Grid's photos full screen one after another.
+    StartSlideshow,
     CropGrab(CropEdge),
     /// Begin moving the whole crop rectangle, anchored at this texture coordinate.
     CropGrabMove(f32, f32),
@@ -522,8 +524,9 @@ fn catalog_picker(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     .on_hover_text(t().catalog_tip);
 }
 
-/// The shown folder's name above the Grid or Loupe. In the Loupe it adds a
-/// back arrow to the Grid and the open photo's name and dimensions.
+/// The shown folder's name above the Grid or Loupe. In the Grid it ends in
+/// the slide show's Play button. In the Loupe it adds a back arrow to the
+/// Grid and the open photo's name and dimensions.
 fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let name = app
         .folder_sel()
@@ -549,6 +552,9 @@ fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         .size(font_size::px(ui.style(), 18.0))
                         .strong(),
                 );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    toolbar::slideshow_buttons(ui, app, out);
+                });
             } else {
                 loupe_title(ui, app, name, out);
             }

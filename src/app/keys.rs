@@ -346,6 +346,7 @@ impl App {
             KeyCode::KeyX if !cmd && !alt => self.run_ui(flag(FlagChange::Reject)),
             KeyCode::KeyU if !cmd && !alt => self.run_ui(flag(FlagChange::None)),
             KeyCode::Backquote if !cmd && !alt => self.run_ui(flag(FlagChange::TogglePick)),
+            KeyCode::Enter | KeyCode::NumpadEnter if cmd && !alt => self.start_slideshow(),
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
             KeyCode::KeyU if cmd && !shift && !alt => {
                 self.run_ui(Command::AutoTone(PhotosParams::default()))
@@ -803,6 +804,79 @@ mod tests {
         press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
         press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
         assert!(!app.fullscreen_shown());
+    }
+
+    #[test]
+    fn a_slide_show_steps_every_five_seconds_and_ends_with_full_screen() {
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        assert!(app.fullscreen_shown() && app.slideshow_playing());
+        let t0 = Instant::now();
+        let next = app.tick_slideshow(t0);
+        assert_eq!(app.sel, Some(0), "the first photo gets its time");
+        let next = next.unwrap_or(t0);
+        assert!(next > t0 + Duration::from_secs(4));
+        app.tick_slideshow(next);
+        assert_eq!(app.sel, Some(1));
+        let next = next + Duration::from_secs(5);
+        app.tick_slideshow(next);
+        assert_eq!(app.sel, Some(0), "after the last photo, back to the first");
+
+        // A photo the user steps to gets the full five seconds.
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowRight);
+        assert_eq!(app.sel, Some(1));
+        let later = next + Duration::from_secs(4);
+        app.tick_slideshow(later);
+        app.tick_slideshow(later + Duration::from_secs(4));
+        assert_eq!(app.sel, Some(1));
+
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(!app.fullscreen_shown() && !app.slideshow_playing());
+        assert_eq!(app.tick_slideshow(later + Duration::from_secs(60)), None);
+        assert_eq!(app.sel, Some(1), "the slide show stopped with the view");
+    }
+
+    #[test]
+    fn a_slide_show_from_the_grid_goes_back_to_it() {
+        let (mut app, _) = folder_app(3);
+        let panels = (app.develop_open, app.side_page);
+        let focus = app.focus;
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        assert!(app.slideshow_playing());
+        assert_eq!(app.mode, ViewMode::Loupe);
+        assert_eq!(app.sel, Some(0), "no selection starts on the first photo");
+        let t0 = web_time::Instant::now();
+        let next = app.tick_slideshow(t0).unwrap_or(t0);
+        app.tick_slideshow(next);
+        assert_eq!(app.sel, Some(1));
+
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(!app.slideshow_playing());
+        assert_eq!(app.mode, ViewMode::Grid);
+        assert_eq!((app.develop_open, app.side_page), panels);
+        assert_eq!(app.focus, focus);
+        assert_eq!(app.sel, Some(1), "the Grid selects the last photo shown");
+
+        // Opening Develop from the show keeps the Loupe it opened on.
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyD);
+        app.sync_fullscreen();
+        assert!(!app.fullscreen_shown());
+        assert_eq!(app.mode, ViewMode::Loupe);
+    }
+
+    #[test]
+    fn full_screen_alone_plays_no_slide_show() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyF);
+        let t0 = web_time::Instant::now();
+        assert_eq!(app.tick_slideshow(t0), None);
+        app.tick_slideshow(t0 + std::time::Duration::from_secs(60));
+        assert_eq!(app.sel, Some(0));
+        assert!(!app.slideshow_playing());
     }
 
     #[test]

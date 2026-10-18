@@ -1581,6 +1581,7 @@ impl App {
                 ui::UiAction::PickFolder => self.open_folder_picker(),
                 ui::UiAction::EnterGrid => self.enter_grid(),
                 ui::UiAction::ToggleFullscreen => self.toggle_fullscreen(),
+                ui::UiAction::StartSlideshow => self.start_slideshow(),
                 ui::UiAction::Focus(region) => {
                     self.focus = region;
                     self.focus_level = FocusLevel::Entered;

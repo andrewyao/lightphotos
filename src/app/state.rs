@@ -47,6 +47,9 @@ pub(crate) struct State {
     /// Whether the Loupe shows only the photo; absent when it doesn't.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     fullscreen: bool,
+    /// Whether a slide show plays; absent when it doesn't.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    slideshow: bool,
     /// Loupe zoom relative to fit-to-window; absent in the Grid.
     zoom: Option<f32>,
     /// The status toast, while it shows.
@@ -172,6 +175,7 @@ impl State {
             selected_mask: app.selected_mask(),
             focus: app.focus(),
             fullscreen: app.fullscreen_shown(),
+            slideshow: app.slideshow_playing(),
             zoom: (mode == ViewMode::Loupe).then(|| app.zoom_rel()),
             status: app.status().map(|(_, text)| text.to_string()),
             failed_thumbs: (0..app.visible_len())

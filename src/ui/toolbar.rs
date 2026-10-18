@@ -12,6 +12,8 @@ pub(super) const BUTTON_PAD: egui::Vec2 = egui::vec2(8.0, 3.0);
 const ROW_MARGIN: egui::Vec2 = egui::vec2(10.0, 6.0);
 /// The gear that opens Copy Settings. egui's default fonts carry it.
 const COG: &str = "\u{2699}";
+/// The slide show's Play arrow.
+const PLAY: &str = "\u{25b6}";
 
 /// A panel for one of the grid's rows of controls, on top or at the
 /// bottom, laid out with the spacing above. The top row is the tour's filter
@@ -498,6 +500,26 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             region_focus_marker(ui, app, Region::Toolbar);
         });
     });
+}
+
+/// At the Grid title's right end, Play starts a slide show of the photos the
+/// Grid shows, and the cog beside it opens the slide show's settings.
+pub(super) fn slideshow_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = t();
+    let any = app.visible_len() > 0;
+    let cog = ui
+        .add_enabled(any, egui::Button::new(COG))
+        .on_hover_text(t.slideshow_menu_tip);
+    egui::Popup::menu(&cog)
+        .align(egui::RectAlign::BOTTOM_END)
+        .show(|ui| ui.weak(t.slideshow_settings));
+    if ui
+        .add_enabled(any, egui::Button::new(PLAY))
+        .on_hover_text(crate::i18n::keys(t.slideshow_play).as_ref())
+        .clicked()
+    {
+        out.actions.push(UiAction::StartSlideshow);
+    }
 }
 
 /// The home page's stand-in for `grid_toolbar`: the same controls, all off,

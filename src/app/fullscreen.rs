@@ -6,6 +6,12 @@
 //! hidden, any key, menu or click that opens one changes the chrome, and
 //! `sync_fullscreen` ends the view when the chrome leaves the snapshot taken
 //! on entry.
+//!
+//! A slide show is the same view with a timer that steps the Loupe through
+//! the Grid's photos, as Lightroom's Impromptu Slideshow. It ends with the
+//! view, and one started from the Grid goes back to it.
+
+use std::time::Duration;
 
 use super::*;
 
@@ -19,6 +25,20 @@ pub(super) struct Shown {
     /// The focus before entering, given back on leaving if its region is
     /// still on screen.
     focus: Focus,
+    slideshow: Option<Slideshow>,
+}
+
+/// How long the slide show shows each photo.
+const SLIDE: Duration = Duration::from_secs(5);
+
+/// The slide show's clock. `sel` is the photo the clock times, so a photo
+/// the user steps to gets its full time too.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Slideshow {
+    sel: Option<usize>,
+    next_at: Instant,
+    /// The Grid's panels and focus, for a show started from the Grid.
+    grid: Option<(Panels, Focus)>,
 }
 
 /// How the view relates to the window's OS full screen.
@@ -103,12 +123,7 @@ impl App {
         if !self.fullscreen_available() {
             return;
         }
-        let focus = Focus {
-            region: self.focus,
-            level: self.focus_level,
-            main: self.main_focus,
-            develop: self.develop_focus,
-        };
+        let focus = self.focus_now();
         let panels = self.panels();
         self.save_export_edits();
         self.set_panels(Panels::HIDDEN);
@@ -130,9 +145,57 @@ impl App {
             os,
             panels,
             focus,
+            slideshow: None,
         });
         self.normalize_focus();
         self.request_redraw();
+    }
+
+    /// Shows the view and steps through the Grid's photos from the one
+    /// selected, or the first, back to the first after the last.
+    pub(super) fn start_slideshow(&mut self) {
+        let grid = (self.mode == ViewMode::Grid).then(|| (self.panels(), self.focus_now()));
+        if grid.is_some() {
+            if self.sel.is_none() && !self.visible.is_empty() {
+                self.sel = Some(0);
+                self.collapse_selection();
+            }
+            self.enter_loupe();
+        }
+        if !self.fullscreen_shown() {
+            self.toggle_fullscreen();
+        }
+        let sel = self.sel;
+        if let Some(shown) = &mut self.fullscreen {
+            shown.slideshow = Some(Slideshow {
+                sel,
+                next_at: Instant::now() + SLIDE,
+                grid,
+            });
+        }
+    }
+
+    pub(crate) fn slideshow_playing(&self) -> bool {
+        self.fullscreen_shown() && self.fullscreen.is_some_and(|s| s.slideshow.is_some())
+    }
+
+    /// Steps the slide show when its photo's time is up, and returns when
+    /// to call again.
+    pub(crate) fn tick_slideshow(&mut self, now: Instant) -> Option<Instant> {
+        if !self.fullscreen_shown() {
+            return None;
+        }
+        let mut show = self.fullscreen?.slideshow?;
+        if show.sel == self.sel {
+            if now < show.next_at {
+                return Some(show.next_at);
+            }
+            self.step_loupe(true);
+        }
+        show.sel = self.sel;
+        show.next_at = now + SLIDE;
+        self.fullscreen.as_mut()?.slideshow = Some(show);
+        Some(show.next_at)
     }
 
     pub(super) fn exit_fullscreen(&mut self, leave: Leave) {
@@ -144,9 +207,22 @@ impl App {
                 w.set_fullscreen(None);
             }
         }
+        // A show from the Grid goes back to it, unless the user opened
+        // something on the Loupe or left it.
+        let grid = shown
+            .slideshow
+            .and_then(|s| s.grid)
+            .filter(|_| self.mode == ViewMode::Loupe && self.loupe_chrome() == shown.chrome);
         self.restore_panels(shown.panels);
+        let focus = match grid {
+            Some((panels, focus)) => {
+                self.enter_grid();
+                self.set_panels(panels);
+                focus
+            }
+            None => shown.focus,
+        };
         // Set directly: `on_focus_changed` would reset the Develop cursor.
-        let focus = shown.focus;
         if self.region_available(focus.region) {
             self.focus = focus.region;
             self.focus_level = focus.level;
@@ -169,6 +245,15 @@ impl App {
         if !self.export_form_open() && self.group_view() != GroupView::Compare {
             self.side_page = hidden.side_page;
             self.exports.form_open = hidden.export_form;
+        }
+    }
+
+    fn focus_now(&self) -> Focus {
+        Focus {
+            region: self.focus,
+            level: self.focus_level,
+            main: self.main_focus,
+            develop: self.develop_focus,
         }
     }
 

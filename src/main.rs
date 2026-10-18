@@ -410,7 +410,13 @@ impl ApplicationHandler<UserEvent> for App {
             self.request_redraw();
         }
         let poll_at = poll_delay.map(|d| now + d);
-        match poll_at.into_iter().chain(self.repaint_at).min() {
+        let slide_at = self.tick_slideshow(now);
+        match poll_at
+            .into_iter()
+            .chain(self.repaint_at)
+            .chain(slide_at)
+            .min()
+        {
             Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }
