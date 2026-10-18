@@ -1199,3 +1199,26 @@ fn frame_time_with_and_without_a_base_rebuild() {
     eprintln!("frame_time: cached base   {cached:?}/frame, {cached_builds} base builds");
     eprintln!("frame_time: rebuilt base  {rebuilt:?}/frame, {rebuilds} base builds");
 }
+
+#[test]
+fn a_slide_show_snapshot_is_the_frame_it_replaces() {
+    let Some(mut r) = headless(W, H) else {
+        return;
+    };
+    assert_eq!(r.snapshot_photo(), None, "no photo, no snapshot");
+    r.set_image(&photo(|x, y| [(x * 4) as u8, (y * 4) as u8, 90]));
+    r.set_transform([1.0, 1.0], [0.0, 0.0], [1.0, 0.0, 0.0, 1.0]);
+    assert!(r.render(None, None, None));
+    let shown = r.read_offscreen_blocking().map(|f| f.rgb);
+
+    assert!(r.snapshot_photo().is_some());
+    assert!(r.snapshot_photo().is_some(), "a second replaces the first");
+    let texture = r.fade_from.as_ref().map(|(_, t)| t.clone());
+    r.offscreen = texture;
+    let snapshot = r.read_offscreen_blocking().map(|f| f.rgb);
+    assert!(shown.is_some());
+    assert!(snapshot == shown, "the snapshot differs from the frame");
+
+    r.free_snapshot();
+    assert!(r.fade_from.is_none());
+}

@@ -512,13 +512,42 @@ pub(super) fn slideshow_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOut
         .on_hover_text(t.slideshow_menu_tip);
     egui::Popup::menu(&cog)
         .align(egui::RectAlign::BOTTOM_END)
-        .show(|ui| ui.weak(t.slideshow_settings));
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| slideshow_settings(ui, app, out));
     if ui
         .add_enabled(any, egui::Button::new(PLAY))
         .on_hover_text(crate::i18n::keys(t.slideshow_play).as_ref())
         .clicked()
     {
         out.actions.push(UiAction::StartSlideshow);
+    }
+}
+
+/// The cog's menu: how long each photo shows, and whether the order is
+/// random.
+fn slideshow_settings(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = t();
+    let mut settings = app.slideshow_settings();
+    let before = settings;
+    egui::Grid::new("slideshow_settings")
+        .num_columns(2)
+        .spacing([
+            font_size::px(ui.style(), ITEM_GAP),
+            ui.spacing().item_spacing.y,
+        ])
+        .show(ui, |ui| {
+            ui.label(t.slideshow_duration);
+            ui.add(
+                egui::Slider::new(&mut settings.secs, crate::app::SlideshowSettings::SECS)
+                    .suffix(t.seconds_suffix),
+            );
+            ui.end_row();
+            ui.label(t.slideshow_random);
+            ui.checkbox(&mut settings.random, "");
+            ui.end_row();
+        });
+    if settings != before {
+        out.actions.push(UiAction::SetSlideshowSettings(settings));
     }
 }
 

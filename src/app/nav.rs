@@ -688,7 +688,10 @@ impl App {
         let Some(cur) = self.sel.filter(|_| n > 1) else {
             return Vec::new();
         };
-        [(cur + n - 1) % n, (cur + 1) % n]
+        // A random slide show loads the photo it takes next instead of the
+        // one before.
+        let first = self.slideshow_next().unwrap_or((cur + n - 1) % n);
+        [first, (cur + 1) % n]
             .iter()
             .filter_map(|&p| self.visible.get(p).copied())
             .filter_map(|i| self.playlist.as_ref().and_then(|pl| pl.entry(i)))
@@ -719,11 +722,16 @@ impl App {
         }
         let n = self.visible.len();
         let cur = self.sel.or_else(|| self.want_cell()).unwrap_or(0);
-        self.sel = Some(if forward {
+        self.show_in_loupe(if forward {
             (cur + 1) % n
         } else {
             (cur + n - 1) % n
         });
+    }
+
+    /// Selects the photo at Grid position `pos` and loads it into the Loupe.
+    pub(super) fn show_in_loupe(&mut self, pos: usize) {
+        self.sel = Some(pos);
         self.collapse_selection();
         self.load_selected();
         self.request_neighbors();

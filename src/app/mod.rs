@@ -550,6 +550,7 @@ pub(crate) struct App {
     /// Comparator used when a star level is clicked. Stays set across "All".
     filter_cmp: Cmp,
     sort_order: SortOrder,
+    slideshow_settings: SlideshowSettings,
     /// Whether `visible` is in playlist order, so it can be binary-searched.
     visible_in_order: bool,
     /// [`FolderStore::sort_revision`] when the Grid was last ordered.
@@ -787,6 +788,8 @@ mod faces;
 mod folders;
 mod fonts;
 mod fullscreen;
+mod slideshow;
+pub(crate) use slideshow::SlideshowSettings;
 mod group_compare;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use export::ImmichLink;
@@ -955,6 +958,10 @@ impl App {
             sort_order: SortOrder::default(),
             #[cfg(not(test))]
             sort_order: SortOrder::load(),
+            #[cfg(test)]
+            slideshow_settings: SlideshowSettings::default(),
+            #[cfg(not(test))]
+            slideshow_settings: SlideshowSettings::load(),
             visible_in_order: true,
             sorted_revision: 0,
             visible: Vec::new(),
@@ -1582,6 +1589,7 @@ impl App {
                 ui::UiAction::EnterGrid => self.enter_grid(),
                 ui::UiAction::ToggleFullscreen => self.toggle_fullscreen(),
                 ui::UiAction::StartSlideshow => self.start_slideshow(),
+                ui::UiAction::SetSlideshowSettings(s) => self.set_slideshow_settings(s),
                 ui::UiAction::Focus(region) => {
                     self.focus = region;
                     self.focus_level = FocusLevel::Entered;

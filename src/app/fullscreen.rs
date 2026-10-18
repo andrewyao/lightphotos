@@ -13,10 +13,11 @@
 
 use std::time::Duration;
 
+use super::slideshow::Deck;
 use super::*;
 
 /// The full-screen view, while it is on.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub(super) struct Shown {
     chrome: LoupeChrome,
     os: Os,
@@ -28,17 +29,28 @@ pub(super) struct Shown {
     slideshow: Option<Slideshow>,
 }
 
-/// How long the slide show shows each photo.
-const SLIDE: Duration = Duration::from_secs(5);
+/// How long one photo takes to fade into the next.
+const FADE: Duration = Duration::from_millis(800);
+
+/// The opacity of the photo fading out, `elapsed` into the fade; `None`
+/// once it is gone. Smoothstep, so the fade starts and ends gently.
+fn fade_opacity(elapsed: Duration) -> Option<f32> {
+    let t = elapsed.as_secs_f32() / FADE.as_secs_f32();
+    (t < 1.0).then_some(1.0 - t * t * (3.0 - 2.0 * t))
+}
 
 /// The slide show's clock. `sel` is the photo the clock times, so a photo
 /// the user steps to gets its full time too.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 struct Slideshow {
     sel: Option<usize>,
     next_at: Instant,
     /// The Grid's panels and focus, for a show started from the Grid.
     grid: Option<(Panels, Focus)>,
+    /// The last photo, drawn by the renderer, and when it began to fade.
+    fade: Option<(egui::TextureId, Instant)>,
+    /// The photos still to show, in a random show.
+    deck: Option<Deck>,
 }
 
 /// How the view relates to the window's OS full screen.
@@ -152,12 +164,17 @@ impl App {
     }
 
     /// Shows the view and steps through the Grid's photos from the one
-    /// selected, or the first, back to the first after the last.
+    /// selected, in grid order, back to the first after the last, or at
+    /// random. With nothing selected it starts on the first photo, or a
+    /// random one.
     pub(super) fn start_slideshow(&mut self) {
+        let settings = self.slideshow_settings;
+        let mut deck = settings.random.then(Deck::new);
         let grid = (self.mode == ViewMode::Grid).then(|| (self.panels(), self.focus_now()));
         if grid.is_some() {
             if self.sel.is_none() && !self.visible.is_empty() {
-                self.sel = Some(0);
+                let n = self.visible.len();
+                self.sel = Some(deck.as_mut().and_then(|d| d.take(None, n)).unwrap_or(0));
                 self.collapse_selection();
             }
             self.enter_loupe();
@@ -169,14 +186,33 @@ impl App {
         if let Some(shown) = &mut self.fullscreen {
             shown.slideshow = Some(Slideshow {
                 sel,
-                next_at: Instant::now() + SLIDE,
+                next_at: Instant::now() + settings.slide(),
                 grid,
+                fade: None,
+                deck,
             });
         }
+        self.request_neighbors();
     }
 
     pub(crate) fn slideshow_playing(&self) -> bool {
-        self.fullscreen_shown() && self.fullscreen.is_some_and(|s| s.slideshow.is_some())
+        self.slideshow().is_some()
+    }
+
+    fn slideshow(&self) -> Option<&Slideshow> {
+        self.fullscreen
+            .as_ref()
+            .filter(|_| self.fullscreen_shown())?
+            .slideshow
+            .as_ref()
+    }
+
+    /// The photo a random show takes next, to load ahead.
+    pub(super) fn slideshow_next(&self) -> Option<usize> {
+        self.slideshow()?
+            .deck
+            .as_ref()?
+            .peek(self.sel, self.visible.len())
     }
 
     /// Steps the slide show when its photo's time is up, and returns when
@@ -185,23 +221,65 @@ impl App {
         if !self.fullscreen_shown() {
             return None;
         }
-        let mut show = self.fullscreen?.slideshow?;
-        if show.sel == self.sel {
-            if now < show.next_at {
-                return Some(show.next_at);
+        let (sel, n) = (self.sel, self.visible.len());
+        let slide = self.slideshow_settings.slide();
+        let show = self.fullscreen.as_mut()?.slideshow.as_mut()?;
+        let fade_over = show
+            .fade
+            .is_some_and(|(_, at)| fade_opacity(now.saturating_duration_since(at)).is_none());
+        // A photo the user steps to shows at once, for its full time.
+        let stepped = show.sel != sel;
+        if fade_over || stepped {
+            show.fade = None;
+            if let Some(r) = &mut self.renderer {
+                r.free_snapshot();
             }
-            self.step_loupe(true);
         }
+        if !stepped && now < show.next_at {
+            return Some(show.next_at);
+        }
+        show.next_at = now + slide;
+        let next = match &mut show.deck {
+            _ if stepped => None,
+            Some(deck) => deck.take(sel, n),
+            None => (n > 1).then(|| sel.map_or(0, |s| (s + 1) % n)),
+        };
+        if let Some(pos) = next {
+            show.fade = self
+                .renderer
+                .as_mut()
+                .and_then(|r| r.snapshot_photo())
+                .map(|id| (id, now));
+            self.show_in_loupe(pos);
+        }
+        let show = self.fullscreen.as_mut()?.slideshow.as_mut()?;
         show.sel = self.sel;
-        show.next_at = now + SLIDE;
-        self.fullscreen.as_mut()?.slideshow = Some(show);
         Some(show.next_at)
+    }
+
+    /// The last photo and its opacity, while it fades into the one shown.
+    pub(crate) fn slide_fade(&self) -> Option<(egui::TextureId, f32)> {
+        if !self.fullscreen_shown() {
+            return None;
+        }
+        let (id, at) = self.slideshow()?.fade?;
+        Some((
+            id,
+            fade_opacity(Instant::now().saturating_duration_since(at))?,
+        ))
+    }
+
+    fn free_slide_fade(&mut self) {
+        if let Some(r) = &mut self.renderer {
+            r.free_snapshot();
+        }
     }
 
     pub(super) fn exit_fullscreen(&mut self, leave: Leave) {
         let Some(shown) = self.fullscreen.take() else {
             return;
         };
+        self.free_slide_fade();
         if leave != Leave::Os && matches!(shown.os, Os::Asked { .. }) {
             if let Some(w) = &self.window {
                 w.set_fullscreen(None);
@@ -211,6 +289,7 @@ impl App {
         // something on the Loupe or left it.
         let grid = shown
             .slideshow
+            .as_ref()
             .and_then(|s| s.grid)
             .filter(|_| self.mode == ViewMode::Loupe && self.loupe_chrome() == shown.chrome);
         self.restore_panels(shown.panels);
@@ -282,7 +361,7 @@ impl App {
     /// Ends the view when the Loupe was left or something was opened on it,
     /// and follows the window in and out of OS full screen.
     pub(crate) fn sync_fullscreen(&mut self) {
-        let Some(shown) = self.fullscreen else {
+        let Some(shown) = &self.fullscreen else {
             return;
         };
         if self.mode != ViewMode::Loupe || self.loupe_chrome() != shown.chrome {
@@ -295,15 +374,30 @@ impl App {
             .is_some_and(|w| w.fullscreen().is_some());
         match (shown.os, window_full) {
             (Os::Asked { granted: false }, true) => {
-                self.fullscreen = Some(Shown {
-                    os: Os::Asked { granted: true },
-                    ..shown
-                });
+                if let Some(shown) = &mut self.fullscreen {
+                    shown.os = Os::Asked { granted: true };
+                }
             }
             (Os::Asked { granted: true } | Os::Already, false) => {
                 self.exit_fullscreen(Leave::Os);
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_last_photo_fades_out_gently_and_is_gone_after_the_fade() {
+        let at = |ms| fade_opacity(Duration::from_millis(ms));
+        assert_eq!(at(0), Some(1.0));
+        assert_eq!(at(400), Some(0.5));
+        let (early, late) = (at(80).unwrap_or(0.0), at(720).unwrap_or(1.0));
+        assert!(1.0 - early < 0.05 && late < 0.05, "{early} {late}");
+        assert_eq!(at(800), None);
+        assert_eq!(at(60_000), None);
     }
 }

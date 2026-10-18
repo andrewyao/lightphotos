@@ -299,6 +299,11 @@ pub struct Renderer {
     /// stores only a bind group, so the texture has to be kept alive here until
     /// `free_thumb` drops both.
     thumb_textures: HashMap<egui::TextureId, wgpu::Texture>,
+
+    /// The photo as the last frame drew it, which egui fades out over the
+    /// next one in a slide show, and the viewports that frame drew into.
+    fade_from: Option<(egui::TextureId, wgpu::Texture)>,
+    last_viewports: [Option<(u32, u32, u32, u32)>; 2],
 }
 
 impl Renderer {
@@ -973,6 +978,8 @@ impl Renderer {
             egui_renderer,
             offscreen: None,
             thumb_textures: HashMap::new(),
+            fade_from: None,
+            last_viewports: [None; 2],
         }
     }
 
@@ -1792,6 +1799,154 @@ impl Renderer {
         };
     }
 
+    /// Draws the photo as the last frame showed it into a texture egui can
+    /// paint, for a slide show to fade out over the next photo. Replaces the
+    /// last one. `None` with no photo.
+    pub fn snapshot_photo(&mut self) -> Option<egui::TextureId> {
+        self.free_snapshot();
+        self.image_bind.as_ref()?;
+        let format = self.config.format;
+        // egui reads sRGB-encoded bytes, which a plain view of an sRGB
+        // texture gives back as they are stored.
+        let plain = format.remove_srgb_suffix();
+        let view_formats = [plain];
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("fade_from"),
+            size: wgpu::Extent3d {
+                width: self.config.width,
+                height: self.config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            // COPY_SRC lets a test read it back.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: if plain == format { &[] } else { &view_formats },
+        });
+        let target = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fade_from_enc"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("fade_from_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let [image, compare] = self.last_viewports;
+            self.draw_photo(&mut pass, image, compare);
+        }
+        self.queue.submit(Some(encoder.finish()));
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(plain),
+            ..Default::default()
+        });
+        let id = self.egui_renderer.register_native_texture(
+            &self.device,
+            &view,
+            wgpu::FilterMode::Linear,
+        );
+        self.fade_from = Some((id, texture));
+        Some(id)
+    }
+
+    pub fn free_snapshot(&mut self) {
+        if let Some((id, _)) = self.fade_from.take() {
+            self.egui_renderer.free_texture(&id);
+        }
+    }
+
+    /// The photo, and the compare photo beside it, into a pass whose target
+    /// is the surface's size and format.
+    fn draw_photo(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        image_viewport: Option<(u32, u32, u32, u32)>,
+        compare_viewport: Option<(u32, u32, u32, u32)>,
+    ) {
+        if let Some(image_bind) = &self.image_bind {
+            let (sw, sh) = (self.config.width, self.config.height);
+            // Both pipelines share `pipeline_layout`, so the bind groups
+            // below are the same for either.
+            let pipeline = match self.image_pixel_format {
+                PixelFormat::Srgb8 | PixelFormat::TonedF16 => &self.pipeline,
+                PixelFormat::LinearF16 => &self.raw_pipeline,
+            };
+            let xform_bind = &self.xform_bind;
+            let overlay_pipeline = &self.overlay_pipeline;
+            let overlay_bind = self.overlay_bind.as_ref();
+            let draw_into =
+                |pass: &mut wgpu::RenderPass, vp: (u32, u32, u32, u32), adj: &wgpu::BindGroup| {
+                    let (x, y, w, h) = vp;
+                    let x = x.min(sw);
+                    let y = y.min(sh);
+                    let w = w.min(sw - x);
+                    let h = h.min(sh - y);
+                    if w == 0 || h == 0 {
+                        return;
+                    }
+                    pass.set_scissor_rect(x, y, w, h);
+                    pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, image_bind, &[]);
+                    pass.set_bind_group(1, xform_bind, &[]);
+                    pass.set_bind_group(2, adj, &[]);
+                    pass.set_bind_group(3, &self.touch_bind, &[]);
+                    pass.draw(0..6, 0..1);
+                    #[cfg(target_arch = "wasm32")]
+                    crate::web::analytics::photo_drawn();
+
+                    if let Some(overlay) = overlay_bind {
+                        pass.set_pipeline(overlay_pipeline);
+                        pass.set_bind_group(1, xform_bind, &[]);
+                        pass.set_bind_group(2, adj, &[]);
+                        pass.set_bind_group(3, overlay, &[]);
+                        pass.draw(0..6, 0..1);
+                    }
+                };
+            match image_viewport {
+                Some(vp) => {
+                    draw_into(pass, vp, &self.adj_bind);
+                    if let Some(vp2) = compare_viewport {
+                        draw_into(pass, vp2, &self.adj_bind_b);
+                    }
+                }
+                None => {
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, image_bind, &[]);
+                    pass.set_bind_group(1, xform_bind, &[]);
+                    pass.set_bind_group(2, &self.adj_bind, &[]);
+                    pass.set_bind_group(3, &self.touch_bind, &[]);
+                    pass.draw(0..6, 0..1);
+                    if let Some(overlay) = overlay_bind {
+                        pass.set_pipeline(overlay_pipeline);
+                        pass.set_bind_group(1, xform_bind, &[]);
+                        pass.set_bind_group(2, &self.adj_bind, &[]);
+                        pass.set_bind_group(3, overlay, &[]);
+                        pass.draw(0..6, 0..1);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn render(
         &mut self,
         image_viewport: Option<(u32, u32, u32, u32)>,
@@ -1883,72 +2038,9 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let Some(image_bind) = &self.image_bind {
-                let (sw, sh) = (self.config.width, self.config.height);
-                // Both pipelines share `pipeline_layout`, so the bind groups
-                // below are the same for either.
-                let pipeline = match self.image_pixel_format {
-                    PixelFormat::Srgb8 | PixelFormat::TonedF16 => &self.pipeline,
-                    PixelFormat::LinearF16 => &self.raw_pipeline,
-                };
-                let xform_bind = &self.xform_bind;
-                let overlay_pipeline = &self.overlay_pipeline;
-                let overlay_bind = self.overlay_bind.as_ref();
-                let draw_into = |pass: &mut wgpu::RenderPass,
-                                 vp: (u32, u32, u32, u32),
-                                 adj: &wgpu::BindGroup| {
-                    let (x, y, w, h) = vp;
-                    let x = x.min(sw);
-                    let y = y.min(sh);
-                    let w = w.min(sw - x);
-                    let h = h.min(sh - y);
-                    if w == 0 || h == 0 {
-                        return;
-                    }
-                    pass.set_scissor_rect(x, y, w, h);
-                    pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, image_bind, &[]);
-                    pass.set_bind_group(1, xform_bind, &[]);
-                    pass.set_bind_group(2, adj, &[]);
-                    pass.set_bind_group(3, &self.touch_bind, &[]);
-                    pass.draw(0..6, 0..1);
-                    #[cfg(target_arch = "wasm32")]
-                    crate::web::analytics::photo_drawn();
-
-                    if let Some(overlay) = overlay_bind {
-                        pass.set_pipeline(overlay_pipeline);
-                        pass.set_bind_group(1, xform_bind, &[]);
-                        pass.set_bind_group(2, adj, &[]);
-                        pass.set_bind_group(3, overlay, &[]);
-                        pass.draw(0..6, 0..1);
-                    }
-                };
-                match image_viewport {
-                    Some(vp) => {
-                        draw_into(&mut pass, vp, &self.adj_bind);
-                        if let Some(vp2) = compare_viewport {
-                            draw_into(&mut pass, vp2, &self.adj_bind_b);
-                        }
-                    }
-                    None => {
-                        pass.set_pipeline(pipeline);
-                        pass.set_bind_group(0, image_bind, &[]);
-                        pass.set_bind_group(1, xform_bind, &[]);
-                        pass.set_bind_group(2, &self.adj_bind, &[]);
-                        pass.set_bind_group(3, &self.touch_bind, &[]);
-                        pass.draw(0..6, 0..1);
-                        if let Some(overlay) = overlay_bind {
-                            pass.set_pipeline(overlay_pipeline);
-                            pass.set_bind_group(1, xform_bind, &[]);
-                            pass.set_bind_group(2, &self.adj_bind, &[]);
-                            pass.set_bind_group(3, overlay, &[]);
-                            pass.draw(0..6, 0..1);
-                        }
-                    }
-                }
-            }
+            self.draw_photo(&mut pass, image_viewport, compare_viewport);
         }
+        self.last_viewports = [image_viewport, compare_viewport];
 
         if let Some(paint) = &egui {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

@@ -869,6 +869,33 @@ mod tests {
     }
 
     #[test]
+    fn a_slide_show_keeps_its_duration_and_shuffles_when_random() {
+        use crate::app::SlideshowSettings;
+        use std::time::Duration;
+
+        let (mut app, _) = folder_app(6);
+        app.set_slideshow_settings(SlideshowSettings {
+            secs: 2,
+            random: true,
+        });
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        assert!(app.slideshow_playing());
+        let mut now = web_time::Instant::now();
+        let mut shown = vec![app.sel];
+        for _ in 0..5 {
+            let next = app.tick_slideshow(now).unwrap_or(now);
+            assert!(next <= now + Duration::from_secs(2), "the 2 s duration");
+            now = next;
+            app.tick_slideshow(now);
+            assert_ne!(Some(&app.sel), shown.last(), "a photo repeated");
+            shown.push(app.sel);
+        }
+        shown.sort_unstable();
+        shown.dedup();
+        assert_eq!(shown.len(), 6, "six steps show all six photos");
+    }
+
+    #[test]
     fn full_screen_alone_plays_no_slide_show() {
         let (mut app, _) = editor_app();
         press(&mut app, ModifiersState::empty(), KeyCode::KeyF);

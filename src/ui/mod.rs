@@ -179,6 +179,7 @@ pub enum UiAction {
     ToggleFullscreen,
     /// Show the Grid's photos full screen one after another.
     StartSlideshow,
+    SetSlideshowSettings(crate::app::SlideshowSettings),
     CropGrab(CropEdge),
     /// Begin moving the whole crop rectangle, anchored at this texture coordinate.
     CropGrabMove(f32, f32),
@@ -356,6 +357,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     // Full screen, the Loupe draws only the photo, its toasts and dialogs.
     if app.fullscreen_shown() {
         draw_loupe(ui, app, &mut out);
+        slide_fade(ui, app);
         status_toast(ui, app);
         dialogs(ui, app, &mut out);
         return out;
@@ -561,6 +563,23 @@ fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         });
         ui.add_space(font_size::px(ui.style(), 4.0));
     });
+}
+
+/// In a slide show, the last photo over the one shown, fading out.
+fn slide_fade(ui: &egui::Ui, app: &App) {
+    let Some((id, opacity)) = app.slide_fade() else {
+        return;
+    };
+    let ctx = ui.ctx();
+    let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("slide_fade"));
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    ctx.layer_painter(layer).image(
+        id,
+        ctx.content_rect(),
+        uv,
+        egui::Color32::WHITE.gamma_multiply(opacity),
+    );
+    ctx.request_repaint();
 }
 
 /// `fx / IMG_1.JPG` beside the Loupe's back arrow, and at the row's right end
