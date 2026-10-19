@@ -1231,7 +1231,7 @@ impl App {
     /// Finish the jobs that write to the folder showing, before the folder store
     /// they write to is replaced or closed.
     fn finish_folder_jobs(&mut self) {
-        self.cancel_auto_tone();
+        self.autotone.leave_folder();
         self.cancel_remove_ca();
         self.cancel_scoring();
         self.save_edit();

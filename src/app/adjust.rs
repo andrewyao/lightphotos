@@ -411,7 +411,7 @@ impl App {
         self.store_edit(path, adj);
     }
 
-    fn store_edit(&mut self, path: &Path, adj: Adjustments) {
+    pub(super) fn store_edit(&mut self, path: &Path, adj: Adjustments) {
         if adj.is_identity() {
             self.edits.remove(path);
         } else {
@@ -428,7 +428,7 @@ impl App {
         if !self.egui_ctx.input(|i| i.pointer.any_down()) {
             self.save_edit();
             self.history
-                .hold(self.autotone.is_running() || self.remove_ca_pending());
+                .hold(self.autotone.holds_undo_step() || self.remove_ca_pending());
             self.history.seal();
         }
     }

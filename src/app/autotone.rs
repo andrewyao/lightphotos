@@ -45,7 +45,7 @@ const AUTOTONE_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_mil
 /// through the methods below.
 pub(super) struct AutoTone {
     /// Photos in the running Auto Tone batch still waiting on a thumbnail.
-    /// Emptied by `cancel_auto_tone` on a folder change.
+    /// Emptied by `cancel_auto_tone` when an undo takes the batch back.
     ///
     /// The batch is paced across three stages so its memory never tracks the
     /// selection: this set is the whole outstanding batch, for progress and
@@ -69,6 +69,10 @@ pub(super) struct AutoTone {
     /// Photos toned so far in the running batch. The total is this plus
     /// `pending.len()`.
     done: usize,
+    /// Whether the batch's results join the open undo step, so an undo takes
+    /// them back and stops the batch. Cleared on a folder change, which
+    /// clears the history; a batch that outlives one lands without undo.
+    undoable: bool,
     /// How a normal photo is centered, from Settings.
     centering: autotone::Centering,
 }
@@ -82,6 +86,7 @@ impl AutoTone {
             base: HashMap::new(),
             deferred: None,
             done: 0,
+            undoable: false,
             centering,
         }
     }
@@ -97,6 +102,22 @@ impl AutoTone {
     /// Whether a batch has photos left to tone.
     pub(super) fn is_running(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    /// Whether a running batch keeps the open undo step open, so the whole
+    /// batch undoes as one step.
+    pub(super) fn holds_undo_step(&self) -> bool {
+        self.undoable && self.is_running()
+    }
+
+    /// The folder showing is about to change. A running batch carries on,
+    /// because each result goes to its photo's own folder. Its undo step
+    /// goes with the old folder's history. A batch still waiting for the
+    /// folder store is dropped: it never started, and its photos' saved
+    /// edits never loaded.
+    pub(super) fn leave_folder(&mut self) {
+        self.deferred = None;
+        self.undoable = false;
     }
 
     /// Batch photos whose thumbnail is requested and not yet toned.
@@ -243,6 +264,7 @@ impl App {
                     }
                 }
             }
+            self.autotone.undoable = true;
             self.set_status(
                 StatusKind::Error,
                 crate::i18n::t().auto_tone_waits_for_edits.into(),
@@ -265,6 +287,7 @@ impl App {
     /// for as long as the selection is large. `poll_auto_tone` does all of it
     /// under a frame budget instead, one frame later at worst.
     pub(super) fn enqueue_auto_tone(&mut self, paths: Vec<PathBuf>) {
+        self.autotone.undoable = true;
         for path in paths {
             if self.autotone.pending.contains(&path) {
                 continue;
@@ -389,11 +412,13 @@ impl App {
         self.request_redraw();
     }
 
-    /// Drop a batch's waiting photos. Call on every folder change: `tone_one`
-    /// writes to the active folder store, which keys records by filename only, so a
-    /// late photo from the old folder would corrupt a same-named record.
+    /// Drop a batch's waiting photos, for an undo that takes back its step.
+    /// A batch that outlived a folder change has no step to take back, so it
+    /// keeps running.
     pub(super) fn cancel_auto_tone(&mut self) {
-        if self.autotone.pending.is_empty() && self.autotone.deferred.is_none() {
+        if !self.autotone.undoable
+            || (self.autotone.pending.is_empty() && self.autotone.deferred.is_none())
+        {
             return;
         }
         let (done, total) = (self.autotone.done, self.autotone_total());
@@ -418,11 +443,33 @@ impl App {
     /// Save one photo's auto adjustments, keeping its crop, white balance,
     /// saturation and denoise. Thumbnails rebuild on their own because their
     /// cache key includes the edits.
+    ///
+    /// The photo's folder need not be the one showing. The folder store keys
+    /// its cache by file name, so a photo it does not hold is saved straight
+    /// to its own sidecar, never to a same-named record here.
     fn tone_one(&mut self, path: &Path, auto: &crate::develop::Adjustments) {
         let base = self.edits.get(path).copied().unwrap_or_default();
         let merged = autotone::merge(&base, auto);
-        self.put_edit(path, merged);
-        self.folder_store.set_adjustments(path, &merged);
+        if self.autotone.undoable {
+            self.put_edit(path, merged);
+        } else {
+            self.store_edit(path, merged);
+        }
+        if self.folder_store.holds(path) {
+            self.folder_store.set_adjustments(path, &merged);
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            self.folder_store.set_adjustments_uncached(path, &merged);
+            #[cfg(target_arch = "wasm32")]
+            match path.parent().and_then(|dir| self.web.dir_handle(dir)) {
+                Some(handle) => self
+                    .folder_store
+                    .set_adjustments_uncached(path, &merged, &handle),
+                None => self
+                    .folder_store
+                    .note_persist_error(format!("no folder handle for {}", path.display())),
+            }
+        }
         #[cfg(target_arch = "wasm32")]
         if merged != base {
             crate::web::analytics::property("develop_edit_applied", "edit_kind", "auto_tone");
@@ -465,7 +512,7 @@ impl App {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
-    use crate::app::test_support::{folder_of, load_folder, temp_folder};
+    use crate::app::test_support::{folder_of, load_folder};
     use crate::decode::image_decode::{DecodedImage, DecodedImageFields};
 
     /// An app showing a real folder of two empty photos in the Grid. Nothing
@@ -843,33 +890,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A thumbnail from folder A arriving after a switch to folder B must not
-    /// be toned against B's folder store. See `cancel_auto_tone`.
+    /// A batch started in folder A finishes after the user opens folder B.
+    /// Each result lands in A's sidecar with the rest of its record, and B's
+    /// same-named photo is not touched. The folder store keys its cache by
+    /// file name, so writing A's result through it would hit B's record.
     #[test]
-    fn switching_folders_cancels_a_pending_auto_tone_batch() {
-        let dir = temp_folder("autotone-switch");
+    fn a_batch_finishes_in_its_own_folder_after_a_folder_change() {
+        let (mut app, dir_a, a, b) = batch_with_loader("autotone-switch-a");
+        app.folder_store.set(&a, 3);
+        let (dir_b, twins) = folder_of("autotone-switch-b", &["a.jpg".into()]);
+        let twin = twins[0].clone();
+        {
+            let mut store_b = crate::persist::folder_store::FolderStore::with_dir(dir_b.clone());
+            store_b.set(&twin, 4);
+        }
 
-        let mut app = App::new(None);
-        let stale = PathBuf::from("/folder-a/IMG_0001.jpg");
-        app.autotone.pending.insert(stale.clone());
-        app.autotone.done = 1;
-
-        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-
+        load_folder(&mut app, &dir_b);
         assert!(
-            app.autotone.pending.is_empty(),
-            "folder B must not inherit folder A's outstanding Auto Tone work"
+            app.autotone.is_running(),
+            "a folder change must not stop the batch"
         );
-        assert_eq!(app.autotone.done, 0);
-        assert_eq!(app.autotone_total(), 0);
 
+        land_thumb(&mut app, &a);
         app.poll_auto_tone();
+        assert_eq!(
+            app.status_text(),
+            Some((crate::i18n::t().auto_tone_progress)(1, 2).as_str()),
+            "the batch reports its progress from the other folder"
+        );
+        assert_eq!(app.undo_edit(), 0, "B's history holds none of A's batch");
         assert!(
-            !app.edits.contains_key(&stale),
-            "a late arrival from folder A must not be toned against folder B's folder store"
+            app.autotone.is_running(),
+            "and an undo in B does not stop it"
+        );
+        land_thumb(&mut app, &b);
+        app.poll_auto_tone();
+        assert!(!app.autotone.is_running());
+        assert_eq!(
+            app.status_text(),
+            Some((crate::i18n::t().auto_tone_applied_n)(2).as_str())
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(10));
+        let saved_a = crate::sidecar::read_record(&a).unwrap();
+        assert!(
+            !saved_a.adjustments.is_identity(),
+            "A's photo is toned in its own sidecar"
+        );
+        assert_eq!(saved_a.rating, Some(3), "and keeps the rest of its record");
+        assert!(!crate::sidecar::read_record(&b)
+            .unwrap()
+            .adjustments
+            .is_identity());
+
+        let saved_twin = crate::sidecar::read_record(&twin).unwrap();
+        assert!(
+            saved_twin.adjustments.is_identity(),
+            "B's same-named photo is not toned"
+        );
+        assert_eq!(saved_twin.rating, Some(4));
+        assert!(app.folder_store.adjustments(&twin).is_identity());
+        assert_eq!(app.folder_store.get(&twin), Some(4));
+        assert!(!app.edits.contains_key(&twin));
+
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 
     #[test]

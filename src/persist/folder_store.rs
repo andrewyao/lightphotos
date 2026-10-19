@@ -323,6 +323,35 @@ impl FolderStore {
         self.update_edits(path, |rec| rec.adjustments = adj);
     }
 
+    /// Whether the cache holds `path`'s record: the photo is in the active
+    /// directory and that directory's load has landed.
+    pub(crate) fn holds(&self, path: &Path) -> bool {
+        self.cache_key(path).is_some() && self.groups.is_some()
+    }
+
+    /// Set the adjustments of a photo whose record the cache does not hold,
+    /// such as one in a folder the user has left. The write reads the photo's
+    /// sidecar when it runs and changes only the adjustments, so its other
+    /// fields survive and a same-named photo in the active directory is never
+    /// touched.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn set_adjustments_uncached(&mut self, path: &Path, adj: &Adjustments) {
+        let op = WriteOp::Adjust(Box::new(*adj), crate::sidecar::unix_now());
+        self.writeback.enqueue(path, op);
+    }
+
+    /// As on native, through the handle of the photo's own folder.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn set_adjustments_uncached(
+        &mut self,
+        path: &Path,
+        adj: &Adjustments,
+        dir_handle: &web_sys::FileSystemDirectoryHandle,
+    ) {
+        let op = WriteOp::Adjust(Box::new(*adj), crate::sidecar::unix_now());
+        self.writeback.enqueue(path, op, dir_handle.clone());
+    }
+
     pub fn touchups(&self, path: &Path) -> Vec<TouchUp> {
         self.record(path)
             .map(|r| r.touchups.clone())

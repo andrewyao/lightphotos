@@ -16,7 +16,7 @@ use web_sys::{
 
 use crate::persist::folder_store::group_file::{self, GROUPS_DIR};
 use crate::persist::folder_store::SidecarLoad;
-use crate::sidecar::{SIDECAR_DIR, SIDECAR_EXT};
+use crate::sidecar::{ImageRecord, SIDECAR_DIR, SIDECAR_EXT};
 
 /// The `.lightphotos` directory under `root`, created if `create` is set.
 /// Returns `Ok(None)` when it is missing and `create` is false.
@@ -119,22 +119,7 @@ pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLo
         let Some(stem) = strip_xmp(&name) else {
             continue;
         };
-        let parsed = match crate::web::web_fs::stat(&file_handle).await {
-            // Checked before reading, so an oversized file is never loaded.
-            Ok(file) if file.size() > crate::sidecar::MAX_SIDECAR_BYTES as f64 => {
-                Err(format!("{} bytes, too large for a sidecar", file.size()))
-            }
-            Ok(file) => crate::web::web_fs::file_bytes(&file)
-                .await
-                .and_then(|bytes| {
-                    // Milliseconds; `as` saturates, so a bad value can't wrap.
-                    crate::sidecar::parse_record(&bytes, || {
-                        Some((file.last_modified() / 1000.0) as u64)
-                    })
-                }),
-            Err(e) => Err(e),
-        };
-        match parsed {
+        match read_record(&file_handle).await {
             Ok(rec) => {
                 if !rec.is_empty() {
                     load.images.insert(stem, rec);
@@ -219,6 +204,42 @@ async fn remove_name(dir: &FileSystemDirectoryHandle, name: &str) -> Result<(), 
         Err(e) if is_not_found(&e) => Ok(()),
         Err(e) => Err(js_error_string(&e)),
     }
+}
+
+/// Read and parse one sidecar file.
+async fn read_record(file_handle: &FileSystemFileHandle) -> Result<ImageRecord, String> {
+    let file = crate::web::web_fs::stat(file_handle).await?;
+    // Checked before reading, so an oversized file is never loaded.
+    if file.size() > crate::sidecar::MAX_SIDECAR_BYTES as f64 {
+        return Err(format!("{} bytes, too large for a sidecar", file.size()));
+    }
+    let bytes = crate::web::web_fs::file_bytes(&file).await?;
+    // Milliseconds; `as` saturates, so a bad value can't wrap.
+    crate::sidecar::parse_record(&bytes, || Some((file.last_modified() / 1000.0) as u64))
+}
+
+/// Apply `change` to the record in `root/.lightphotos/<filename>.xmp`, or to
+/// an empty one when there is none, and save the result. A sidecar that is
+/// there but cannot be read is an error, so its record is never written over.
+pub(crate) async fn update_sidecar(
+    root: &FileSystemDirectoryHandle,
+    filename: &OsStr,
+    change: impl FnOnce(&mut ImageRecord),
+) -> Result<(), String> {
+    let mut rec = ImageRecord::default();
+    if let Some(dir) = sidecar_dir(root, false).await? {
+        match JsFuture::from(dir.get_file_handle(&xmp_name(filename))).await {
+            Ok(handle) => rec = read_record(&handle.unchecked_into()).await?,
+            Err(e) if is_not_found(&e) => {}
+            Err(e) => return Err(js_error_string(&e)),
+        }
+    }
+    change(&mut rec);
+    if rec.is_empty() {
+        return delete_sidecar(root, filename).await;
+    }
+    let bytes = serde_json::to_vec_pretty(&rec).map_err(|e| e.to_string())?;
+    write_sidecar(root, filename, &bytes).await
 }
 
 /// Write `bytes` to `root/.lightphotos/<filename>.xmp`, creating the
