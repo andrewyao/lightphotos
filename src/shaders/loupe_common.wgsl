@@ -789,5 +789,86 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(higher, lower, c <= cutoff);
 }
 
-// The neutral gray outside the image or the crop, sRGB-encoded.
-const BACKGROUND: vec4<f32> = vec4<f32>(0.3811, 0.3811, 0.3959, 1.0);
+// Outside the image or the crop. The caller returns a transparent pixel, so
+// the theme's loupe color the renderer cleared to shows through.
+fn outsidePhoto(canvasUv: vec2<f32>, uv: vec2<f32>) -> bool {
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return true;
+    }
+    return canvasUv.x < adj.crop_l || canvasUv.x > adj.crop_r
+        || canvasUv.y < adj.crop_t || canvasUv.y > adj.crop_b;
+}
+
+// The develop steps before the working gamma, on a linear texel: denoise,
+// touch-ups, local edits, white balance and exposure. Returns linear light.
+// Must match `apply_linear` and `apply_raw_display` in develop/mod.rs.
+fn developLinear(uv: vec2<f32>, texel: vec3<f32>, l: LocalTone) -> vec3<f32> {
+    var rgb = texel;
+
+    // Edge-aware denoise over a 5x5 neighborhood, weighted by distance and
+    // color similarity. The taps use `textureSampleLevel` because the loop is
+    // not uniform control flow, so denoise loses mip antialiasing when zoomed
+    // out. Must match `denoise_sample` in develop/mod.rs.
+    if (adj.denoise > 0.0) {
+        let center = sampleSrcLevel(uv).rgb;
+        let sigmaR = 0.02 + adj.denoise / 100.0 * 0.30;
+        let sigmaR2 = sigmaR * sigmaR;
+        var sum = vec3<f32>(0.0, 0.0, 0.0);
+        var wsum = 0.0;
+        for (var dy = -2; dy <= 2; dy = dy + 1) {
+            for (var dx = -2; dx <= 2; dx = dx + 1) {
+                let tapUv = uv + vec2<f32>(f32(dx), f32(dy)) * vec2<f32>(adj.texel_w, adj.texel_h);
+                let tap = sampleSrcLevel(tapUv).rgb;
+                let diff = tap - center;
+                let diff2 = dot(diff, diff);
+                // wsum can't be 0: (dx,dy)=(0,0) always contributes weight 1.0.
+                let w = spatialWeight(dx * dx + dy * dy) / (1.0 + diff2 / sigmaR2);
+                sum = sum + w * tap;
+                wsum = wsum + w;
+            }
+        }
+        rgb = sum / wsum;
+    }
+
+    // Spot healing, after denoise to match the CPU export path.
+    rgb = applyTouchups(uv, rgb);
+    // The probe shows the base layer itself, so nothing reads it after.
+    if (adj.base_probe > 0.0) {
+        rgb = baseProbe(uv, rgb, adj.base_probe);
+    } else {
+        rgb = sharpenAdjust(uv, rgb, localAdjust(uv, rgb));
+    }
+
+    // White balance: temp and tint (-100..100) as per-channel gains.
+    let t = l.temp / 100.0;
+    let ti = l.tint / 100.0;
+    rgb = rgb * vec3<f32>(1.0 + t * 0.3, 1.0 - ti * 0.15, 1.0 - t * 0.3);
+
+    return exposureCurve(rgb, l.exposure);
+}
+
+// The develop steps in the working gamma, after `developLinear`: tone, the
+// point curve, the Color Mixer, vibrance and saturation, Color Grading, then
+// Vignette and Grain by canvas position.
+fn developGamma(working: vec3<f32>, l: LocalTone, canvasUv: vec2<f32>, footprint: vec2<f32>) -> vec3<f32> {
+    var rgb = vec3<f32>(tone(working.r, l), tone(working.g, l), tone(working.b, l));
+    rgb = toneCurve(rgb);
+    // The Color Mixer, or the B&W mix, in OkLCh.
+    rgb = colorMix(rgb);
+
+    // Vibrance and saturation scale chroma around luma.
+    let luma = 0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b;
+    let satTotal = 1.0 + l.saturation / 100.0;
+    let cmax = max(rgb.r, max(rgb.g, rgb.b));
+    let cmin = min(rgb.r, min(rgb.g, rgb.b));
+    var curSat = 0.0;
+    if (cmax > 0.0) {
+        curSat = (cmax - cmin) / cmax;
+    }
+    let vibFactor = 1.0 + adj.vibrance / 100.0 * (1.0 - curSat);
+    rgb = luma + (rgb - luma) * (satTotal * vibFactor);
+
+    // Color Grading is in OkLab, so it tints a B&W photo too.
+    rgb = colorGrade(rgb);
+    return effects(rgb, canvasUv, footprint);
+}

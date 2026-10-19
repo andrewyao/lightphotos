@@ -44,127 +44,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ddx = dpdx(in.uv);
     let ddy = dpdy(in.uv);
     let texel = sampleSrc(uv, ddx, ddy);
-
-    // Outside the image (UV beyond 0..1): draw the neutral background.
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        return BACKGROUND;
+    if (outsidePhoto(in.uv, uv)) {
+        return vec4<f32>(0.0);
     }
-    // Outside the crop rectangle.
-    if (in.uv.x < adj.crop_l || in.uv.x > adj.crop_r || in.uv.y < adj.crop_t || in.uv.y > adj.crop_b) {
-        return BACKGROUND;
-    }
-
-    var r = texel.r;
-    var g = texel.g;
-    var b = texel.b;
-
-    // 0. Edge-aware denoise over a 5x5 neighborhood, weighted by distance and
-    // color similarity. The loop is not uniform control flow, so taps use
-    // textureSampleLevel at LOD 0; this skips mip antialiasing when zoomed
-    // out. Must match `denoise_sample` in develop/mod.rs.
-    if (adj.denoise > 0.0) {
-        let center = sampleSrcLevel(uv).rgb;
-        let sigmaR = 0.02 + adj.denoise / 100.0 * 0.30;
-        let sigmaR2 = sigmaR * sigmaR;
-        var sum = vec3<f32>(0.0, 0.0, 0.0);
-        var wsum = 0.0;
-        for (var dy = -2; dy <= 2; dy = dy + 1) {
-            for (var dx = -2; dx <= 2; dx = dx + 1) {
-                let tapUv = uv + vec2<f32>(f32(dx), f32(dy)) * vec2<f32>(adj.texel_w, adj.texel_h);
-                let tap = sampleSrcLevel(tapUv).rgb;
-                let diff = tap - center;
-                let diff2 = dot(diff, diff);
-                // wsum can't be 0: (dx,dy)=(0,0) always contributes weight 1.0.
-                let w = spatialWeight(dx * dx + dy * dy) / (1.0 + diff2 / sigmaR2);
-                sum = sum + w * tap;
-                wsum = wsum + w;
-            }
-        }
-        let denoised = sum / wsum;
-        r = denoised.x;
-        g = denoised.y;
-        b = denoised.z;
-    }
-
-    // Spot healing, after denoise to match the CPU export path.
-    var pre = applyTouchups(uv, vec3<f32>(r, g, b));
-    // The probe shows the base layer itself, so nothing reads it after.
-    if (adj.base_probe > 0.0) {
-        pre = baseProbe(uv, pre, adj.base_probe);
-    } else {
-        pre = sharpenAdjust(uv, pre, localAdjust(uv, pre));
-    }
-    r = pre.r;
-    g = pre.g;
-    b = pre.b;
 
     // The sliders here, with every mask's share added.
     let l = localTone(uv);
+    let lin = developLinear(uv, texel.rgb, l);
+    // Linear to working gamma (difference 1 in the header).
+    let srgb = linear_to_srgb(lin);
+    let working = vec3<f32>(
+        apply_raw_preview_boost(srgb.r),
+        apply_raw_preview_boost(srgb.g),
+        apply_raw_preview_boost(srgb.b),
+    );
+    let graded = developGamma(working, l, in.uv, footprintOf(ddx, ddy));
 
-    // 1. White balance: temp/tint (−100..100) → gentle per-channel gains.
-    let t = l.temp / 100.0;
-    let ti = l.tint / 100.0;
-    r = r * (1.0 + t * 0.3);
-    g = g * (1.0 - ti * 0.15);
-    b = b * (1.0 - t * 0.3);
-
-    // 2. Exposure.
-    let exposed = exposureCurve(vec3<f32>(r, g, b), l.exposure);
-    r = exposed.r;
-    g = exposed.g;
-    b = exposed.b;
-
-    // 3. Linear to working gamma (difference 1 in the header).
-    let srgb = linear_to_srgb(vec3<f32>(r, g, b));
-    r = apply_raw_preview_boost(srgb.r);
-    g = apply_raw_preview_boost(srgb.g);
-    b = apply_raw_preview_boost(srgb.b);
-
-    // 4. Perceptual tone ops, in the working (boosted) space.
-    r = tone(r, l);
-    g = tone(g, l);
-    b = tone(b, l);
-
-    // 4.25. The point curve, still in gamma space.
-    let curved = toneCurve(vec3<f32>(r, g, b));
-    r = curved.r;
-    g = curved.g;
-    b = curved.b;
-
-    // 4.3. The Color Mixer, or the B&W mix, in OkLCh.
-    let mixed = colorMix(vec3<f32>(r, g, b));
-    r = mixed.r;
-    g = mixed.g;
-    b = mixed.b;
-
-    // 4.5. Vibrance/saturation: scale chroma around luma in gamma space.
-    // Must match develop `apply_linear` and shader.wgsl.
-    let luma = 0.299 * r + 0.587 * g + 0.114 * b;
-    let satTotal = 1.0 + l.saturation / 100.0;
-    let cmax = max(r, max(g, b));
-    let cmin = min(r, min(g, b));
-    var curSat = 0.0;
-    if (cmax > 0.0) {
-        curSat = (cmax - cmin) / cmax;
-    }
-    let vibFactor = 1.0 + adj.vibrance / 100.0 * (1.0 - curSat);
-    let total = satTotal * vibFactor;
-    r = luma + (r - luma) * total;
-    g = luma + (g - luma) * total;
-    b = luma + (b - luma) * total;
-
-    // 4.6. Color Grading, in OkLab, so it tints a B&W photo too.
-    let graded = colorGrade(vec3<f32>(r, g, b));
-    r = graded.r;
-    g = graded.g;
-    b = graded.b;
-
-    // 4.75. Post-crop Vignette and Grain, by canvas position.
-    let fx = effects(vec3<f32>(r, g, b), in.uv, footprintOf(ddx, ddy));
-    r = fx.r;
-    g = fx.g;
-    b = fx.b;
-
-    // 5. Clamp and keep alpha. No return to linear (difference 2 in the header).
-    return vec4<f32>(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), texel.a);
+    // No return to linear (difference 2 in the header).
+    return vec4<f32>(clamp(graded, vec3<f32>(0.0), vec3<f32>(1.0)), texel.a);
 }
