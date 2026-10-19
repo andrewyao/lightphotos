@@ -57,6 +57,12 @@ const PREVIEW_MAX: u32 = 4096;
 /// The preview target rounds up to a multiple of this, so resizing the window
 /// doesn't request a new decode on every pixel.
 const PREVIEW_QUANTUM: u32 = 512;
+
+/// How long to wait before redrawing a frame the surface could not present.
+/// Short enough that a revealed window draws without a visible lag, long
+/// enough not to burn a core while it stays hidden.
+const UNPRESENTED_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Smallest touch-up radius in source-image pixels.
 pub(crate) const TOUCHUP_MIN_PIXELS: f32 = 3.0;
 pub(crate) const TOUCHUP_MAX_RADIUS: f32 = 0.15;
@@ -1457,9 +1463,13 @@ impl App {
         };
         let presented = renderer.render(primary_vp, compare_vp, Some(egui_paint));
         // Retry an unpresentable surface so it draws once revealed. If winit
-        // reports it occluded, wait for Occluded(false) instead of spinning.
+        // reports it occluded, wait for Occluded(false). macOS sends no
+        // Occluded for a window behind another one, and nothing presented
+        // means no vsync to pace an immediate retry, so retry on a timer.
         if !presented && !self.occluded {
-            self.request_redraw();
+            if let Some(retry) = Instant::now().checked_add(UNPRESENTED_RETRY) {
+                self.repaint_at = Some(self.repaint_at.map_or(retry, |at| at.min(retry)));
+            }
         }
     }
 
