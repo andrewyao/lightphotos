@@ -1234,7 +1234,6 @@ impl App {
         self.cancel_auto_tone();
         self.cancel_remove_ca();
         self.cancel_scoring();
-        self.cancel_delete();
         self.save_edit();
     }
 

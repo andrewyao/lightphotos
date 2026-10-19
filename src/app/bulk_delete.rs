@@ -57,12 +57,6 @@ pub(crate) struct BulkDelete {
     /// Dropped when the batch ends, which is what stops the worker thread.
     #[cfg(not(target_arch = "wasm32"))]
     submit: Option<Sender<PathBuf>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    worker: Option<std::thread::JoinHandle<()>>,
-    /// Set to stop the worker between trash calls, so abandoning a batch waits
-    /// for one filesystem operation rather than for everything submitted.
-    #[cfg(not(target_arch = "wasm32"))]
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
     /// wasm has no OS paths, so the folder the batch started in is captured
     /// here and its sidecar cleanup still lands there after a navigation.
@@ -218,12 +212,7 @@ impl App {
         };
 
         #[cfg(not(target_arch = "wasm32"))]
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        #[cfg(not(target_arch = "wasm32"))]
-        let (submit, worker) = match spawn_trash_worker(done_tx.clone(), stop.clone()) {
-            Some((submit, worker)) => (Some(submit), Some(worker)),
-            None => (None, None),
-        };
+        let submit = spawn_trash_worker(done_tx.clone());
 
         self.bulk_delete = Some(BulkDelete {
             queue: paths.into(),
@@ -238,10 +227,6 @@ impl App {
             done_rx,
             #[cfg(not(target_arch = "wasm32"))]
             submit,
-            #[cfg(not(target_arch = "wasm32"))]
-            worker,
-            #[cfg(not(target_arch = "wasm32"))]
-            stop,
             #[cfg(target_arch = "wasm32")]
             origin_dir,
             #[cfg(target_arch = "wasm32")]
@@ -337,33 +322,6 @@ impl App {
         self.request_redraw();
     }
 
-    /// Abandon a running delete, keeping what it already trashed. Called on
-    /// every folder change, because the reconciliation below is about to lose
-    /// the playlist it applies to. Trash calls already handed to a worker are
-    /// not recalled; those files really are being deleted.
-    pub(super) fn cancel_delete(&mut self) {
-        let Some(d) = self.bulk_delete.as_mut() else {
-            return;
-        };
-        d.queue.clear();
-        // Native stops the worker between trash calls and joins it, so this
-        // waits for one filesystem operation and every result it did send is
-        // still collected below. wasm cannot join a `spawn_local`, so up to
-        // `DELETE_WINDOW` results land after the batch is gone and their
-        // photos keep their entries in the path-keyed maps. Those photos are
-        // not in the folder the user just moved to, so nothing shows them.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            d.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            d.submit = None;
-            if let Some(worker) = d.worker.take() {
-                let _ = worker.join();
-            }
-        }
-        d.in_flight.clear();
-        self.poll_delete();
-    }
-
     fn whole_groups(&self, paths: &[PathBuf]) -> HeldGroups {
         let Some(groups) = self.folder_store.groups() else {
             return Default::default();
@@ -427,17 +385,20 @@ impl App {
     /// index space that `gone` exists to keep stable.
     fn prune_deleted(&mut self, d: BulkDelete) {
         let gone = d.gone;
-        if !gone.is_empty() {
-            if let Some(pl) = self.playlist.as_mut() {
-                let removed = pl.remove_matching(|p| gone.contains(p));
-                self.visible = self
-                    .visible
-                    .iter()
-                    .filter_map(|&i| crate::navigation::shift_index(i, &removed))
-                    .collect();
-                self.strip_layout = None;
-            }
-            self.autotone.drop_deferred(&gone);
+        self.autotone.drop_deferred(&gone);
+        // Empty when the batch's folder is no longer open. The folder showing
+        // lost nothing, so its selection stays.
+        let removed = match self.playlist.as_mut() {
+            Some(pl) if !gone.is_empty() => pl.remove_matching(|p| gone.contains(p)),
+            _ => Vec::new(),
+        };
+        if !removed.is_empty() {
+            self.visible = self
+                .visible
+                .iter()
+                .filter_map(|&i| crate::navigation::shift_index(i, &removed))
+                .collect();
+            self.strip_layout = None;
             self.selected.clear();
             self.anchor = None;
             self.recompute_visible();
@@ -476,25 +437,19 @@ impl App {
 /// unmeasured. It trashes in submission order and exits when the batch drops
 /// its sender.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_trash_worker(
-    done_tx: Sender<DeleteResult>,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> Option<(Sender<PathBuf>, std::thread::JoinHandle<()>)> {
+fn spawn_trash_worker(done_tx: Sender<DeleteResult>) -> Option<Sender<PathBuf>> {
     let (submit, rx) = channel::<PathBuf>();
     match std::thread::Builder::new()
         .name("trash".into())
         .spawn(move || {
             while let Ok(path) = rx.recv() {
-                if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
                 let result = crate::shell::trash::move_to_trash(&path);
                 if done_tx.send((path, result)).is_err() {
                     return;
                 }
             }
         }) {
-        Ok(worker) => Some((submit, worker)),
+        Ok(_) => Some(submit),
         Err(e) => {
             eprintln!("[lightphotos] could not start the trash worker: {e}");
             None
@@ -635,14 +590,12 @@ mod tests {
         let (mut app, dir, paths) = app_with_photos(&names);
         app.start_delete(paths.clone());
 
-        // Stop the real worker and take over its result channel. Results it
-        // already sent were collected by the poll in `start_delete`; any it
-        // sends later go to the dropped receiver.
+        // Take over the real worker's result channel. Results it already sent
+        // were collected by the poll in `start_delete`; any it sends later go
+        // to the dropped receiver.
         let (results, pending) = {
             let d = app.bulk_delete.as_mut().unwrap();
-            d.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             d.submit = None;
-            d.worker.take().unwrap().join().unwrap();
             let (tx, rx) = channel();
             d.done_tx = tx.clone();
             d.done_rx = rx;
@@ -729,20 +682,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A folder change mid-delete is the hazard `cancel_auto_tone` exists for,
-    /// reached by a second route. `FolderStore` keys its cache by file name, so a
-    /// late `folder_store.remove` for the old folder's `a.jpg` would drop the new
-    /// folder's `a.jpg` record and mark it dirty, and the load that was meant
-    /// to restore it would then skip it.
+    /// A delete started in one folder finishes after the user opens another.
+    /// `FolderStore` keys its cache by file name, so cleanup for the old
+    /// folder's `p00.jpg` must not drop the new folder's `p00.jpg` record, and
+    /// the end-of-batch reconciliation must not touch the new folder's
+    /// selection.
     #[test]
-    fn a_folder_change_mid_delete_leaves_the_new_folders_same_named_photo_alone() {
+    fn a_delete_finishes_in_its_own_folder_after_a_folder_change() {
         let doomed: Vec<String> = (0..30).map(|i| format!("p{i:02}.jpg")).collect();
         let refs: Vec<&str> = doomed.iter().map(String::as_str).collect();
         let (mut app, old_dir, old_paths) = app_with_photos(&refs);
+        {
+            let mut old_store =
+                crate::persist::folder_store::FolderStore::with_dir(old_dir.clone());
+            for p in &old_paths {
+                old_store.set(p, 2);
+            }
+        }
+        let old_sidecars: Vec<PathBuf> = old_paths
+            .iter()
+            .map(|p| crate::sidecar::sidecar_path(p).unwrap())
+            .collect();
+        assert!(old_sidecars.iter().all(|s| s.exists()));
 
         let new_dir = temp_folder("bulk-delete-test");
         let survivor = new_dir.join(&doomed[0]);
         std::fs::write(&survivor, b"").unwrap();
+        std::fs::write(new_dir.join("q.jpg"), b"").unwrap();
         crate::persist::folder_store::FolderStore::with_dir(new_dir.clone()).set(&survivor, 4);
 
         app.selected = (0..old_paths.len()).collect();
@@ -754,13 +720,28 @@ mod tests {
 
         app.load_playlist(Playlist::from_dir(&new_dir), new_dir.clone());
         assert!(
-            app.bulk_delete.is_none(),
-            "a folder change must abandon the batch before the new folder loads"
+            app.bulk_delete.is_some(),
+            "a folder change must not stop the batch"
         );
         wait_for_folder_store_within(&mut app, Duration::from_secs(20));
-        // What the frame loop would do next. A batch that survived the change
-        // would speak for the old folder here.
+        app.select_single(1);
+        app.select_toggle(0);
         drain(&mut app);
+
+        assert!(
+            old_paths.iter().all(|p| !p.exists()),
+            "every photo of the old folder is trashed"
+        );
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(10));
+        assert!(
+            old_sidecars.iter().all(|s| !s.exists()),
+            "and loses its sidecar"
+        );
+        assert_eq!(
+            app.status_text(),
+            Some((crate::i18n::t().deleted)(old_paths.len()).as_str())
+        );
 
         assert!(survivor.exists(), "the new folder's photo is untouched");
         assert_eq!(
@@ -769,13 +750,14 @@ mod tests {
             "the new folder's same-named photo must keep its rating"
         );
         assert_eq!(app.ratings.get(&survivor), Some(&4));
-        app.folder_store
-            .flush_blocking(std::time::Duration::from_secs(10));
         assert_eq!(
             crate::persist::folder_store::FolderStore::with_dir(new_dir.clone()).get(&survivor),
             Some(4),
             "and must keep it on disk"
         );
+        assert_eq!(app.playlist.as_ref().unwrap().entries().len(), 2);
+        assert_eq!(app.visible.len(), 2);
+        assert_eq!(app.selected.len(), 2, "the new folder's selection stays");
 
         let _ = std::fs::remove_dir_all(&old_dir);
         let _ = std::fs::remove_dir_all(&new_dir);
@@ -817,40 +799,6 @@ mod tests {
             status.contains('1') && status.contains('2'),
             "a partial delete reports how many of how many landed, got: {status}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A folder change abandons the batch. It must stop the worker rather than
-    /// wait for everything already submitted, or leaving a folder mid-delete
-    /// would block for as long as the whole delete.
-    #[test]
-    fn a_folder_change_abandons_the_batch_and_keeps_what_it_trashed() {
-        let names: Vec<String> = (0..40).map(|i| format!("p{i:02}.jpg")).collect();
-        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let (mut app, dir, paths) = app_with_photos(&refs);
-        for p in &paths {
-            app.ratings.insert(p.clone(), 3);
-        }
-        app.start_delete(paths.clone());
-        app.cancel_delete();
-
-        assert!(
-            app.bulk_delete.is_none(),
-            "a cancelled batch must not keep polling"
-        );
-        let survivors = paths.iter().filter(|p| p.exists()).count();
-        assert!(
-            survivors >= 30,
-            "cancelling must stop the worker, not drain the queue; only \
-             {survivors} of 40 photos survived"
-        );
-        for p in &paths {
-            assert_eq!(
-                p.exists(),
-                app.ratings.contains_key(p),
-                "a photo keeps its rating exactly while it is still on disk"
-            );
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
