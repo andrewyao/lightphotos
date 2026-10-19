@@ -270,6 +270,7 @@ impl Run {
                 path: path.clone(),
                 adj: Default::default(),
                 touchups: Vec::new(),
+                masks: crate::develop::MaskInput::none(),
                 rot: 0,
                 edits: 0,
             };
@@ -429,7 +430,8 @@ impl Run {
                 continue;
             };
             let t0 = Instant::now();
-            let baked = crate::develop::image_ops::bake_edited(&img, &adj, &[], 0);
+            let baked =
+                crate::develop::image_ops::bake_edited(&img, &adj, &[], &Default::default(), 0);
             bakes.push(t0.elapsed());
             std::hint::black_box(baked);
         }
@@ -460,7 +462,16 @@ impl Run {
                 continue;
             };
             let t = Instant::now();
-            loader.request_bake(path, THUMB_PX, sig as u64 + 1, img, adj, &[], 0);
+            loader.request_bake(
+                path,
+                THUMB_PX,
+                sig as u64 + 1,
+                img,
+                adj,
+                &[],
+                crate::develop::MaskInput::none(),
+                0,
+            );
             frame += t.elapsed();
         }
         let mut landed = 0usize;
@@ -546,6 +557,7 @@ impl Run {
                 dest: crate::export::ExportDest::Folder(dir.join(format!("{i:04}.jpg"))),
                 adj: crate::develop::Adjustments::default(),
                 touchups: Vec::new(),
+                masks: crate::develop::MaskInput::none(),
                 rot: 0,
                 output: crate::export::Output::FULL,
             });
@@ -875,6 +887,7 @@ impl BackgroundScoring {
                         path,
                         adj: Default::default(),
                         touchups: Vec::new(),
+                        masks: crate::develop::MaskInput::none(),
                         rot: 0,
                         edits: 0,
                     });
