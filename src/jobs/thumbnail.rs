@@ -137,6 +137,9 @@ pub fn decode_speed(
 /// Off macOS, the same order as `web_decode::decode`: the EXIF thumbnail if it
 /// is large enough, then rawler's embedded full image (RAF/CR3), then a
 /// `source` decode. Small originals come back at their native size.
+///
+/// A non-RAW is decoded from the bytes already read rather than through
+/// `source`, which would read the file again to do the same decode.
 #[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
 pub fn decode_speed(
@@ -150,6 +153,10 @@ pub fn decode_speed(
             .or_else(|| crate::decode::rawler::rawler_full_image_from_bytes(&bytes, max_px));
         if let Some(img) = preview {
             return Ok((img, Origin::Embedded));
+        }
+        if !crate::decode::image_decode::is_raw_extension(path) {
+            let img = crate::decode::image_decode::decode_nonraw_from_bytes(&bytes, max_px)?;
+            return Ok((img, Origin::Decoded));
         }
     }
     Ok((source(path, max_px)?, Origin::Decoded))
