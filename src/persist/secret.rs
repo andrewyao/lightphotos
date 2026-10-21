@@ -35,24 +35,58 @@ pub fn load_api_key(_server: &str) -> Option<String> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn save_api_key(_server: &str, key: &str) -> Result<(), String> {
-    use std::io::Write;
     let dir =
         crate::persist::prefs::config_dir().ok_or_else(|| "no config directory".to_string())?;
     let path = dir.join(KEY_FILE);
+    std::fs::create_dir_all(&dir)
+        .and_then(|()| write_private(&path, key.as_bytes()))
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Write `bytes` to `path`, readable by the user alone.
+#[cfg(any(test, not(target_os = "macos")))]
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
-    // Created private rather than chmod'ed after, so the key is never readable.
+    // Created private rather than chmod'ed after, so a new key is never
+    // readable.
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    std::fs::create_dir_all(&dir)
-        .and_then(|()| opts.open(&path))
-        .and_then(|mut f| f.write_all(key.as_bytes()))
-        .map_err(|e| format!("{}: {e}", path.display()))
+    let mut file = opts.open(path)?;
+    // `mode` only applies to a file it creates. One left readable by an
+    // older version or another program is narrowed, while still empty,
+    // before the key goes in.
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    file.write_all(bytes)
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn delete_api_key(_server: &str) {
     if let Some(dir) = crate::persist::prefs::config_dir() {
         let _ = std::fs::remove_file(dir.join(KEY_FILE));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_key_written_over_a_readable_file_leaves_it_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("lightphotos-secret-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("key");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_private(&path, b"new").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
