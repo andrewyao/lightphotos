@@ -203,6 +203,33 @@ jobs:
       - name: Check THIRD-PARTY-LICENSES.txt
         run: ./scripts/third-party-licenses.sh --check
 
+  # deny.toml: RustSec advisories, the licence allow-list and the allowed
+  # sources. An advisory published after a merge turns this red on the next
+  # push, which is the point.
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache vendored rawler
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/*.patch') }}
+
+      - name: Vendor rawler
+        run: ./scripts/setup-vendor-rawler.sh
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: cargo deny
+        run: cargo deny check
+
   web:
     name: wasm build
     runs-on: ubuntu-latest

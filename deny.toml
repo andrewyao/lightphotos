@@ -1,0 +1,55 @@
+# cargo-deny policy. CI runs `cargo deny check` on every push and PR.
+# The "rawler stays out of the macOS build" rule is the separate `cargo tree`
+# step in ci.yml: cargo-deny bans a crate on every target or none.
+
+[graph]
+all-features = false
+
+[advisories]
+ignore = [
+    # quick-xml 0.39 reaches us only through wayland-scanner, a proc-macro that
+    # parses the Wayland protocol XML shipped inside its own crate at build
+    # time. No runtime input reaches it; wayland-scanner pins the version.
+    { id = "RUSTSEC-2026-0194", reason = "build-time only, via wayland-scanner on trusted XML" },
+    { id = "RUSTSEC-2026-0195", reason = "build-time only, via wayland-scanner on trusted XML" },
+    # Unmaintained, with no maintained release to move to yet. Each comes in
+    # through a dependency, not through our code.
+    { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained proc-macro, via ravif -> rav1e (AVIF export)" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: unmaintained, via winit -> sctk-adwaita (Linux window decorations)" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: unmaintained, via rfd/ashpd on Linux" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: unmaintained, via rfd/ashpd on Linux" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: unmaintained, via rfd/ashpd on Linux" },
+]
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "NCSA",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+exceptions = [
+    # LGPL-2.1, so it ships only in the non-mac builds; see Cargo.toml's
+    # [patch.crates-io] and the macOS check in ci.yml.
+    { allow = ["LGPL-2.1"], crate = "rawler" },
+]
+
+[bans]
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/andrewyao/lightwatch"]
