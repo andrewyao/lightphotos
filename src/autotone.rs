@@ -321,11 +321,23 @@ impl Centering {
         }
     }
 
-    /// The saved choice, or [`Centering::Range`] when none is saved.
+    /// The saved choice, or [`Centering::Range`] when none is saved or
+    /// Settings hides the choice.
     #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn load() -> Centering {
-        crate::persist::prefs::load(Centering::PREF_KEY)
-            .and_then(|s| Centering::parse(&s))
+        Centering::chosen(
+            crate::app::SHOW_AUTOTONE_CENTERING,
+            crate::persist::prefs::load(Centering::PREF_KEY).as_deref(),
+        )
+    }
+
+    /// What applies, given whether Settings `shown` the choice and what is
+    /// `saved`. A hidden choice can't be seen or changed, so one saved while
+    /// it showed must not keep applying.
+    fn chosen(shown: bool, saved: Option<&str>) -> Centering {
+        saved
+            .filter(|_| shown)
+            .and_then(Centering::parse)
             .unwrap_or_default()
     }
 
@@ -544,6 +556,14 @@ pub(crate) fn merge(base: &Adjustments, auto: &Adjustments) -> Adjustments {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_centering_applies_only_while_settings_shows_it() {
+        assert_eq!(Centering::chosen(true, Some("median")), Centering::Median);
+        assert_eq!(Centering::chosen(false, Some("median")), Centering::Range);
+        assert_eq!(Centering::chosen(true, None), Centering::Range);
+        assert_eq!(Centering::chosen(true, Some("junk")), Centering::Range);
+    }
 
     /// `n` gray linear-light samples whose display luma runs from `lo` to `hi`.
     fn ramp(lo: f32, hi: f32, n: usize) -> Vec<[f32; 3]> {

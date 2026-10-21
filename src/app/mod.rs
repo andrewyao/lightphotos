@@ -37,8 +37,8 @@ pub(crate) const GRID_CELL_PT: f32 = 192.0;
 /// photo set has checked `CLOSED_EYE_RATIO`.
 pub(crate) const SHOW_EYES_FILTER: bool = false;
 
-/// Whether Settings shows Auto Tone's centering choice. Hidden for now; the
-/// saved choice still applies.
+/// Whether Settings shows Auto Tone's centering choice. Hidden for now, and
+/// a choice saved while it showed is ignored, since nothing could undo it.
 pub(crate) const SHOW_AUTOTONE_CENTERING: bool = false;
 
 /// `prefs` key for the macOS RAW tone curve setting, "on" or "off".
