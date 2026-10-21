@@ -363,6 +363,12 @@ impl App {
         self.rotations.remove(path);
         self.capture_times.remove(path);
         self.sort_meta.remove(path);
+        self.touchups.remove(path);
+        self.touchup_undo.remove(path);
+        self.masks.remove(path);
+        self.detections.remove(path);
+        self.exif_cache.remove(path);
+        self.thumb_aspect.remove(path);
         self.signals.forget(path);
 
         #[cfg(target_arch = "wasm32")]
@@ -532,6 +538,29 @@ mod tests {
             "the playlist is reconciled once the batch ends"
         );
         assert!(app.visible.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A trashed photo leaves nothing behind in the maps keyed by its path.
+    #[test]
+    fn a_trashed_photo_leaves_no_per_photo_state() {
+        let (mut app, dir, paths) = app_with_photos(&["a.jpg", "b.jpg"]);
+        let gone = paths[0].clone();
+        app.touchups.insert(gone.clone(), Vec::new());
+        app.touchup_undo.insert(gone.clone(), Vec::new());
+        app.masks.insert(gone.clone(), Vec::new());
+        app.detections.insert(gone.clone(), Default::default());
+        app.exif_cache.insert(gone.clone(), Default::default());
+        app.thumb_aspect.insert(gone.clone(), 1.5);
+        app.start_delete(vec![gone.clone()]);
+        drain(&mut app);
+
+        assert!(!app.touchups.contains_key(&gone), "touchups");
+        assert!(!app.touchup_undo.contains_key(&gone), "touchup_undo");
+        assert!(!app.masks.contains_key(&gone), "masks");
+        assert!(!app.detections.contains_key(&gone), "detections");
+        assert!(!app.exif_cache.contains_key(&gone), "exif_cache");
+        assert!(!app.thumb_aspect.contains_key(&gone), "thumb_aspect");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
