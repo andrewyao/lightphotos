@@ -149,12 +149,16 @@ pub(super) fn decode(
                 height: f64::from(h),
             },
         };
+        // A `Vec<u8>` promises no alignment, and CoreImage writes half floats.
+        if !rgba.as_ptr().cast::<u16>().is_aligned() {
+            return Err("pixel buffer is not aligned for half floats".into());
+        }
         let data = NonNull::new(rgba.as_mut_ptr().cast()).ok_or("no pixel buffer")?;
         CONTEXT.with(|ctx| {
             // SAFETY: `rgba` holds `row_bytes * h` bytes and outlives the
             // call, which renders `w x h` RGBAh pixels into it and returns.
-            // The allocator aligns it to at least 16 bytes, more than a half
-            // float needs. `kCIFormatRGBAh` is an immutable CoreImage
+            // It starts on a 2-byte boundary, checked above, which is all a
+            // half float needs. `kCIFormatRGBAh` is an immutable CoreImage
             // constant.
             unsafe {
                 ctx.render_toBitmap_rowBytes_bounds_format_colorSpace(

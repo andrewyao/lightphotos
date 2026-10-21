@@ -116,14 +116,17 @@ pub fn presented() {
     }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 thread_local! { static EVENTS: RefCell<Vec<(String, String, String)>> = const { RefCell::new(Vec::new()) }; }
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 fn lp_event(name: &str, key: &str, value: &str) {
     EVENTS.with_borrow_mut(|events| events.push((name.into(), key.into(), value.into())));
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
     fn reset() {
