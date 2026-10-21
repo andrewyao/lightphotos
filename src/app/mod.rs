@@ -1223,6 +1223,10 @@ impl App {
         if self.playlist.as_ref().map(Playlist::dir) != Some(playlist.dir()) {
             self.expanded_stacks.clear();
             self.thumb_aspect.clear();
+            // Read from the files, which may change while the user is away.
+            self.exif_cache.clear();
+            self.capture_times.clear();
+            self.sort_meta.clear();
         }
         self.adopt_signal_cache(playlist);
         self.request_folder_store_load(playlist.dir());
@@ -1796,5 +1800,25 @@ mod tests {
         assert_eq!(range_set(2, 5), set(&[2, 3, 4, 5]));
         assert_eq!(range_set(5, 2), set(&[2, 3, 4, 5])); // same range, anchor after
         assert_eq!(range_set(3, 3), set(&[3])); // single cell
+    }
+
+    /// What was read from a folder's files is read again on the next visit,
+    /// so an edit made outside the app in between shows.
+    #[test]
+    fn leaving_a_folder_forgets_what_was_read_from_its_files() {
+        use crate::app::test_support::{folder_app, temp_folder};
+        let (mut app, dir, paths) = folder_app("leave-folder-caches", 2);
+        let photo = paths[0].clone();
+        app.exif_cache.insert(photo.clone(), Default::default());
+        app.capture_times.insert(photo.clone(), None);
+        app.sort_meta.insert(photo.clone(), Default::default());
+
+        let other = temp_folder("leave-folder-caches-other");
+        app.load_folder(other.clone());
+        assert!(!app.exif_cache.contains_key(&photo), "exif_cache");
+        assert!(!app.capture_times.contains_key(&photo), "capture_times");
+        assert!(!app.sort_meta.contains_key(&photo), "sort_meta");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
     }
 }
