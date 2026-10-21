@@ -39,6 +39,10 @@
 set -eu
 
 CRATE_VERSION="0.8.0"
+# The crates.io index's `cksum` for this version. A [patch.crates-io] path
+# dependency is outside Cargo.lock's checksums, so this is the only thing
+# that ties the tarball to what crates.io published.
+CRATE_SHA256="51cb9d46a5b34946878eb236d1180adec0806eee260738ce299517b083a232e8"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$HERE/vendor/rawler-$CRATE_VERSION"
 # Written only after the patch applies cleanly; its presence is what marks
@@ -86,9 +90,21 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 # crates.io requires a User-Agent identifying the client.
-curl -sSL -A "lightphotos-wasm-build (local dev/CI, not a real client)" \
+curl -fsSL -A "lightphotos-wasm-build (local dev/CI, not a real client)" \
   "https://crates.io/api/v1/crates/rawler/$CRATE_VERSION/download" \
   -o "$TMP/rawler.crate"
+
+# sha256sum on Linux and git-bash, shasum on macOS.
+if command -v sha256sum >/dev/null 2>&1; then
+  GOT="$(sha256sum "$TMP/rawler.crate" | cut -d' ' -f1)"
+else
+  GOT="$(shasum -a 256 "$TMP/rawler.crate" | cut -d' ' -f1)"
+fi
+if [ "$GOT" != "$CRATE_SHA256" ]; then
+  echo "rawler-$CRATE_VERSION.crate has SHA-256 $GOT, expected $CRATE_SHA256." >&2
+  echo "Not unpacking it. Check the download, or update CRATE_SHA256 from the crates.io index after a deliberate version bump." >&2
+  exit 1
+fi
 
 mkdir -p "$HERE/vendor"
 tar -xzf "$TMP/rawler.crate" -C "$TMP"
