@@ -13,8 +13,10 @@ on:
     tags: ["v*"]
   workflow_dispatch: {}   # allow manual runs from the Actions tab
 
+# Read-only by default. Only the release job, which holds no signing secrets,
+# gets write access to create the GitHub Release.
 permissions:
-  contents: write          # needed to create the GitHub Release
+  contents: read
 
 jobs:
   build:
@@ -41,14 +43,15 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       # rust-toolchain.toml pins channel = "stable"; this respects it.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: ${{ matrix.target }}
 
@@ -133,7 +136,7 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path "target/${{ matrix.target }}/release/lightphotos.exe", LICENSE-MIT, LICENSE-APACHE, patches/LICENSE-LGPL, THIRD-PARTY-LICENSES.txt -DestinationPath "${{ matrix.name }}.zip"
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: ${{ matrix.name }}
           path: |
@@ -148,12 +151,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           path: dist
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
           generate_release_notes: true
