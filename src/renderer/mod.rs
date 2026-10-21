@@ -1219,23 +1219,8 @@ impl Renderer {
             view_formats: &[],
         });
 
-        // `write_texture` needs rows aligned to `COPY_BYTES_PER_ROW_ALIGNMENT`
-        // (256 bytes). Upload the caller's buffer directly when rows already
-        // align, and copy into a padded buffer otherwise.
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let row = bytes_per_pixel * w;
-        let padded_row = row.div_ceil(align) * align;
-        let level0: std::borrow::Cow<[u8]> = if padded_row == row {
-            std::borrow::Cow::Borrowed(&img.rgba)
-        } else {
-            let mut padded = vec![0u8; (padded_row * h) as usize];
-            for y in 0..h as usize {
-                let src = y * row as usize;
-                let dst = y * padded_row as usize;
-                padded[dst..dst + row as usize].copy_from_slice(&img.rgba[src..src + row as usize]);
-            }
-            std::borrow::Cow::Owned(padded)
-        };
+        // Unlike a buffer-to-texture copy, `write_texture` takes tightly
+        // packed rows: wgpu aligns them itself as it fills its staging buffer.
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -1243,10 +1228,10 @@ impl Renderer {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &level0,
+            &img.rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(padded_row),
+                bytes_per_row: Some(bytes_per_pixel * w),
                 rows_per_image: Some(h),
             },
             wgpu::Extent3d {
