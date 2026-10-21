@@ -2,7 +2,7 @@
 target = "index.html"
 # Plain `trunk build`/`trunk serve` builds the **dev** cargo profile
 # (opt-level=0, no LTO) — this project's `[profile.release]` (opt-level=3,
-# thin LTO, codegen-units=1) only applies with `--release`. For anything
+# fat LTO, codegen-units=1) only applies with `--release`. For anything
 # CPU-heavy (RAW decode/demosaic, in particular) debug-vs-release wasm is
 # routinely 10-30x apart — confirmed live: a debug build's PPG-demosaic RAW
 # Loupe load felt "too slow" and a release build's bg.wasm alone dropped
