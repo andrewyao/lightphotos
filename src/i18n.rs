@@ -653,6 +653,8 @@ pub struct Strings {
     pub export_needs_immich: &'static str,
     pub immich_server_url: &'static str,
     pub immich_url_example: &'static str,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub immich_plain_http: &'static str,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub immich_native_only: &'static str,
     pub immich_api_key: &'static str,
@@ -1711,6 +1713,7 @@ pub static EN: Strings = Strings {
     export_needs_immich: "Connect to an Immich server first",
     immich_server_url: "Server URL",
     immich_url_example: "Example: https://immich.gumnut.ai",
+    immich_plain_http: "http:// is not encrypted: your API key and photos cross the network readable. Use https:// if the server offers it.",
     immich_native_only: "Uploading to Immich is only available in the desktop app. Browsers can't connect to an Immich server.",
     immich_api_key: "API key",
     immich_connect: "Connect",
@@ -2580,6 +2583,7 @@ pub static ZH: Strings = Strings {
     export_needs_immich: "请先连接 Immich 服务器",
     immich_server_url: "服务器地址",
     immich_url_example: "示例：https://immich.gumnut.ai",
+    immich_plain_http: "http:// 未加密：API 密钥和照片会以明文传输。如果服务器支持，请改用 https://。",
     immich_native_only: "上传到 Immich 仅在桌面版中可用。浏览器无法连接 Immich 服务器。",
     immich_api_key: "API 密钥",
     immich_connect: "连接",

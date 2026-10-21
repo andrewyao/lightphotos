@@ -488,6 +488,9 @@ fn immich_rows(
                     actions.push(UiAction::SetImmichUrl(url_text));
                 }
                 form::hint(ui, t.immich_url_example);
+                if crate::export::immich::is_plain_http(url) {
+                    form::error(ui, t.immich_plain_http);
+                }
             });
             let mut entered = false;
             form.row(ui, t.immich_api_key, |ui| {
@@ -534,6 +537,9 @@ fn immich_rows(
             form.row(ui, t.immich_account, |ui| {
                 ui.label((t.immich_connected_as)(&account.name));
                 form::hint(ui, &format!("{} \u{b7} {}", account.email, server.origin()));
+                if crate::export::immich::is_plain_http(server.origin()) {
+                    form::error(ui, t.immich_plain_http);
+                }
                 if ui.button(t.immich_disconnect).clicked() {
                     actions.push(UiAction::DisconnectImmich);
                 }

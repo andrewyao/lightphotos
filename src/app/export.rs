@@ -1207,6 +1207,41 @@ mod status_tests {
         }
     }
 
+    /// The form warns while the server URL is plain http://, before the key
+    /// is sent and while it is in use.
+    #[test]
+    fn the_immich_form_warns_about_a_plain_http_server() {
+        use crate::app::test_support::{folder_app, settled_at};
+        let warning = crate::i18n::t().immich_plain_http;
+        let (mut app, dir, _) = folder_app("immich-http", 1);
+        app.select_single(0);
+        app.exports.form_open = true;
+        app.exports.key_looked_up = true;
+        app.exports.settings.target = ExportTarget::Immich;
+        let size = egui::vec2(1600.0, 1000.0);
+        for (url, warned) in [
+            ("http://nas.local:2283", true),
+            ("https://nas.local", false),
+        ] {
+            app.exports.immich = ImmichLink::Disconnected {
+                url: url.into(),
+                key: String::new(),
+                error: None,
+            };
+            assert_eq!(settled_at(&mut app, size).has(warning), warned, "{url}");
+        }
+        app.exports.immich = ImmichLink::Connected {
+            server: Arc::new(ImmichServer::offline("http://nas.local:2283")),
+            account: Account {
+                name: "Ada".into(),
+                email: "ada@example.com".into(),
+            },
+            albums: Ok(vec![]),
+        };
+        assert!(settled_at(&mut app, size).has(warning), "connected");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A batch into a new album ends with the album in the list and chosen
     /// as `Existing`, so the next batch doesn't create a second one.
     #[test]
