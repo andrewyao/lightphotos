@@ -398,10 +398,46 @@ fn render(
             meta.embedded(),
         )
     };
-    match output.jpeg_limit_kb {
-        None => jpeg(None),
-        Some(kb) => within_limit(kb, jpeg),
+    let Some(kb) = output.jpeg_limit_kb else {
+        return jpeg(None);
+    };
+    let sample = sample_rows(w, &rgba);
+    let sample = sample
+        .as_ref()
+        .map(|(rows, pixels)| image_encode::Prepared::new(w, *rows, Pixels::Rgba8(pixels)))
+        .transpose()?;
+    let sample_len = sample.as_ref().map(|sample| {
+        move |quality| {
+            sample
+                .encode(
+                    Encoding::Jpeg(JpegOptions { quality, preset }),
+                    Embedded::NONE,
+                )
+                .map(|bytes| bytes.len())
+        }
+    });
+    within_limit(kb, jpeg, sample_len)
+}
+
+/// Rows in one band of [`sample_rows`]: two 4:2:0 MCU rows, so each band
+/// compresses as it does in the whole photo.
+const SAMPLE_BAND: usize = 32;
+/// [`sample_rows`] keeps one band in this many.
+const SAMPLE_STRIDE: usize = 8;
+
+/// Every [`SAMPLE_STRIDE`]th band of `SAMPLE_BAND` rows of a `w`-wide RGBA
+/// image, stacked, with its row count. A JPEG's size is the sum of its
+/// blocks', so the sample's size tracks the photo's across qualities at an
+/// eighth of the cost to encode. `None` for a photo too short to sample.
+fn sample_rows(w: u32, rgba: &[u8]) -> Option<(u32, Vec<u8>)> {
+    let row = (w as usize).checked_mul(4).filter(|&r| r > 0)?;
+    let band = row.checked_mul(SAMPLE_BAND)?;
+    let bands: Vec<&[u8]> = rgba.chunks_exact(band).step_by(SAMPLE_STRIDE).collect();
+    if bands.len() < 4 {
+        return None;
     }
+    let rows = u32::try_from(bands.len() * SAMPLE_BAND).ok()?;
+    Some((rows, bands.concat()))
 }
 
 /// An export's EXIF block and XMP packet, serialized.
@@ -421,22 +457,83 @@ impl FileMeta {
 
 /// The highest-quality JPEG `encode` makes at or under `kb`, trying the
 /// default quality first. A JPEG only shrinks as its quality drops, so the
-/// rest is a bisection.
+/// answer is the quality that fits while the one above it does not.
+///
+/// A full-size encode takes hundreds of milliseconds, so `sample`, the byte
+/// count of a cheaper stand-in at a quality, picks the first quality to try.
+/// The tries after it step away from the guess, twice as far each time,
+/// until the answer is bracketed; the rest, and every try without a sample,
+/// is a bisection.
 fn within_limit(
     kb: u32,
     encode: impl Fn(Option<u8>) -> Result<Vec<u8>, String>,
+    sample: Option<impl Fn(Option<u8>) -> Result<usize, String>>,
 ) -> Result<Vec<u8>, String> {
-    let fits = |bytes: &[u8]| bytes.len() as u64 <= u64::from(kb) * 1024;
+    let limit = u64::from(kb) * 1024;
+    let fits = |len: usize| len as u64 <= limit;
     let default = encode(None)?;
-    if fits(&default) {
+    if fits(default.len()) {
         return Ok(default);
     }
-    let (mut lo, mut hi, mut best) = (1u8, 95u8, None);
+    // The next quality to try off the guess, and how far past it the one
+    // after goes, doubling until the answer is bracketed.
+    let mut probe = match sample {
+        Some(sample) => predict_quality(default.len(), limit, sample)?.map(|q| (q, 1u8)),
+        None => None,
+    };
+    // Qualities run 1 to 95. `fit` fits; `over` and every quality above it
+    // do not.
+    let (mut fit, mut over): (Option<(u8, Vec<u8>)>, u8) = (None, 96);
+    loop {
+        let floor = fit.as_ref().map_or(0, |(q, _)| *q);
+        if over - floor <= 1 {
+            break;
+        }
+        let q = match probe {
+            Some((q, _)) if q > floor && q < over => q,
+            _ => {
+                probe = None;
+                floor + (over - floor) / 2
+            }
+        };
+        let bytes = encode(Some(q))?;
+        let fitted = fits(bytes.len());
+        if let Some((_, step)) = probe {
+            let q = if fitted {
+                q.saturating_add(step)
+            } else {
+                q.saturating_sub(step)
+            };
+            probe = Some((q, step.saturating_mul(2)));
+        }
+        if fitted {
+            fit = Some((q, bytes));
+        } else {
+            over = q;
+        }
+    }
+    fit.map(|(_, bytes)| bytes)
+        .ok_or_else(|| format!("over the {kb} KB limit even at the lowest JPEG quality"))
+}
+
+/// The highest quality whose `sample`, scaled by the full encode's size at
+/// the default quality over the sample's, fits `limit`. A bisection over
+/// the sample, so it costs about seven sample encodes.
+fn predict_quality(
+    default_len: usize,
+    limit: u64,
+    sample: impl Fn(Option<u8>) -> Result<usize, String>,
+) -> Result<Option<u8>, String> {
+    let base = sample(None)?;
+    if base == 0 {
+        return Ok(None);
+    }
+    let scale = default_len as f64 / base as f64;
+    let (mut lo, mut hi, mut best) = (1u8, 95u8, 1u8);
     while lo <= hi {
         let q = lo + (hi - lo) / 2;
-        let bytes = encode(Some(q))?;
-        if fits(&bytes) {
-            best = Some(bytes);
+        if sample(Some(q))? as f64 * scale <= limit as f64 {
+            best = q;
             lo = q + 1;
         } else if q == 1 {
             break;
@@ -444,7 +541,7 @@ fn within_limit(
             hi = q - 1;
         }
     }
-    best.ok_or_else(|| format!("over the {kb} KB limit even at the lowest JPEG quality"))
+    Ok(Some(best))
 }
 
 /// Bake the edits into the decode, shrink the result to `output.max_px` on
@@ -1043,22 +1140,25 @@ mod tests {
     }
 
     /// A size limit lowers JPEG quality until the file fits, and a limit no
-    /// quality meets is an error, not an oversized file.
+    /// quality meets is an error, not an oversized file. The photo is tall
+    /// enough for the sampled guess to run.
     #[test]
     fn a_jpeg_size_limit_is_met_or_refused() {
+        let (w, h) = (256u32, 1024u32);
         let mut seed = 0x9E37_79B9_7F4A_7C15u64;
         let mut rgba = Vec::new();
-        for _ in 0..256 * 256 {
+        for _ in 0..w * h {
             seed ^= seed << 13;
             seed ^= seed >> 7;
             seed ^= seed << 17;
             let [r, g, b, ..] = seed.to_le_bytes();
             rgba.extend([r, g, b, 255]);
         }
+        assert!(sample_rows(w, &rgba).is_some(), "the guess must run");
         let img = image_decode::DecodedImage::new_tracked(
             crate::decode::image_decode::DecodedImageFields {
-                width: 256,
-                height: 256,
+                width: w,
+                height: h,
                 rgba,
                 pixel_format: crate::decode::image_decode::PixelFormat::Srgb8,
             },
@@ -1078,18 +1178,54 @@ mod tests {
             )
         };
         let free = at(None).unwrap();
-        let limit = (free.len() / 1024 / 2) as u32;
-        let held = at(Some(limit)).unwrap();
-        assert!(
-            held.len() <= limit as usize * 1024,
-            "{} > {limit} KB",
-            held.len()
-        );
-        assert!(
-            held.len() * 4 > limit as usize * 1024,
-            "not needlessly small"
-        );
+        for eighths in [4, 6] {
+            let limit = (free.len() * eighths / 8 / 1024) as u32;
+            let held = at(Some(limit)).unwrap();
+            assert!(
+                held.len() <= limit as usize * 1024,
+                "{} > {limit} KB",
+                held.len()
+            );
+            assert!(
+                held.len() * 4 > limit as usize * 1024,
+                "not needlessly small"
+            );
+        }
         assert!(at(Some(0)).is_err(), "no JPEG fits in 0 KB");
+    }
+
+    /// Whatever the sample guesses, the answer is the highest quality that
+    /// fits, with the one above it over. A right guess costs three full
+    /// encodes: the default, the guess and the quality above it.
+    #[test]
+    fn a_size_limit_finds_the_best_quality_however_wrong_the_guess() {
+        // Flat, then steep, as a real encoder's sizes run. The default is
+        // over every limit.
+        let size = |q: Option<u8>| {
+            let q = usize::from(q.unwrap_or(90));
+            1000 + q * 10 + q.saturating_sub(60) * 400
+        };
+        for limit_kb in [2, 4, 8, 12] {
+            let limit = limit_kb * 1024;
+            let best = (1..=95u8).rev().find(|&q| size(Some(q)) <= limit);
+            for bias in [0.5, 0.9, 1.0, 1.1, 2.0] {
+                let encodes = std::cell::Cell::new(0);
+                let encode = |q| {
+                    encodes.set(encodes.get() + 1);
+                    Ok(vec![0u8; size(q)])
+                };
+                let sample = |q| Ok((size(q) as f64 * bias) as usize);
+                let got = within_limit(limit_kb as u32, encode, Some(sample)).ok();
+                assert_eq!(
+                    got.map(|b| b.len()),
+                    best.map(|q| size(Some(q))),
+                    "{limit_kb} KB, guess off by {bias}"
+                );
+                if bias == 1.0 && best.is_some() {
+                    assert_eq!(encodes.get(), 3, "{limit_kb} KB");
+                }
+            }
+        }
     }
 
     /// Every format this build writes carries the date, the camera and the
