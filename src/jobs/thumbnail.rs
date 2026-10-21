@@ -466,6 +466,7 @@ fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
         return Err("only opaque sRGB8 images are cacheable as JPEG".into());
     }
     let dir = file.parent().ok_or("cache entry has no parent")?;
+    crate::paths::refuse_linked_sidecar_dir(dir).map_err(|e| e.to_string())?;
     fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
     #[cfg(not(target_os = "macos"))]
@@ -513,6 +514,9 @@ const TMP_REAP_AFTER: std::time::Duration = std::time::Duration::from_secs(3600)
 #[hotpath::measure]
 pub(crate) fn sweep_orphans(dir: &Path) {
     let cache_dir = dir.join(crate::sidecar::SIDECAR_DIR);
+    if crate::paths::refuse_linked_sidecar_dir(&cache_dir).is_err() {
+        return;
+    }
     let Ok(entries) = fs::read_dir(&cache_dir) else {
         return;
     };
@@ -749,6 +753,25 @@ mod tests {
             assert_eq!(first.rgba[3], second.rgba[3]);
             assert_eq!(entry.exists(), opaque);
         }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A `.lightphotos` that links elsewhere is not swept: its "orphans" are
+    /// whatever files the link points at.
+    #[test]
+    #[cfg(unix)]
+    fn sweep_leaves_a_linked_sidecar_dir_alone() {
+        let dir = std::env::temp_dir().join(format!("lp-sweep-linked-{}", std::process::id()));
+        let elsewhere = dir.join("elsewhere");
+        let photos = dir.join("photos");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::create_dir_all(&photos).unwrap();
+        let orphan = elsewhere.join(cache_name(OsStr::new("GONE.JPG"), 7));
+        fs::write(&orphan, b"x").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, photos.join(crate::sidecar::SIDECAR_DIR)).unwrap();
+
+        sweep_orphans(&photos);
+        assert!(orphan.exists());
         fs::remove_dir_all(dir).unwrap();
     }
 

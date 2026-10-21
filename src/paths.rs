@@ -120,12 +120,44 @@ pub fn read_capped(file: &Path, max: usize) -> Result<Option<Vec<u8>>, CappedRea
     Ok(Some(bytes))
 }
 
+/// Errs when `dir`, or a folder above it up to the nearest `.lightphotos`,
+/// is a symbolic link. The app makes `.lightphotos` and everything in it, so
+/// a link there was planted by whoever prepared the photo folder, and a write
+/// or delete through it would land wherever it points. A `dir` outside any
+/// `.lightphotos` is not checked.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn refuse_linked_sidecar_dir(dir: &Path) -> std::io::Result<()> {
+    let sidecar_dir = std::ffi::OsStr::new(crate::sidecar::SIDECAR_DIR);
+    let Some(top) = dir
+        .ancestors()
+        .position(|a| a.file_name() == Some(sidecar_dir))
+    else {
+        return Ok(());
+    };
+    for folder in dir.ancestors().take(top.saturating_add(1)) {
+        if std::fs::symlink_metadata(folder).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(std::io::Error::other(format!(
+                "{} is a symbolic link",
+                folder.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// [`refuse_linked_sidecar_dir`] for the folder `file` is in.
+#[cfg(not(target_arch = "wasm32"))]
+fn refuse_linked_parent(file: &Path) -> std::io::Result<()> {
+    file.parent().map_or(Ok(()), refuse_linked_sidecar_dir)
+}
+
 /// [`write_atomic`], creating `file`'s directory first.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_atomic_in_dir(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = file
         .parent()
         .ok_or_else(|| std::io::Error::other("path has no parent"))?;
+    refuse_linked_sidecar_dir(parent)?;
     std::fs::create_dir_all(parent)?;
     write_atomic(file, bytes)
 }
@@ -133,6 +165,7 @@ pub fn write_atomic_in_dir(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Remove `file`. A file that is already gone counts as removed.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn remove_if_present(file: &Path) -> std::io::Result<()> {
+    refuse_linked_parent(file)?;
     match std::fs::remove_file(file) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         other => other,
@@ -150,6 +183,7 @@ pub fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
 
+    refuse_linked_parent(dest)?;
     let mut attempts = 0;
     let (tmp, mut file) = loop {
         let mut name = dest.as_os_str().to_os_string();
@@ -206,6 +240,37 @@ mod tests {
     fn a_capped_read_refuses_what_is_not_a_regular_file() {
         assert!(read_capped(Path::new("/dev/null"), 16).is_err());
         assert!(read_capped(&std::env::temp_dir(), 16).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nothing_is_written_or_deleted_through_a_linked_sidecar_dir() {
+        let dir = std::env::temp_dir().join(format!("lp-linked-sidecars-{}", std::process::id()));
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("keep"), b"x").unwrap();
+        let side = dir.join("photos").join(crate::sidecar::SIDECAR_DIR);
+        std::fs::create_dir_all(side.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &side).unwrap();
+
+        assert!(write_atomic(&side.join("a.xmp"), b"x").is_err());
+        assert!(write_atomic_in_dir(&side.join("groups").join("g.json"), b"x").is_err());
+        assert!(remove_if_present(&side.join("keep")).is_err());
+        let left: Vec<_> = std::fs::read_dir(&elsewhere)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["keep"]);
+
+        // A link above the photo folder is the user's own and still works.
+        let linked_photos = dir.join("linked-photos");
+        std::os::unix::fs::symlink(dir.join("photos"), &linked_photos).unwrap();
+        std::fs::remove_file(&side).unwrap();
+        let real = linked_photos
+            .join(crate::sidecar::SIDECAR_DIR)
+            .join("a.xmp");
+        assert!(write_atomic_in_dir(&real, b"x").is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A sparse file claims its length without the disk to back it, so the
