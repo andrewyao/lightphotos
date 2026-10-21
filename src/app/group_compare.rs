@@ -82,13 +82,17 @@ pub(crate) fn compare_zoom_uv(w: u32, h: u32, center: egui::Pos2, side: f32) -> 
 }
 
 /// The whole pixels `uv` covers in a `w`×`h` image, as (x, y, width,
-/// height): at least one pixel each way and never past the edge.
+/// height): at least one pixel each way and never past the edge. `None` for
+/// an image with no pixels.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(crate) fn crop_px(w: u32, h: u32, uv: egui::Rect) -> (u32, u32, u32, u32) {
+pub(crate) fn crop_px(w: u32, h: u32, uv: egui::Rect) -> Option<(u32, u32, u32, u32)> {
+    if w == 0 || h == 0 {
+        return None;
+    }
     let px = |v: f32, n: u32| ((v.clamp(0.0, 1.0) * n as f32).round() as u32).min(n);
     let (x0, y0) = (px(uv.min.x, w).min(w - 1), px(uv.min.y, h).min(h - 1));
     let (x1, y1) = (px(uv.max.x, w).max(x0 + 1), px(uv.max.y, h).max(y0 + 1));
-    (x0, y0, x1 - x0, y1 - y0)
+    Some((x0, y0, x1 - x0, y1 - y0))
 }
 
 /// What a tile has of its member's full-resolution crop. Only `None` on
@@ -178,23 +182,24 @@ const RECROP_AFTER: Duration = Duration::from_millis(300);
 #[cfg(not(target_arch = "wasm32"))]
 const FULL_IN_FLIGHT: usize = 2;
 
-/// The pixels of `img` inside `(x, y, w, h)`.
+/// The pixels of `img` inside `(x, y, w, h)`, or `None` when the buffer
+/// does not hold them.
 #[cfg(not(target_arch = "wasm32"))]
-fn crop_image(img: &DecodedImage, (x, y, w, h): (u32, u32, u32, u32)) -> DecodedImage {
+fn crop_image(img: &DecodedImage, (x, y, w, h): (u32, u32, u32, u32)) -> Option<DecodedImage> {
     let bpp = img.pixel_format.bytes_per_pixel();
     let stride = img.width as usize * bpp;
     let row = w as usize * bpp;
     let mut rgba = Vec::with_capacity(row * h as usize);
-    for r in y as usize..(y + h) as usize {
+    for r in y as usize..y as usize + h as usize {
         let start = r * stride + x as usize * bpp;
-        rgba.extend_from_slice(&img.rgba[start..start + row]);
+        rgba.extend_from_slice(img.rgba.get(start..start + row)?);
     }
-    DecodedImage::new_tracked(DecodedImageFields {
+    Some(DecodedImage::new_tracked(DecodedImageFields {
         width: w,
         height: h,
         rgba,
         pixel_format: img.pixel_format,
-    })
+    }))
 }
 
 /// Bring each Full tile on the page toward a crop of the current square:
@@ -240,8 +245,8 @@ pub(super) fn sync_full_crops(
         }
         if let Some(img) = loader.get_full(&tile.path) {
             let uv = compare_zoom_uv(img.width, img.height, square.center, square.side);
-            let crop = crop_image(&img, crop_px(img.width, img.height, uv));
-            tile.full = match r.upload_egui_image(&crop, true) {
+            let crop = crop_px(img.width, img.height, uv).and_then(|px| crop_image(&img, px));
+            tile.full = match crop.and_then(|crop| r.upload_egui_image(&crop, true)) {
                 Some(id) => Full::Ready { id, square },
                 None => Full::Failed(square),
             };
@@ -1725,10 +1730,37 @@ mod tests {
         let r = |x0, y0, x1, y1| egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1));
         assert_eq!(
             crop_px(4000, 3000, r(0.25, 0.5, 0.5, 1.0)),
-            (1000, 1500, 1000, 1500)
+            Some((1000, 1500, 1000, 1500))
         );
-        assert_eq!(crop_px(100, 100, r(-0.2, -0.1, 1.3, 1.2)), (0, 0, 100, 100));
-        assert_eq!(crop_px(100, 100, r(1.0, 1.0, 1.0, 1.0)), (99, 99, 1, 1));
-        assert_eq!(crop_px(10, 10, r(0.31, 0.31, 0.31, 0.31)), (3, 3, 1, 1));
+        assert_eq!(
+            crop_px(100, 100, r(-0.2, -0.1, 1.3, 1.2)),
+            Some((0, 0, 100, 100))
+        );
+        assert_eq!(
+            crop_px(100, 100, r(1.0, 1.0, 1.0, 1.0)),
+            Some((99, 99, 1, 1))
+        );
+        assert_eq!(
+            crop_px(10, 10, r(0.31, 0.31, 0.31, 0.31)),
+            Some((3, 3, 1, 1))
+        );
+    }
+
+    /// A decode with no pixels, or fewer bytes than its size says, has
+    /// nothing to cut and must not panic.
+    #[test]
+    fn an_empty_or_short_decode_has_no_crop() {
+        let all = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+        assert_eq!(crop_px(0, 10, all), None);
+        assert_eq!(crop_px(10, 0, all), None);
+
+        let short = DecodedImage::new_tracked(DecodedImageFields {
+            width: 4,
+            height: 4,
+            rgba: vec![0; 4 * 4 * 4 - 1],
+            pixel_format: crate::decode::image_decode::PixelFormat::Srgb8,
+        });
+        assert!(crop_image(&short, (0, 0, 4, 4)).is_none());
+        assert!(crop_image(&short, (1, 1, 2, 2)).is_some());
     }
 }
