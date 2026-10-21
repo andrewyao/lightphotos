@@ -445,8 +445,11 @@ pub fn remove(photo: &Path, id: RasterId) {
 /// says whether the photo's sidecar records `id`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn sweep_orphans(dir: &Path, named: impl Fn(&OsStr, RasterId) -> bool) {
-    let Ok(entries) = std::fs::read_dir(dir.join(crate::sidecar::SIDECAR_DIR).join(COVERAGE_DIR))
-    else {
+    let coverage = dir.join(crate::sidecar::SIDECAR_DIR).join(COVERAGE_DIR);
+    if crate::paths::refuse_linked_sidecar_dir(&coverage).is_err() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(coverage) else {
         return;
     };
     for entry in entries.flatten() {
