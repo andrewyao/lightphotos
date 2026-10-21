@@ -93,7 +93,7 @@ Three processes run, because lightphotos emits only half the picture by itself. 
 # [control] listening on 127.0.0.1:52113 token 3f9c…
 ```
 
-Set `LIGHTPHOTOS_CONTROL_TOKEN` (16 characters or more) to choose the token. Send one JSON object per line on a TCP connection. Each request gets one JSON line back:
+Set `LIGHTPHOTOS_CONTROL_TOKEN` (16 characters or more) to choose the token. The app then doesn't print it. Send one JSON object per line on a TCP connection. Each request gets one JSON line back:
 
 ```json
 {"token": "…", "op": "run", "command": {"id": "photo.rate", "params": {"stars": 3}}}

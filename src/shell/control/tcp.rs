@@ -66,21 +66,33 @@ pub(crate) fn split_args(
 }
 
 /// Starts the channel on 127.0.0.1:`port` (0 picks a free one) and prints
-/// the port and token to stderr.
+/// the port, and the token when the app made it, to stderr.
 pub(crate) fn start(port: u16, proxy: EventLoopProxy<UserEvent>) -> Result<(), String> {
-    let token = token_from_env()?;
+    let (token, generated) = token_from_env()?;
     let port = listen(port, token.clone(), IDLE_TIMEOUT, move |request, reply| {
         proxy.send_event(UserEvent::Control(request, reply)).is_ok()
     })?;
-    eprintln!("[control] listening on 127.0.0.1:{port} token {token}");
+    eprintln!("{}", listening_line(port, &token, generated));
     Ok(())
 }
 
-fn token_from_env() -> Result<String, String> {
+/// The token, and whether the app made it rather than reading it from
+/// [`TOKEN_ENV`].
+fn token_from_env() -> Result<(String, bool), String> {
     match std::env::var(TOKEN_ENV) {
-        Ok(token) => check_token(token),
-        Err(std::env::VarError::NotPresent) => new_token(),
+        Ok(token) => Ok((check_token(token)?, false)),
+        Err(std::env::VarError::NotPresent) => Ok((new_token()?, true)),
         Err(std::env::VarError::NotUnicode(_)) => Err(format!("{TOKEN_ENV} is not valid text")),
+    }
+}
+
+/// The startup line. A token the user chose is a secret they already hold,
+/// so it stays out of stderr and whatever logs it.
+fn listening_line(port: u16, token: &str, generated: bool) -> String {
+    if generated {
+        format!("[control] listening on 127.0.0.1:{port} token {token}")
+    } else {
+        format!("[control] listening on 127.0.0.1:{port} with the token from {TOKEN_ENV}")
     }
 }
 
@@ -339,6 +351,12 @@ mod tests {
 
     fn error_tag(failure: &Failure) -> &str {
         failure.error["error"].as_str().unwrap()
+    }
+
+    #[test]
+    fn only_a_generated_token_is_printed() {
+        assert!(listening_line(80, TOKEN, true).contains(TOKEN));
+        assert!(!listening_line(80, TOKEN, false).contains(TOKEN));
     }
 
     #[test]
