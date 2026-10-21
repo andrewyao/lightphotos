@@ -478,7 +478,7 @@ impl App {
         false
     }
 
-    /// Web export. Runs the native `bake_export` pipeline on the loader's decode
+    /// Web export. Runs `bake_export_from_shared_vec` on the loader's decode
     /// threads and writes each file through the File System Access API. Reading sources
     /// and listing `Exports/` are async, so the batch setup runs in `spawn_local`.
     #[cfg(target_arch = "wasm32")]

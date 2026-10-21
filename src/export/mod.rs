@@ -310,39 +310,10 @@ impl ExportSize {
 }
 
 /// Decode `src_bytes` as large as `output` needs, bake in the edits, and
-/// encode the export. Used by non-mac native export for non-RAW files.
-#[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
-#[hotpath::measure]
-pub fn bake_export(
-    src_bytes: &[u8],
-    is_raw: bool,
-    adj: &Adjustments,
-    touchups: &[TouchUp],
-    masks: &MaskSet,
-    rot: u8,
-    output: Output,
-) -> Result<Vec<u8>, String> {
-    let decode_px = decode_px(output.max_px, adj.crop);
-    let img = if is_raw {
-        crate::decode::rawler::decode_raw_nonmac_from_bytes(src_bytes, decode_px)?
-    } else {
-        image_decode::decode_nonraw_from_bytes(src_bytes, decode_px)?
-    };
-    render(
-        &img,
-        adj,
-        touchups,
-        masks,
-        rot,
-        &output,
-        &SourceMeta::read_bytes(src_bytes),
-    )
-}
-
-/// [`bake_export`] for the wasm32 export worker, which already owns the
-/// bytes in an `Arc` and passes it to rawler without copying. Like the
-/// desktop exporter, it carries the source's metadata as `output` says.
+/// encode the export: [`export_file`] for the wasm32 export worker, which
+/// has bytes rather than a path. It already owns them in an `Arc` and passes
+/// it to rawler without copying. Like the desktop exporter, it carries the
+/// source's metadata as `output` says.
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
@@ -1310,7 +1281,7 @@ mod tests {
     /// color.
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn bake_export_nonraw_round_trips_identity_edit() {
+    fn bake_export_from_shared_vec_nonraw_round_trips_identity_edit() {
         let (w, h) = (10u32, 8u32);
         let src = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 40, 40, 255]));
         let mut png = Vec::new();
@@ -1318,8 +1289,8 @@ mod tests {
             .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("encode source png");
 
-        let jpeg = bake_export(
-            &png,
+        let jpeg = bake_export_from_shared_vec(
+            std::sync::Arc::new(png),
             false,
             &Adjustments::default(),
             &[],
@@ -1345,7 +1316,7 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn bake_export_applies_rotation() {
+    fn bake_export_from_shared_vec_applies_rotation() {
         let (w, h) = (12u32, 6u32);
         let src = image::RgbaImage::from_pixel(w, h, image::Rgba([120, 120, 120, 255]));
         let mut png = Vec::new();
@@ -1353,8 +1324,8 @@ mod tests {
             .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("encode source png");
 
-        let jpeg = bake_export(
-            &png,
+        let jpeg = bake_export_from_shared_vec(
+            std::sync::Arc::new(png),
             false,
             &Adjustments::default(),
             &[],
