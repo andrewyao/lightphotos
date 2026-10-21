@@ -240,7 +240,7 @@ enum EntryKind {
 /// Sort case-insensitively by file name. `web_fs.rs` uses this too, so the
 /// browser build lists folders in the same order.
 pub(crate) fn sort_by_name(entries: &mut [PathBuf]) {
-    entries.sort_by_key(|p| name_key(p.file_name()));
+    entries.sort_by_cached_key(|p| name_key(p.file_name()));
 }
 
 fn name_key(name: Option<&OsStr>) -> Option<String> {
