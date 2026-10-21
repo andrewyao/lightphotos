@@ -336,8 +336,16 @@ impl Writer {
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
+        let left = q.order.len() + q.in_flight;
         drop(q);
-        self.pump()
+        let mut errors = self.pump();
+        if left > 0 {
+            errors.push(format!(
+                "{left} catalog writes did not finish within {} s",
+                timeout.as_secs()
+            ));
+        }
+        errors
     }
 }
 
@@ -729,6 +737,23 @@ mod tests {
         assert_eq!(cat.backlog(), 0);
         assert_eq!(cat.load_shard(&photos).unwrap()["a.jpg"].rating, Some(5));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A flush that gives up with writes still queued must say so: on quit
+    /// those marks are lost.
+    #[test]
+    fn a_flush_that_times_out_reports_the_unwritten_files() {
+        let mut w = Writer::new();
+        // No worker started, so the queued write stays queued.
+        w.queue
+            .0
+            .lock()
+            .unwrap()
+            .push(PathBuf::from("/catalog/a.json"), None);
+        let errors = w.flush_blocking(Duration::ZERO);
+
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("1 catalog writes"), "{errors:?}");
     }
 
     #[test]
