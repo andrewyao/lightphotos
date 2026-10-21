@@ -128,7 +128,8 @@ pub fn save(key: &str, value: &str) -> Result<(), String> {
         .map_err(|e| format!("localStorage: {e:?}"))
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
 
