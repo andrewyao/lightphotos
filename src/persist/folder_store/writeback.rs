@@ -357,7 +357,9 @@ impl Writeback {
         errors
     }
 
-    /// Wait for the queue to empty, or for `timeout` to elapse.
+    /// Wait for the queue to empty, or for `timeout` to elapse. Writes still
+    /// queued at the deadline are reported as one error, since on quit they
+    /// are lost.
     pub(super) fn flush_blocking(&mut self, timeout: std::time::Duration) -> Vec<String> {
         let deadline = std::time::Instant::now() + timeout;
         let mut errors = Vec::new();
@@ -375,6 +377,13 @@ impl Writeback {
                 }
                 Err(_) => break,
             }
+        }
+        if !self.pending.is_empty() {
+            errors.push(format!(
+                "{} photos' sidecar writes did not finish within {} s",
+                self.pending.len(),
+                timeout.as_secs()
+            ));
         }
         errors
     }
@@ -692,6 +701,21 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A flush that gives up with writes still queued must say so: on quit
+    /// those edits are lost.
+    #[test]
+    fn a_flush_that_times_out_reports_the_unwritten_photos() {
+        let mut wb = Writeback::new();
+        // A worker that never reads, so the write stays queued.
+        let (tx, _parked) = channel();
+        wb.tx = Some(tx);
+        wb.enqueue(Path::new("/photos/a.jpg"), WriteOp::Delete);
+        let errors = wb.flush_blocking(std::time::Duration::ZERO);
+
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("1 photos'"), "{errors:?}");
     }
 
     /// A worker that has died must not swallow the edits sent to it.
