@@ -66,13 +66,15 @@ jobs:
 
       # rawler is LGPL-2.1. The macOS build decodes RAW through ImageIO, so
       # rawler must never enter its dependency graph: that build ships to the
-      # App Store.
+      # App Store. release.yml builds both Apple architectures, so check both.
       - name: Keep rawler out of the macOS build
         run: |
-          if cargo tree --target aarch64-apple-darwin -e normal | grep -q rawler; then
-            echo "rawler is in the macOS dependency graph"
-            exit 1
-          fi
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            if cargo tree --target "$target" -e normal | grep -q rawler; then
+              echo "rawler is in the $target dependency graph"
+              exit 1
+            fi
+          done
 
       # The crate roots deny the panic lints; `-D warnings` makes the rest
       # block too. See CLAUDE.md → Rust rules.
