@@ -623,6 +623,9 @@ pub(crate) struct App {
     /// When the Grid last sorted for arriving capture times or sort metadata.
     /// See `on_capture_times`.
     last_meta_sort: Option<Instant>,
+    /// What `request_working_thumbs` last asked the loader for and answered.
+    /// See `thumbs::WorkingThumbs`.
+    working_thumbs: Option<thumbs::WorkingThumbs>,
     /// Group Bursts' photos while their capture times are read.
     burst_scan: Option<Vec<PathBuf>>,
 
@@ -991,6 +994,7 @@ impl App {
             signal_load_rx: None,
             capture_times: HashMap::new(),
             last_meta_sort: None,
+            working_thumbs: None,
             sort_meta: HashMap::new(),
             burst_scan: None,
             // A test must never read the developer's own settings.

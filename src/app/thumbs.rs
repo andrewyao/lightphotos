@@ -280,12 +280,29 @@ impl App {
         let Some(loader) = &mut self.loader else {
             return false;
         };
+        // This runs at least once a frame. With the same request and nothing
+        // landed since, asking again would change nothing.
+        if let Some(last) = &self.working_thumbs {
+            if last.epoch == loader.thumb_epoch()
+                && last.reserved == reserved
+                && last.paths == paths
+            {
+                return last.pending;
+            }
+        }
         loader.set_thumb_working_set_size(reserved);
         loader.set_viewport_thumbs(&paths, px);
         // Failed decodes don't count, or the redraw loop would spin on them.
-        paths
+        let pending = paths
             .iter()
-            .any(|p| loader.get_thumb(p, px).is_none() && !loader.thumb_failed(p, px))
+            .any(|p| loader.get_thumb(p, px).is_none() && !loader.thumb_failed(p, px));
+        self.working_thumbs = Some(WorkingThumbs {
+            epoch: loader.thumb_epoch(),
+            reserved,
+            paths,
+            pending,
+        });
+        pending
     }
 
     pub(crate) fn on_sort_meta(
@@ -433,6 +450,15 @@ impl App {
     }
 }
 
+/// One `request_working_thumbs` call: the loader's thumbnail epoch after
+/// it, the working-set size and paths it asked for, and its answer.
+pub(crate) struct WorkingThumbs {
+    epoch: u64,
+    reserved: usize,
+    paths: Vec<PathBuf>,
+    pending: bool,
+}
+
 /// The grid's working set: `grid_range` plus three rows either side.
 pub(crate) fn grid_working_range(
     grid_range: (usize, usize),
@@ -576,6 +602,52 @@ mod tests {
     use super::{grid_working_range, load_order, strip_working_range, StripLayout};
     use crate::jobs::loader::Loader;
     use std::path::PathBuf;
+
+    /// The answer kept between frames follows the loader: once one
+    /// thumbnail lands and the other fails, in either order, nothing is
+    /// loading.
+    #[test]
+    fn the_working_set_stops_loading_once_its_thumbnails_land() {
+        use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
+        use crate::jobs::thumbnail::THUMB_PX;
+        let dir = std::env::temp_dir().join(format!("lp-working-thumbs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["a.jpg", "b.jpg"] {
+            std::fs::write(dir.join(n), []).unwrap();
+        }
+        let land = |loader: &mut Loader| {
+            let img = DecodedImage::new_tracked(DecodedImageFields {
+                width: 1,
+                height: 1,
+                rgba: vec![0, 0, 0, 255],
+                pixel_format: PixelFormat::Srgb8,
+            });
+            loader.insert_thumb_external(dir.join("a.jpg"), THUMB_PX, std::sync::Arc::new(img));
+        };
+        let fail =
+            |loader: &mut Loader| loader.mark_thumb_failed_external(dir.join("b.jpg"), THUMB_PX);
+        for land_first in [true, false] {
+            let mut app = super::App::new(None);
+            app.load_playlist(crate::navigation::Playlist::from_dir(&dir), dir.clone());
+            app.loader = Some(Loader::new(
+                16384,
+                crate::jobs::cache_limits::CacheLimits::PLATFORM,
+            ));
+            assert!(app.request_working_thumbs());
+            assert!(app.request_working_thumbs(), "asked again, still loading");
+            let steps: [&dyn Fn(&mut Loader); 2] = if land_first {
+                [&land, &fail]
+            } else {
+                [&fail, &land]
+            };
+            steps[0](app.loader.as_mut().unwrap());
+            assert!(app.request_working_thumbs(), "one is still loading");
+            steps[1](app.loader.as_mut().unwrap());
+            assert!(!app.request_working_thumbs(), "land first: {land_first}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn sorted(mut v: Vec<usize>) -> Vec<usize> {
         v.sort_unstable();

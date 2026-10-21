@@ -41,6 +41,12 @@ fn launched_at() -> web_time::Instant {
     *T0.get_or_init(web_time::Instant::now)
 }
 
+/// A fresh [`Loader::thumb_epoch`].
+fn next_thumb_epoch() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Stamp a timing event with milliseconds since launch.
 pub fn mark(what: &str) {
     if timing_enabled() {
@@ -827,6 +833,8 @@ pub struct Loader {
     /// Failed thumbnail keys, so callers stop re-requesting them every frame.
     thumb_failed: HashSet<(PathBuf, u32)>,
     thumb_capacity: usize,
+    /// See [`Loader::thumb_epoch`].
+    thumb_epoch: u64,
 
     meta_inflight: HashSet<PathBuf>,
 
@@ -940,6 +948,7 @@ impl Loader {
             viewport_inflight: HashSet::new(),
             thumb_failed: HashSet::new(),
             thumb_capacity: limits.thumbs,
+            thumb_epoch: next_thumb_epoch(),
             meta_inflight: HashSet::new(),
             exif_inflight: HashSet::new(),
             bake_inflight: HashMap::new(),
@@ -1142,6 +1151,7 @@ impl Loader {
                 // pending thumbnail as failed rather than loading forever.
                 self.thumb_failed.insert(key);
                 self.thumb_failed.extend(self.thumb_inflight.drain());
+                self.thumb_epoch = next_thumb_epoch();
             }
         }
     }
@@ -1156,6 +1166,7 @@ impl Loader {
         if self.workers == 0 || cfg!(target_arch = "wasm32") {
             return;
         }
+        self.thumb_epoch = next_thumb_epoch();
         let wanted: Vec<(PathBuf, u32)> = paths
             .iter()
             .map(|p| (p.clone(), max_px))
@@ -1550,6 +1561,14 @@ impl Loader {
         !self.baked.is_empty()
     }
 
+    /// A value that changes whenever a thumbnail lands, fails or is evicted,
+    /// or the viewport's request is replaced, and is never reused, even by
+    /// another `Loader`. A caller that saw the same epoch knows `get_thumb`,
+    /// `thumb_failed` and the viewport queue answer as they did then.
+    pub fn thumb_epoch(&self) -> u64 {
+        self.thumb_epoch
+    }
+
     pub fn get_thumb(&self, path: &Path, max_px: u32) -> Option<Arc<DecodedImage>> {
         self.thumb_cache.get(&(path.to_path_buf(), max_px)).cloned()
     }
@@ -1580,6 +1599,7 @@ impl Loader {
         let key = (path, max_px);
         self.thumb_inflight.remove(&key);
         self.thumb_failed.insert(key);
+        self.thumb_epoch = next_thumb_epoch();
     }
 
     /// Inserts a wasm32 `Preview` decode into the preview tier. wasm32 `Speed`
@@ -1658,6 +1678,7 @@ impl Loader {
             }
             self.thumb_failed.extend(self.thumb_inflight.drain());
             self.thumb_failed.extend(self.viewport_inflight.drain());
+            self.thumb_epoch = next_thumb_epoch();
             self.meta_inflight.clear();
             self.exif_inflight.clear();
             self.bake_inflight.clear();
@@ -1727,6 +1748,7 @@ impl Loader {
                 }
                 JobResult::Thumb(path, max_px, r) => {
                     let key = (path.clone(), max_px);
+                    self.thumb_epoch = next_thumb_epoch();
                     self.thumb_inflight.remove(&key);
                     self.viewport_inflight.remove(&key);
                     match r {
@@ -1832,6 +1854,7 @@ impl Loader {
     }
 
     fn insert_thumb(&mut self, key: (PathBuf, u32), img: Arc<DecodedImage>) {
+        self.thumb_epoch = next_thumb_epoch();
         if !self.thumb_cache.contains_key(&key) {
             self.thumb_order.push_back(key.clone());
         }
@@ -1843,6 +1866,7 @@ impl Loader {
         while self.thumb_order.len() > self.thumb_capacity {
             if let Some(old) = self.thumb_order.pop_front() {
                 self.thumb_cache.remove(&old);
+                self.thumb_epoch = next_thumb_epoch();
             }
         }
     }
