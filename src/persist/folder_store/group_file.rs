@@ -83,8 +83,9 @@ pub(super) fn load(dir: &Path, skipped: &mut usize) -> Vec<(GroupId, SavedGroup)
             *skipped += 1;
             continue;
         };
-        let parsed = std::fs::read(&path)
+        let parsed = crate::paths::read_capped(&path, crate::sidecar::MAX_SIDECAR_BYTES)
             .map_err(|e| e.to_string())
+            .and_then(|bytes| bytes.ok_or_else(|| "gone".to_string()))
             .and_then(|bytes| parse(&bytes));
         match parsed {
             Ok(saved) => files.push((id, saved)),
@@ -111,5 +112,20 @@ mod tests {
         assert!(id_of("g-1.json.tmp").is_none(), "a swap file");
         assert!(id_of("../g-1.json").is_none(), "a stem that leaves groups/");
         assert!(id_of(".json").is_none(), "an empty stem");
+    }
+
+    #[test]
+    fn a_group_file_past_the_sidecar_cap_is_skipped() {
+        let dir = std::env::temp_dir().join(format!("lp-group-file-cap-{}", std::process::id()));
+        let groups = dir.join(crate::sidecar::SIDECAR_DIR).join(GROUPS_DIR);
+        std::fs::create_dir_all(&groups).unwrap();
+        let mut body = br#"{"v":1,"members":["a.jpg","b.jpg"]}"#.to_vec();
+        body.resize(crate::sidecar::MAX_SIDECAR_BYTES + 1, b' ');
+        std::fs::write(groups.join("g-fixture00001.json"), body).unwrap();
+
+        let mut skipped = 0;
+        assert!(load(&dir, &mut skipped).is_empty());
+        assert_eq!(skipped, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

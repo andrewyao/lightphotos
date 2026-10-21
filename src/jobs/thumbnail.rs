@@ -11,6 +11,7 @@
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
 use std::ffi::{OsStr, OsString};
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
@@ -143,7 +144,7 @@ pub fn decode_speed(
     max_px: u32,
     source: impl FnOnce(&Path, u32) -> Result<DecodedImage, String>,
 ) -> Result<(DecodedImage, Origin), String> {
-    if let Ok(bytes) = fs::read(path) {
+    if let Ok(bytes) = crate::decode::image_decode::read_photo(path) {
         let preview = embedded_preview_from_bytes(&bytes, max_px)
             .filter(|img| preview_is_large_enough(img.width, img.height, max_px))
             .or_else(|| crate::decode::rawler::rawler_full_image_from_bytes(&bytes, max_px));
@@ -163,7 +164,7 @@ pub fn decode_speed(
 #[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
 fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage> {
-    let bytes = fs::read(path).ok()?;
+    let bytes = crate::decode::image_decode::read_photo(path).ok()?;
     embedded_preview_from_bytes(&bytes, max_px)
         .or_else(|| crate::decode::rawler::rawler_full_image_from_bytes(&bytes, max_px))
 }

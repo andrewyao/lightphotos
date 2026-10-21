@@ -348,11 +348,13 @@ impl Drop for SignalCache {
     }
 }
 
-/// Read `dir`'s cache file. Every failure is a miss.
+/// Read `dir`'s cache file. Every failure is a miss, and so is a file over
+/// the sidecar cap: a folder of the most photos anyone shoots is well under.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_file(dir: &Path) -> HashMap<OsString, PhotoSignals> {
     let path = dir.join(crate::sidecar::SIDECAR_DIR).join(CACHE_FILE);
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(Some(bytes)) = crate::paths::read_capped(&path, crate::sidecar::MAX_SIDECAR_BYTES)
+    else {
         return HashMap::new();
     };
     let Ok(file) = serde_json::from_slice::<CacheFile>(&bytes) else {
@@ -578,6 +580,31 @@ mod tests {
 
         let cache = SignalCache::load(&dir);
         assert!(cache.get(&photo).is_none(), "a corrupt file is a miss");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The file can be a symlink to anything, so its size is capped.
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_file_past_the_cap_is_a_miss() {
+        let dir = unique_dir("oversized");
+        let photo = write_photo(&dir, "a.jpg", b"pixels");
+        {
+            let mut cache = SignalCache::load(&dir);
+            cache.record(&photo, faces(2));
+            cache.flush_blocking(Duration::from_secs(5));
+        }
+        let file = dir.join(crate::sidecar::SIDECAR_DIR).join(CACHE_FILE);
+        let mut big = std::fs::read(&file).unwrap();
+        big.resize(crate::sidecar::MAX_SIDECAR_BYTES + 1, b' ');
+        let target = dir.join("big.json");
+        std::fs::write(&target, &big).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&target, &file).unwrap();
+
+        let cache = SignalCache::load(&dir);
+        assert!(cache.get(&photo).is_none(), "an oversized file is a miss");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -85,10 +85,26 @@ impl std::fmt::Display for CappedReadError {
 }
 
 /// `file`'s bytes, `None` when it is not there. Reads at most `max + 1`
-/// bytes, so a huge file costs no more than the cap to refuse.
+/// bytes, so a huge file costs no more than the cap to refuse, and one that
+/// is already over it costs nothing. Anything but a regular file, after
+/// symlinks, is refused before it is opened, so a FIFO or a device can't
+/// block or stream forever.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_capped(file: &Path, max: usize) -> Result<Option<Vec<u8>>, CappedReadError> {
     use std::io::Read;
+    match std::fs::metadata(file) {
+        Ok(meta) if !meta.is_file() => {
+            return Err(CappedReadError::Io(std::io::Error::other(
+                "not a regular file",
+            )))
+        }
+        Ok(meta) if meta.len() > u64::try_from(max).unwrap_or(u64::MAX) => {
+            return Err(CappedReadError::TooBig(max))
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(CappedReadError::Io(e)),
+    }
     let f = match std::fs::File::open(file) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -184,6 +200,26 @@ pub fn atomic_tmp_target(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_capped_read_refuses_what_is_not_a_regular_file() {
+        assert!(read_capped(Path::new("/dev/null"), 16).is_err());
+        assert!(read_capped(&std::env::temp_dir(), 16).is_err());
+    }
+
+    /// A sparse file claims its length without the disk to back it, so the
+    /// cap must hold without reading the file.
+    #[test]
+    fn a_capped_read_refuses_a_file_over_the_cap() {
+        let file = std::env::temp_dir().join(format!("lp-read-capped-{}", std::process::id()));
+        std::fs::File::create(&file)
+            .and_then(|f| f.set_len(4 << 30))
+            .unwrap();
+        let read = read_capped(&file, 1 << 20);
+        let _ = std::fs::remove_file(&file);
+        assert!(matches!(read, Err(CappedReadError::TooBig(_))), "{read:?}");
+    }
 
     #[test]
     fn export_name_avoids_existing_and_taken() {
