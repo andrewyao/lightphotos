@@ -29,8 +29,23 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     if is_raw_extension(path) {
         return crate::decode::rawler::decode_raw_nonmac(path, max_dim);
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    decode_nonraw_from_bytes(&bytes, max_dim)
+    decode_nonraw_from_bytes(&read_photo(path)?, max_dim)
+}
+
+/// The largest photo file read whole into memory. Far past any camera's RAW
+/// or a stitched panorama, and it stops a symlink to a huge file from
+/// taking all of it.
+#[cfg(not(target_os = "macos"))]
+pub const MAX_PHOTO_BYTES: usize = 2 << 30;
+
+/// `path`'s bytes, when it is a regular file of at most [`MAX_PHOTO_BYTES`].
+#[cfg(not(target_os = "macos"))]
+pub fn read_photo(path: &Path) -> Result<Vec<u8>, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let bytes = crate::paths::read_capped(path, MAX_PHOTO_BYTES).map_err(|e| e.to_string());
+    #[cfg(target_arch = "wasm32")]
+    let bytes = std::fs::read(path).map(Some).map_err(|e| e.to_string());
+    bytes?.ok_or_else(|| "file not found".to_string())
 }
 
 /// The non-RAW half of [`decode`], from bytes. The wasm32 worker shares it
