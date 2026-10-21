@@ -301,15 +301,27 @@ impl Writeback {
         let seq = self.accept(path, &op);
         match self.sender() {
             Some(tx) => {
-                let _ = tx.send((path.to_path_buf(), seq, op));
+                // A worker that died hands the op back. Retire it and write
+                // inline, and the next enqueue starts a fresh worker.
+                if let Err(std::sync::mpsc::SendError((path, seq, op))) =
+                    tx.send((path.to_path_buf(), seq, op))
+                {
+                    self.tx = None;
+                    if let Some(handle) = self.worker.take() {
+                        let _ = handle.join();
+                    }
+                    self.perform_inline(&path, seq, &op);
+                }
             }
             // Without a worker the write still has to happen, or the edit is
             // lost with no way for the user to find out.
-            None => {
-                let err = perform(path, &op).err();
-                let _ = self.done_tx.send((path.to_path_buf(), seq, err));
-            }
+            None => self.perform_inline(path, seq, &op),
         }
+    }
+
+    fn perform_inline(&self, path: &Path, seq: u64, op: &WriteOp) {
+        let err = perform(path, op).err();
+        let _ = self.done_tx.send((path.to_path_buf(), seq, err));
     }
 
     fn sender(&mut self) -> Option<&Sender<(PathBuf, u64, WriteOp)>> {
@@ -679,6 +691,36 @@ mod tests {
             "a trailing separator must not silently skip the overlay"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A worker that has died must not swallow the edits sent to it.
+    #[test]
+    fn a_write_to_a_dead_worker_still_reaches_the_disk() {
+        let dir =
+            std::env::temp_dir().join(format!("lightphotos-writeback-dead-{}", std::process::id()));
+        let path = dir.join("a.jpg");
+        let mut wb = Writeback::new();
+        let (tx, rx) = channel();
+        drop(rx);
+        wb.tx = Some(tx);
+        wb.enqueue(
+            &path,
+            WriteOp::Put(Box::new(ImageRecord {
+                rating: Some(3),
+                ..Default::default()
+            })),
+        );
+        let errors = wb.flush_blocking(std::time::Duration::from_secs(1));
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(wb.backlog(), 0, "the write must retire its pending entry");
+        assert_eq!(
+            crate::sidecar::read_record(&path)
+                .ok()
+                .and_then(|r| r.rating),
+            Some(3)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
