@@ -258,6 +258,15 @@ fn error_message(body: &str) -> Option<String> {
 
 /// `immich.example.com/`, `https://immich.example.com/api` and
 /// `https://immich.example.com` all mean the same server.
+/// Whether `url` names a server reached without TLS, so the API key and
+/// every photo cross the network readable. A URL with no scheme gets
+/// `https://`, as [`normalize_origin`] gives it.
+pub fn is_plain_http(url: &str) -> bool {
+    url.trim()
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+}
+
 fn normalize_origin(url: &str) -> Result<String, String> {
     let url = url.trim().trim_end_matches('/');
     if url.is_empty() {
@@ -402,6 +411,15 @@ fn iso8601(t: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_http_scheme_is_plain() {
+        assert!(is_plain_http("http://nas.local:2283"));
+        assert!(is_plain_http("  HTTP://nas.local"));
+        assert!(!is_plain_http("https://immich.gumnut.ai"));
+        assert!(!is_plain_http("nas.local"), "a bare host gets https://");
+        assert!(!is_plain_http("http:"));
+    }
 
     #[test]
     fn server_urls_normalize_to_one_origin() {
