@@ -403,15 +403,53 @@ fn curve(seq: &str) -> Option<Curve> {
 
 /// The raw text of each `<rdf:li>` in an `rdf:Seq` or `rdf:Alt`.
 fn li_texts(block: &str) -> impl Iterator<Item = &str> {
+    let mut tag_end = Ahead::new(block, ">");
+    let mut close = Ahead::new(block, "</rdf:li");
     block.match_indices("<rdf:li").filter_map(move |(i, _)| {
-        let rest = block.get(i..)?;
-        let open = rest.find('>')?;
-        if rest.get(..open)?.ends_with('/') {
+        let open = tag_end.find(i)?;
+        if block.get(i..open)?.ends_with('/') {
             return Some("");
         }
-        let text = rest.get(open.saturating_add(1)..)?;
-        text.get(..text.find("</rdf:li")?)
+        let text = open.saturating_add(1);
+        block.get(text..close.find(text)?)
     })
+}
+
+/// The first `pat` in `hay` at or after each of a rising series of offsets.
+/// A search reuses the last answer while it still applies, so many openings
+/// followed by one distant closing, or by none, read `hay` once rather than
+/// once per opening. A file built that way would otherwise take time
+/// quadratic in its size.
+struct Ahead<'a> {
+    hay: &'a str,
+    pat: &'a str,
+    /// Where the last search started, and what it found.
+    last: Option<(usize, Option<usize>)>,
+}
+
+impl<'a> Ahead<'a> {
+    fn new(hay: &'a str, pat: &'a str) -> Self {
+        Ahead {
+            hay,
+            pat,
+            last: None,
+        }
+    }
+
+    fn find(&mut self, from: usize) -> Option<usize> {
+        match self.last {
+            Some((searched, Some(at))) if searched <= from && from <= at => return Some(at),
+            Some((searched, None)) if searched <= from => return None,
+            _ => {}
+        }
+        let found = self
+            .hay
+            .get(from..)
+            .and_then(|rest| rest.find(self.pat))
+            .and_then(|i| from.checked_add(i));
+        self.last = Some((from, found));
+        found
+    }
 }
 
 /// A field's decoded, trimmed value.
@@ -475,18 +513,20 @@ fn attribute<'a>(body: &'a str, key: &str) -> Option<&'a str> {
 fn element<'a>(body: &'a str, key: &str) -> Option<&'a str> {
     let open = format!("<crs:{key}");
     let close = format!("</crs:{key}");
+    let mut tag_ends = Ahead::new(body, ">");
+    let mut closes = Ahead::new(body, &close);
     body.match_indices(&open).find_map(|(i, _)| {
-        let rest = body.get(i.saturating_add(open.len())..)?;
-        let next = *rest.as_bytes().first()?;
+        let after = i.saturating_add(open.len());
+        let next = *body.as_bytes().get(after)?;
         if !(next == b'>' || next == b'/' || next.is_ascii_whitespace()) {
             return None;
         }
-        let tag_end = rest.find('>')?;
-        if rest.get(..tag_end)?.ends_with('/') {
+        let tag_end = tag_ends.find(after)?;
+        if body.get(after..tag_end)?.ends_with('/') {
             return Some("");
         }
-        let inner = rest.get(tag_end.saturating_add(1)..)?;
-        inner.get(..inner.find(&close)?)
+        let inner = tag_end.saturating_add(1);
+        body.get(inner..closes.find(inner)?)
     })
 }
 
@@ -576,6 +616,39 @@ mod tests {
         <crs:HasSettings>True</crs:HasSettings>\n\
         <crs:Name><rdf:Alt><rdf:li xml:lang=\"x-default\">Warm Film</rdf:li></rdf:Alt></crs:Name>\
         </rdf:Description></rdf:RDF></x:xmpmeta>";
+
+    /// Many openings with no closing must cost one pass over the file, not
+    /// one per opening. Quadratic, each of these takes seconds.
+    #[test]
+    fn unclosed_tags_parse_in_linear_time() {
+        let curve = format!(
+            "<crs:ToneCurvePV2012><rdf:Seq>{}</rdf:Seq></crs:ToneCurvePV2012>",
+            "<rdf:li>".repeat(50_000)
+        );
+        let opens = "<crs:Exposure2012>".repeat(50_000);
+        let no_tag_end = "<crs:Contrast2012 ".repeat(50_000);
+        for children in [curve, opens, no_tag_end] {
+            let xmp = packet("", &children);
+            let started = std::time::Instant::now();
+            let _ = parse(&xmp);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "{:?} for {} bytes",
+                started.elapsed(),
+                xmp.len()
+            );
+        }
+    }
+
+    #[test]
+    fn ahead_finds_what_a_fresh_search_finds() {
+        let hay = "a>b>>c";
+        let mut ahead = Ahead::new(hay, ">");
+        for from in 0..=hay.len() + 1 {
+            let fresh = hay.get(from..).and_then(|r| r.find('>')).map(|i| from + i);
+            assert_eq!(ahead.find(from), fresh, "from {from}");
+        }
+    }
 
     fn expected_preset() -> Adjustments {
         Adjustments {

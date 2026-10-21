@@ -420,8 +420,11 @@ impl App {
         let mut looks = Vec::new();
         let mut failures = Vec::new();
         for path in paths {
-            let imported = std::fs::read_to_string(path)
+            let limit = crate::persist::preset_folders::LIMITS.file_bytes;
+            let imported = crate::paths::read_capped(path, limit)
                 .map_err(|e| e.to_string())
+                .and_then(|bytes| bytes.ok_or_else(|| "file not found".to_string()))
+                .and_then(|bytes| String::from_utf8(bytes).map_err(|e| e.to_string()))
                 .and_then(|xmp| crate::persist::lr_preset::parse(&xmp));
             let imported = match imported {
                 Ok(imported) => imported,
@@ -1542,6 +1545,22 @@ pub(in crate::app) mod tests {
             "and neither count is lost to the other: {status}"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A preset file is read whole, so one past the folder scan's size cap
+    /// is refused rather than read.
+    #[test]
+    fn an_import_refuses_a_preset_past_the_size_cap() {
+        let (mut app, dir, _) = folder_app("lr-oversized", 1);
+        let big = dir.join("big.xmp");
+        let mut body = NAMED_PRESET.as_bytes().to_vec();
+        body.resize(crate::persist::preset_folders::LIMITS.file_bytes + 1, b' ');
+        std::fs::write(&big, body).unwrap();
+
+        app.add_lr_presets(&[big]);
+
+        assert!(app.presets.presets().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
