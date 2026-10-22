@@ -370,7 +370,7 @@ fn bake_samples<S: Sample>(
         }
     });
 
-    rotate_rgba(&cropped, cw, ch, rot)
+    rotate_rgba(cropped, cw, ch, rot)
 }
 
 /// The pre-tone pixel the base and fine layers average: texel `(x, y)` at
@@ -578,12 +578,12 @@ fn apply_touchups(src: &Source, touchups: &[TouchUp], u: f32, v: f32, base: [f32
 }
 
 /// Rotate packed RGBA8 by `steps` 90-degree clockwise turns. Returns the new
-/// `(width, height, rgba)`.
+/// `(width, height, rgba)`, and `src` itself, not a copy, for no turn.
 #[hotpath::measure]
-fn rotate_rgba<S: Sample>(src: &[S], w: u32, h: u32, steps: u8) -> (u32, u32, Vec<S>) {
+fn rotate_rgba<S: Sample>(src: Vec<S>, w: u32, h: u32, steps: u8) -> (u32, u32, Vec<S>) {
     let steps = steps % 4;
     if steps == 0 {
-        return (w, h, src.to_vec());
+        return (w, h, src);
     }
     let (nw, nh) = if steps == 2 { (w, h) } else { (h, w) };
     let mut dst = vec![S::default(); (nw * nh * 4) as usize];
@@ -971,7 +971,7 @@ mod tests {
     #[test]
     fn rotate_90cw_swaps_dims_and_moves_pixels() {
         let src = [px(10), px(20)].concat();
-        let (w, h, out) = rotate_rgba(&src, 2, 1, 1);
+        let (w, h, out) = rotate_rgba(src, 2, 1, 1);
         assert_eq!((w, h), (1, 2));
         assert_eq!(&out[0..4], &px(10));
         assert_eq!(&out[4..8], &px(20));
@@ -980,7 +980,7 @@ mod tests {
     #[test]
     fn rotate_360_is_identity() {
         let src = [px(1), px(2), px(3), px(4)].concat();
-        let (w, h, out) = rotate_rgba(&src, 2, 2, 4);
+        let (w, h, out) = rotate_rgba(src.clone(), 2, 2, 4);
         assert_eq!((w, h), (2, 2));
         assert_eq!(out, src);
     }
