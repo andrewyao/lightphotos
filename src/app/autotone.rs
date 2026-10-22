@@ -452,13 +452,11 @@ impl App {
             self.put_edit(path, merged);
         } else {
             self.store_edit(path, merged);
+            self.keep_through_undo(path, base, merged);
         }
         self.save_patch(
             path,
-            crate::persist::folder_store::Patch::Adjustments(
-                Box::new(merged),
-                crate::sidecar::unix_now(),
-            ),
+            crate::persist::folder_store::Patch::adjustments(base, merged),
         );
         #[cfg(target_arch = "wasm32")]
         if merged != base {

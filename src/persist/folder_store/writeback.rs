@@ -48,16 +48,75 @@ pub(super) enum WriteOp {
 /// the sidecar stays as the write finds it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Patch {
-    /// The adjustments, edited at the given Unix time.
-    Adjustments(Box<Adjustments>, u64),
+    /// A change to the adjustments: see [`AdjustmentsChange`].
+    Adjustments(Box<AdjustmentsChange>),
     /// The quality score.
     Score(StoredScore),
 }
 
+/// A job's result, as the app's copy of a photo's adjustments before and
+/// after it, made at a Unix time. Saving applies only the sliders it
+/// changed, onto whatever the photo has saved, so a slider mid-drag on the
+/// same photo is neither written half-finished nor lost.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AdjustmentsChange {
+    pub(crate) before: Adjustments,
+    pub(crate) after: Adjustments,
+    pub(crate) at: u64,
+}
+
+impl AdjustmentsChange {
+    /// `onto` with the sliders this change moved set as it set them.
+    pub(crate) fn apply(&self, onto: &Adjustments) -> Adjustments {
+        changed_onto(&self.before, &self.after, onto)
+    }
+}
+
+/// `onto` with every field that differs between `before` and `after` set to
+/// `after`'s, compared on the JSON form, where a field left out is its
+/// default. Falls back to `after` whole if that form can't be read back.
+pub(crate) fn changed_onto(
+    before: &Adjustments,
+    after: &Adjustments,
+    onto: &Adjustments,
+) -> Adjustments {
+    use serde_json::Value;
+    let json = |a: &Adjustments| match serde_json::to_value(a) {
+        Ok(Value::Object(fields)) => fields,
+        _ => serde_json::Map::new(),
+    };
+    let (b, a, mut out) = (json(before), json(after), json(onto));
+    for key in b.keys().chain(a.keys()) {
+        if b.get(key) == a.get(key) {
+            continue;
+        }
+        match a.get(key) {
+            Some(v) => {
+                out.insert(key.clone(), v.clone());
+            }
+            None => {
+                out.remove(key);
+            }
+        }
+    }
+    serde_json::from_value(Value::Object(out)).unwrap_or(*after)
+}
+
 impl Patch {
+    /// The change from `before` to `after`, stamped now.
+    pub(crate) fn adjustments(before: Adjustments, after: Adjustments) -> Patch {
+        Patch::Adjustments(Box::new(AdjustmentsChange {
+            before,
+            after,
+            at: crate::sidecar::unix_now(),
+        }))
+    }
+
     fn apply(&self, rec: &mut ImageRecord) {
         match self {
-            Patch::Adjustments(adj, at) => rec.edit(*at, |rec| rec.adjustments = **adj),
+            Patch::Adjustments(change) => rec.edit(change.at, |rec| {
+                rec.adjustments = change.apply(&rec.adjustments)
+            }),
             Patch::Score(score) => rec.score = Some(score.clone()),
         }
     }
@@ -585,7 +644,13 @@ mod tests {
                 ..Default::default()
             })),
         );
-        let patch = || WriteOp::Patch(Box::new(Patch::Adjustments(Box::new(exposed), 7)));
+        let patch = || {
+            WriteOp::Patch(Box::new(Patch::Adjustments(Box::new(AdjustmentsChange {
+                before: Adjustments::default(),
+                after: exposed,
+                at: 7,
+            }))))
+        };
         wb.enqueue(&queued, patch());
         wb.enqueue(Path::new("/photos/b.jpg"), patch());
 
