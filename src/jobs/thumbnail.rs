@@ -203,35 +203,25 @@ pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<D
     }
     let jpeg_bytes = &buf[offset..end];
 
-    let img = image::load_from_memory_with_format(jpeg_bytes, image::ImageFormat::Jpeg)
-        .ok()?
-        .into_rgba8();
-    let (w, h) = (img.width(), img.height());
-    if w == 0 || h == 0 {
-        return None;
-    }
-
     // Orientation belongs to the main image, so read it from the primary IFD.
     let orientation = source
         .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
         .and_then(|f| f.value.get_uint(0))
-        .unwrap_or(1) as u8;
-
-    let (nw, nh) = crate::decode::image_decode::fit_within(w, h, max_px);
-    let rgba = if (nw, nh) == (w, h) {
-        img.into_raw()
-    } else {
-        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
-    };
-    Some(crate::decode::image_decode::apply_exif_orientation(
-        DecodedImage::new_tracked(DecodedImageFields {
-            width: nw,
-            height: nh,
-            rgba,
-            pixel_format: PixelFormat::Srgb8,
-        }),
-        orientation,
-    ))
+        .and_then(|code| u8::try_from(code).ok())
+        .and_then(image::metadata::Orientation::from_exif)
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let reader =
+        image::ImageReader::with_format(std::io::Cursor::new(jpeg_bytes), image::ImageFormat::Jpeg);
+    let img = crate::decode::image_decode::decode_fit(reader, max_px, Some(orientation)).ok()?;
+    if img.width() == 0 || img.height() == 0 {
+        return None;
+    }
+    Some(DecodedImage::new_tracked(DecodedImageFields {
+        width: img.width(),
+        height: img.height(),
+        rgba: img.into_raw(),
+        pixel_format: PixelFormat::Srgb8,
+    }))
 }
 
 /// Options for `CGImageSourceCreateThumbnailAtIndex`. `WithTransform` makes
@@ -309,6 +299,15 @@ pub(crate) fn preview_is_large_enough(width: u32, height: u32, max_px: u32) -> b
 /// scans skip these files.
 const CACHE_SUFFIX: &str = ".thumb.jpg";
 
+/// Bump to invalidate every existing entry this build made. Per decode path:
+/// macOS thumbnails come from ImageIO, the rest from the `image` crate, and
+/// v4 marks the block-shrink resize (`image_decode::fit`), which changed
+/// only the latter. The web and native non-mac builds share a key.
+#[cfg(target_os = "macos")]
+const CACHE_KEY_VERSION: &[u8] = b"lightphotos-thumb-v3";
+#[cfg(not(target_os = "macos"))]
+const CACHE_KEY_VERSION: &[u8] = b"lightphotos-thumb-v4";
+
 /// Cache key from the source's mtime and length. FNV-1a instead of
 /// `DefaultHasher`, so keys are stable across runs. The path is not hashed,
 /// so moving a folder keeps its cache valid.
@@ -317,8 +316,7 @@ const CACHE_SUFFIX: &str = ".thumb.jpg";
 /// Native and web builds must compute the same key to share entries.
 pub(crate) fn cache_key(mtime_ms: u64, len: u64) -> u64 {
     let mut h = crate::hash::Fnv1a::new();
-    // Bump the version to invalidate every existing entry on native and web.
-    h.write(b"lightphotos-thumb-v4");
+    h.write(CACHE_KEY_VERSION);
     h.write(&mtime_ms.to_le_bytes());
     h.write(&len.to_le_bytes());
     h.finish()
@@ -590,6 +588,22 @@ mod tests {
         legacy.write(&1_000u64.to_le_bytes());
         legacy.write(&4_096u64.to_le_bytes());
         assert_ne!(cache_key(1_000, 4_096), legacy.finish());
+    }
+
+    /// Thumbnails resized straight from full size by Lanczos3 are not
+    /// reused off macOS; macOS keeps its v3 entries.
+    #[test]
+    fn cache_key_invalidates_full_size_lanczos_thumbnails_off_mac() {
+        let mut v3 = crate::hash::Fnv1a::new();
+        v3.write(b"lightphotos-thumb-v3");
+        v3.write(&1_000u64.to_le_bytes());
+        v3.write(&4_096u64.to_le_bytes());
+        let v3 = v3.finish();
+        if cfg!(target_os = "macos") {
+            assert_eq!(cache_key(1_000, 4_096), v3);
+        } else {
+            assert_ne!(cache_key(1_000, 4_096), v3);
+        }
     }
 
     #[test]

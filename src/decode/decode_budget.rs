@@ -155,25 +155,6 @@ impl Drop for Grant {
     }
 }
 
-/// Peak bytes a JPEG, PNG or TIFF decode of a `src` image to `out` holds,
-/// from its header: the decoder's own buffer (`native` bytes), its RGBA8
-/// copy, a second RGBA8 copy when EXIF orientation turns it, and when it
-/// resizes, Lanczos3's first pass (an `Rgba32F` image `src` wide and `out`
-/// tall, 16 bytes a pixel) and the output. The header is hostile, so this
-/// saturates rather than wraps.
-pub(crate) fn nonraw_estimate(native: u64, src: (u32, u32), out: (u32, u32)) -> usize {
-    let pixels = |(w, h): (u32, u32)| u64::from(w) * u64::from(h);
-    let rgba = pixels(src).saturating_mul(4);
-    let mut total = native.saturating_add(rgba.saturating_mul(2));
-    if out != src {
-        let scratch = pixels((src.0, out.1)).saturating_mul(16);
-        total = total
-            .saturating_add(scratch)
-            .saturating_add(pixels(out).saturating_mul(4));
-    }
-    usize::try_from(total).unwrap_or(usize::MAX)
-}
-
 /// Waits for `bytes` of the process-wide budget.
 pub(crate) fn acquire(bytes: usize) -> Grant {
     GLOBAL.acquire(bytes)
@@ -231,22 +212,6 @@ mod tests {
         let _a = BUDGET.acquire(40);
         let _b = BUDGET.acquire(40);
         assert_eq!(BUDGET.state.lock().unwrap().used, 80);
-    }
-
-    #[test]
-    fn a_nonraw_estimate_counts_every_copy_and_saturates() {
-        // A 24 MP RGB8 JPEG shown at 2048 x 1365: decoder buffer, two RGBA8
-        // copies, Lanczos's 6000 x 1365 Rgba32F pass, the output.
-        let estimate = nonraw_estimate(72_000_000, (6000, 4000), (2048, 1365));
-        assert_eq!(
-            estimate,
-            72_000_000 + 192_000_000 + 131_040_000 + 11_182_080
-        );
-        // Not resized: no scratch, no second output.
-        let whole = nonraw_estimate(72_000_000, (6000, 4000), (6000, 4000));
-        assert_eq!(whole, 72_000_000 + 192_000_000);
-        let huge = (u32::MAX, u32::MAX);
-        assert_eq!(nonraw_estimate(u64::MAX, huge, (1, 1)), usize::MAX);
     }
 
     /// A request that is waiting for the whole budget holds back the ones
