@@ -232,7 +232,8 @@ pub fn atomic_tmp_target(name: &str) -> &str {
 }
 
 /// Whether `dir`, which need not exist yet, is `root` or inside it once
-/// symlinks resolve. A relative path, or one with a `..`, is not.
+/// symlinks resolve. A relative path, one with a `..`, or one through a
+/// link that resolves to nothing is not.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn is_within(dir: &Path, root: &Path) -> bool {
     use std::path::Component;
@@ -248,6 +249,11 @@ pub fn is_within(dir: &Path, root: &Path) -> bool {
     let base = loop {
         if let Ok(real) = existing.canonicalize() {
             break real;
+        }
+        // There but not resolvable: a link to nothing yet, which a write
+        // would follow out, or a part we may not read.
+        if existing.symlink_metadata().is_ok() {
+            return false;
         }
         let (Some(name), Some(parent)) = (existing.file_name(), existing.parent()) else {
             return false;
@@ -283,6 +289,11 @@ mod tests {
         assert!(!is_within(&root.join("../outside"), &root));
         assert!(!is_within(Path::new("Exports"), &root), "relative");
         assert!(!is_within(Path::new("/"), &root));
+        std::os::unix::fs::symlink(outside.join("missing"), root.join("dangling")).unwrap();
+        assert!(
+            !is_within(&root.join("dangling/new"), &root),
+            "a link to nothing yet still points out"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
