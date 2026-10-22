@@ -231,9 +231,62 @@ pub fn atomic_tmp_target(name: &str) -> &str {
     }
 }
 
+/// Whether `dir`, which need not exist yet, is `root` or inside it once
+/// symlinks resolve. A relative path, or one with a `..`, is not.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn is_within(dir: &Path, root: &Path) -> bool {
+    use std::path::Component;
+    if !dir.is_absolute() || dir.components().any(|c| c == Component::ParentDir) {
+        return false;
+    }
+    let Ok(root) = root.canonicalize() else {
+        return false;
+    };
+    // Resolve the deepest part that exists; the rest is plain names.
+    let mut tail = Vec::new();
+    let mut existing = dir;
+    let base = loop {
+        if let Ok(real) = existing.canonicalize() {
+            break real;
+        }
+        let (Some(name), Some(parent)) = (existing.file_name(), existing.parent()) else {
+            return false;
+        };
+        tail.push(name);
+        existing = parent;
+    };
+    tail.iter()
+        .rev()
+        .fold(base, |p, name| p.join(name))
+        .starts_with(&root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn is_within_resolves_links_and_refuses_dot_dot() {
+        let root = std::env::temp_dir().join(format!("lp-within-{}", std::process::id()));
+        let outside = root.with_extension("outside");
+        std::fs::create_dir_all(root.join("Exports")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+        assert!(is_within(&root, &root));
+        assert!(is_within(&root.join("Exports"), &root));
+        assert!(is_within(&root.join("new/deeper"), &root), "need not exist");
+        assert!(!is_within(&outside, &root));
+        assert!(!is_within(&root.join("link"), &root), "a link out");
+        assert!(!is_within(&root.join("link/new"), &root));
+        assert!(!is_within(&root.join("../outside"), &root));
+        assert!(!is_within(Path::new("Exports"), &root), "relative");
+        assert!(!is_within(Path::new("/"), &root));
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
 
     #[cfg(unix)]
     #[test]
