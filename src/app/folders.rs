@@ -115,7 +115,7 @@ impl App {
     pub(super) fn close_folder(&mut self) {
         self.teardown_loupe_state();
         self.finish_folder_jobs();
-        self.forget_loupe_decodes();
+        self.forget_folder_decodes();
         self.burst_scan = None;
         self.expanded_stacks.clear();
         self.playlist = None;

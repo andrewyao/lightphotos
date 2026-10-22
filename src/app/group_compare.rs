@@ -367,9 +367,9 @@ impl App {
             .collect()
     }
 
-    /// For leaving the Loupe, which drops the full decodes the Compare tiles
-    /// wait on: they ask again when the Loupe opens, rather than staying
-    /// soft as failures.
+    /// For leaving the Loupe or forgetting its decodes, which drops the full
+    /// decodes the Compare tiles wait on: they ask again, rather than
+    /// staying soft as failures.
     pub(super) fn forget_compare_fulls_waiting(&mut self) {
         let Some(tiles) = &mut self.group_compare.tiles else {
             return;
@@ -1079,6 +1079,24 @@ mod tests {
         app.pump();
         app.mode = ViewMode::Loupe;
         app.pump();
+        let tiles = app.group_compare.tiles.as_ref().unwrap();
+        let first = tiles.members[0].as_ref().unwrap();
+        assert!(matches!(first.full, Full::None), "asks again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Changing the RAW tone curve forgets every Loupe decode, the fulls
+    /// the Compare tiles wait on included, so they ask again rather than
+    /// staying soft as failures.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_tone_curve_change_has_compare_tiles_ask_for_their_fulls_again() {
+        let (mut app, dir, paths) = folder_app("compare-tone", 3);
+        app.loader = Some(crate::jobs::loader::Loader::queue_only_for_test());
+        app.mode = ViewMode::Loupe;
+        app.group_compare.tiles = Some(waiting_tiles(&app, &paths, 1500));
+        // The setting as it is, so no other test sees it change.
+        app.set_apple_tone_curve(crate::decode::image_decode::apple_tone_curve());
         let tiles = app.group_compare.tiles.as_ref().unwrap();
         let first = tiles.members[0].as_ref().unwrap();
         assert!(matches!(first.full, Full::None), "asks again");
