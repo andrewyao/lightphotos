@@ -1015,6 +1015,38 @@ mod tests {
         }
     }
 
+    /// At half the sensor size or less, the develop bins 2x2 instead of
+    /// running PPG. It must land the same size and the same color as the
+    /// full-size develop shrunk to it.
+    #[test]
+    fn a_half_res_develop_matches_the_full_one_in_size_and_color() {
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_raw_half_res_{}.dng",
+            std::process::id()
+        ));
+        write_bayer_dng(&path, 64, 48).expect("write_bayer_dng failed");
+        let bytes = std::fs::read(&path).expect("read fixture");
+        let _ = std::fs::remove_file(&path);
+
+        let mean = |img: &image_decode::DecodedImage| {
+            let mut sum = [0f64; 3];
+            let pixels = img.rgba.as_chunks::<8>().0;
+            for px in pixels {
+                for (c, s) in sum.iter_mut().enumerate() {
+                    *s += f64::from(half::f16::from_le_bytes([px[c * 2], px[c * 2 + 1]]).to_f32());
+                }
+            }
+            sum.map(|s| s / pixels.len() as f64)
+        };
+        let full = lp_rawler::decode_raw_nonmac_from_bytes(&bytes, u32::MAX).expect("full");
+        let half = lp_rawler::decode_raw_nonmac_from_bytes(&bytes, 24).expect("half");
+        assert_eq!((full.width, full.height), (64, 48));
+        assert_eq!((half.width, half.height), (24, 18));
+        for (f, h) in mean(&full).into_iter().zip(mean(&half)) {
+            assert!(f > 0.0 && (f - h).abs() <= 0.03 * f, "full {f} vs half {h}");
+        }
+    }
+
     /// Path and bytes entry points give byte-identical output, so native and
     /// wasm export can share one pipeline.
     #[test]

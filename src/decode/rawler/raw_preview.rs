@@ -203,7 +203,7 @@ fn decode_raw_preview(
 /// detail it adds is lost. On wasm32, also true past 64 MP: PPG's RGB output
 /// is 12 bytes a pixel, a single 1.2 GB allocation at 100 MP, and a 4 GB heap
 /// that already holds thumbnails rarely has a hole that big.
-fn half_res_is_enough(area: rawler::imgop::Rect, max_px: u32) -> bool {
+pub(super) fn half_res_is_enough(area: rawler::imgop::Rect, max_px: u32) -> bool {
     let long_side = area.d.w.max(area.d.h);
     long_side >= 2 * max_px as usize
         || (cfg!(target_arch = "wasm32") && area.d.w * area.d.h > 64_000_000)
@@ -509,7 +509,7 @@ fn render_rgb_sample_linear_bytes(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>
 ///
 /// The name is checked after `cfa.shift` to the active-area origin, because an
 /// odd origin turns RGGB into GRBG.
-fn is_supported_bayer_layout(
+pub(super) fn is_supported_bayer_layout(
     cfa: &rawler::CFA,
     colors: &rawler::cfa::PlaneColor,
     area: rawler::imgop::Rect,
@@ -570,7 +570,7 @@ fn area_fits(area: rawler::imgop::Rect, width: usize, height: usize) -> bool {
 /// empty. Checked here because `crop_area` comes from file tags (DNG
 /// `DefaultCropSize`), and `Rect::adapt` asserts on a crop larger than the
 /// active area.
-fn crop_in_demosaiced(
+pub(super) fn crop_in_demosaiced(
     crop: rawler::imgop::Rect,
     active: rawler::imgop::Rect,
     half_res: bool,

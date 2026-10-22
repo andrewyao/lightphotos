@@ -286,7 +286,7 @@ fn decode_raw_nonmac_from_source(
         })
         .unwrap_or_else(|| exif_code_from_rawler_orientation(raw.orientation));
 
-    develop_raw_image_to_linear_f16(&raw, orientation, max_dim)
+    develop_raw_image_to_linear_f16(&mut raw, orientation, max_dim)
 }
 
 /// `RawDevelop`'s default steps without the last, `SRgb`. rawler runs its
@@ -305,6 +305,85 @@ const LINEAR_DEVELOP_STEPS: [rawler::imgop::develop::ProcessingStep; 7] = {
         CropDefault,
     ]
 };
+
+/// What `RawDevelop` runs on a [`half_res_image`], which is already scaled,
+/// demosaiced and cropped to its active area.
+const HALF_RES_DEVELOP_STEPS: [rawler::imgop::develop::ProcessingStep; 3] = {
+    use rawler::imgop::develop::ProcessingStep::*;
+    [WhiteBalance, Calibrate, CropDefault]
+};
+
+/// `raw` binned to half size by rawler's 2x2 `Superpixel3Channel`, as a
+/// linear three-color image `RawDevelop` develops without its demosaic, when
+/// the output is at most half the active area (`half_res_is_enough`). PPG's
+/// full-size result would be box-shrunk at least 2x straight away, so the
+/// detail it adds is lost, and it costs 4x the demosaic work and memory.
+///
+/// `None`, with `raw` untouched, for anything else: a larger output, a layout
+/// the superpixel would panic on, or a Fuji rotated sensor, whose rotation
+/// step only runs inside `RawDevelop`'s own demosaic. Once it has scaled
+/// `raw` in place it no longer returns `None`, since the full develop would
+/// scale it a second time.
+fn half_res_image(
+    raw: &mut rawler::RawImage,
+    max_dim: u32,
+) -> Result<Option<rawler::RawImage>, String> {
+    use rawler::imgop::sensor::bayer::superpixel::Superpixel3Channel;
+    use rawler::imgop::sensor::Demosaic;
+    use rawler::rawimage::RawPhotometricInterpretation;
+
+    let RawPhotometricInterpretation::Cfa(config) = &raw.photometric else {
+        return Ok(None);
+    };
+    let samples = match &raw.data {
+        rawler::RawImageData::Integer(data) => data.len(),
+        rawler::RawImageData::Float(data) => data.len(),
+    };
+    let area = raw.active_area.unwrap_or(rawler::imgop::Rect::new(
+        rawler::imgop::Point::new(0, 0),
+        rawler::imgop::Dim2::new(raw.width, raw.height),
+    ));
+    if raw.cpp != 1
+        || raw.width.checked_mul(raw.height) != Some(samples)
+        || raw.fuji_rotation_width.is_some()
+        || config.sensor != rawler::imgop::sensor::SensorType::Bayer
+        || !config.cfa.is_rgb()
+        || !raw_preview::is_supported_bayer_layout(
+            &config.cfa,
+            &config.colors,
+            area,
+            raw.width,
+            raw.height,
+        )
+        || !raw_preview::half_res_is_enough(area, max_dim)
+    {
+        return Ok(None);
+    }
+    let (cfa, colors) = (config.cfa.clone(), config.colors.clone());
+    raw.apply_scaling().map_err(|e| e.to_string())?;
+    let rawler::RawImageData::Float(data) = &mut raw.data else {
+        return Err("RAW scaling left integer samples".to_string());
+    };
+    let mosaic = rawler::pixarray::Pix2D::new_with(std::mem::take(data), raw.width, raw.height);
+    let binned = Superpixel3Channel::new().demosaic(&mosaic, &cfa, &colors, area);
+    drop(mosaic);
+    let (width, height) = (binned.width, binned.height);
+    // `crop_area` is in sensor coordinates; the binned image starts at the
+    // active area and is half its size. A crop that does not fit means none.
+    let crop = raw
+        .crop_area
+        .and_then(|crop| raw_preview::crop_in_demosaiced(crop, area, true, width, height));
+
+    let mut half = raw.clone();
+    half.data = rawler::RawImageData::Float(binned.into_inner().into_flattened());
+    half.width = width;
+    half.height = height;
+    half.cpp = 3;
+    half.photometric = RawPhotometricInterpretation::LinearRaw;
+    half.active_area = None;
+    half.crop_area = crop;
+    Ok(Some(half))
+}
 
 /// A linear `RawDevelop` result as RGB with every channel finite, at least
 /// 0, and at most the largest finite f16. Values above 1.0 stay: they are the
@@ -356,15 +435,18 @@ fn f16_range(v: f32) -> f32 {
 /// gamma and display boost are left to `raw_shader.wgsl`.
 #[hotpath::measure]
 fn develop_raw_image_to_linear_f16(
-    raw: &rawler::RawImage,
+    raw: &mut rawler::RawImage,
     orientation: u8,
     max_dim: u32,
 ) -> Result<DecodedImage, String> {
+    use rawler::imgop::develop::RawDevelop;
     let side = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     check_decode_size(side(raw.width), side(raw.height))?;
-    let developed = rawler::imgop::develop::RawDevelop::new_with(&LINEAR_DEVELOP_STEPS)
-        .develop_intermediate(raw)
-        .map_err(|e| e.to_string())?;
+    let developed = match half_res_image(raw, max_dim)? {
+        Some(half) => RawDevelop::new_with(&HALF_RES_DEVELOP_STEPS).develop_intermediate(&half),
+        None => RawDevelop::new_with(&LINEAR_DEVELOP_STEPS).develop_intermediate(raw),
+    }
+    .map_err(|e| e.to_string())?;
     let (src_w, src_h, mut linear) =
         linear_rgb(developed).ok_or("rawler produced an empty developed image")?;
     if src_w == 0 || src_h == 0 {
