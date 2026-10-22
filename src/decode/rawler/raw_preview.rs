@@ -204,16 +204,107 @@ fn decode_raw_preview(
     }))
 }
 
-/// True when a `Quality` decode can demosaic Bayer data with the half-size
-/// superpixel instead of full-size PPG. When `max_px` is at most half the
-/// sensor, the PPG result would be shrunk at least 2x straight away, so the
-/// detail it adds is lost. On wasm32, also true past 64 MP: PPG's RGB output
-/// is 12 bytes a pixel, a single 1.2 GB allocation at 100 MP, and a 4 GB heap
-/// that already holds thumbnails rarely has a hole that big.
-pub(super) fn half_res_is_enough(area: rawler::imgop::Rect, max_px: u32) -> bool {
-    let long_side = area.d.w.max(area.d.h);
-    long_side >= 2 * max_px as usize
-        || (cfg!(target_arch = "wasm32") && area.d.w * area.d.h > 64_000_000)
+/// True when Bayer data can be demosaiced with the half-size superpixel
+/// instead of full-size PPG: an output of `size` (the default crop, which is
+/// what is shown) fit within `max_px` is at most half its size, so PPG's
+/// result would be shrunk at least 2x straight away and the detail it adds
+/// lost.
+pub(super) fn half_res_is_enough(size: rawler::imgop::Dim2, max_px: u32) -> bool {
+    size.w.max(size.h) >= (max_px as usize).saturating_mul(2)
+}
+
+/// wasm32's Loupe decodes bin past 64 MP whatever the size asked for: PPG's
+/// RGB output is 12 bytes a pixel, a single 1.2 GB allocation at 100 MP, and
+/// a 4 GB heap that already holds thumbnails rarely has a hole that big.
+/// Only the Loupe asks this; an export decodes at the size it was given.
+fn wasm_needs_bin(area: rawler::imgop::Rect) -> bool {
+    cfg!(target_arch = "wasm32") && area.d.w.saturating_mul(area.d.h) > 64_000_000
+}
+
+/// A Bayer mosaic that rawler's 3-plane Bayer demosaics take without
+/// panicking (see `is_supported_bayer_layout`), with the area and crop both
+/// develops use. Built by [`bayer_mosaic`], the one place these checks live.
+pub(super) struct BayerMosaic {
+    pub(super) cfa: rawler::CFA,
+    pub(super) colors: rawler::cfa::PlaneColor,
+    /// The active area, trimmed to the sensor's even-sized part:
+    /// `apply_scaling` normalizes whole 2x2 blocks, so an odd sensor's last
+    /// row or column keeps raw sample values, which show as a white edge.
+    pub(super) area: rawler::imgop::Rect,
+    /// The default crop, in sensor coordinates, when it lies inside `area`.
+    pub(super) crop: Option<rawler::imgop::Rect>,
+}
+
+impl BayerMosaic {
+    /// The size the develop shows: the default crop, else the area.
+    pub(super) fn shown_size(&self) -> rawler::imgop::Dim2 {
+        self.crop.map_or(self.area.d, |crop| crop.d)
+    }
+}
+
+/// `raw`'s active area (or the whole image) trimmed to its even-sized part,
+/// or `None` when that leaves less than a 2x2 block or the area does not
+/// fit the buffer.
+pub(super) fn scaled_area(raw: &rawler::RawImage) -> Option<rawler::imgop::Rect> {
+    use rawler::imgop::{Dim2, Point, Rect};
+    let area = raw.active_area.unwrap_or(Rect::new(
+        Point::new(0, 0),
+        Dim2::new(raw.width, raw.height),
+    ));
+    if !area_fits(area, raw.width, raw.height) {
+        return None;
+    }
+    let right = (area.p.x + area.d.w).min(raw.width & !1);
+    let bottom = (area.p.y + area.d.h).min(raw.height & !1);
+    let (w, h) = (right.checked_sub(area.p.x)?, bottom.checked_sub(area.p.y)?);
+    (w >= 2 && h >= 2).then(|| Rect::new(area.p, Dim2::new(w, h)))
+}
+
+/// `raw`'s default crop when it lies inside `area`. One that does not (bad
+/// metadata) is dropped, and both develops then show the whole area.
+pub(super) fn default_crop(
+    raw: &rawler::RawImage,
+    area: rawler::imgop::Rect,
+) -> Option<rawler::imgop::Rect> {
+    let crop = raw.crop_area?;
+    let inside = crop.p.x >= area.p.x
+        && crop.p.y >= area.p.y
+        && crop.p.x.checked_add(crop.d.w)? <= area.p.x + area.d.w
+        && crop.p.y.checked_add(crop.d.h)? <= area.p.y + area.d.h;
+    (inside && crop.d.w > 0 && crop.d.h > 0).then_some(crop)
+}
+
+/// `raw` as a [`BayerMosaic`], or `None` for anything else: X-Trans, four
+/// colors, linear data, or a layout the Bayer demosaics would panic on.
+pub(super) fn bayer_mosaic(raw: &rawler::RawImage) -> Option<BayerMosaic> {
+    let rawler::rawimage::RawPhotometricInterpretation::Cfa(config) = &raw.photometric else {
+        return None;
+    };
+    let area = scaled_area(raw)?;
+    if raw.cpp != 1
+        || config.sensor != rawler::imgop::sensor::SensorType::Bayer
+        || !config.cfa.is_rgb()
+        || !is_supported_bayer_layout(&config.cfa, &config.colors, area, raw.width, raw.height)
+    {
+        return None;
+    }
+    Some(BayerMosaic {
+        cfa: config.cfa.clone(),
+        colors: config.colors.clone(),
+        area,
+        crop: default_crop(raw, area),
+    })
+}
+
+/// `pixels` binned 2x2 over `mosaic.area` by rawler's `Superpixel3Channel`,
+/// half the area's size.
+pub(super) fn bin_bayer(
+    pixels: &rawler::pixarray::PixF32,
+    mosaic: &BayerMosaic,
+) -> rawler::pixarray::Color2D<f32, 3> {
+    use rawler::imgop::sensor::bayer::superpixel::Superpixel3Channel;
+    use rawler::imgop::sensor::Demosaic;
+    Superpixel3Channel::new().demosaic(pixels, &mosaic.cfa, &mosaic.colors, mosaic.area)
 }
 
 /// Crops a row-major `width`-wide buffer to `crop` without a second buffer.
@@ -516,7 +607,7 @@ fn render_rgb_sample_linear_bytes(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>
 ///
 /// The name is checked after `cfa.shift` to the active-area origin, because an
 /// odd origin turns RGGB into GRBG.
-pub(super) fn is_supported_bayer_layout(
+fn is_supported_bayer_layout(
     cfa: &rawler::CFA,
     colors: &rawler::cfa::PlaneColor,
     area: rawler::imgop::Rect,
@@ -539,7 +630,7 @@ pub(super) fn is_supported_bayer_layout(
 // column of a different CFA phase, corrupting color at the bottom and right
 // edges. It only runs for RAF files with no usable embedded image, since
 // `rawler_full_image_from_bytes` handles the common case.
-fn is_supported_xtrans_layout(
+pub(super) fn is_supported_xtrans_layout(
     cfa: &rawler::CFA,
     colors: &rawler::cfa::PlaneColor,
     area: rawler::imgop::Rect,
@@ -563,7 +654,7 @@ fn neutral_if_non_finite(wb: [f32; 4]) -> [f32; 4] {
 /// `area` lies inside a `width * height` buffer. `checked_add` because
 /// `usize` is 32 bits on wasm32, and a garbage active-area tag could wrap a
 /// plain addition back into range.
-fn area_fits(area: rawler::imgop::Rect, width: usize, height: usize) -> bool {
+pub(super) fn area_fits(area: rawler::imgop::Rect, width: usize, height: usize) -> bool {
     area.p.x.checked_add(area.d.w).is_some_and(|x1| x1 <= width)
         && area
             .p
@@ -616,7 +707,7 @@ pub fn demosaic_cfa(
     mode: DemosaicMode,
     max_px: u32,
 ) -> Option<(u32, u32, Vec<u8>)> {
-    use rawler::imgop::sensor::bayer::{ppg::PPGDemosaic, superpixel::Superpixel3Channel};
+    use rawler::imgop::sensor::bayer::ppg::PPGDemosaic;
     use rawler::imgop::sensor::xtrans::bilinear::XTransBilinearDemosaic;
     use rawler::imgop::sensor::Demosaic;
     use rawler::pixarray::Pix2D;
@@ -635,13 +726,16 @@ pub fn demosaic_cfa(
         rawler::imgop::Point::new(0, 0),
         rawler::imgop::Dim2::new(width, height),
     ));
+    let is_xtrans = is_supported_xtrans_layout(&cfa, &colors, area, width, height);
+    let bayer = if is_xtrans {
+        None
+    } else {
+        Some(bayer_mosaic(raw)?)
+    };
+    let area = bayer.as_ref().map_or(area, |b| b.area);
     // `area` is remapped below for X-Trans. The default-crop step needs the
     // real active area, which is also the demosaiced buffer's origin.
     let original_active_area = area;
-    let is_xtrans = is_supported_xtrans_layout(&cfa, &colors, area, width, height);
-    if !is_xtrans && !is_supported_bayer_layout(&cfa, &colors, area, width, height) {
-        return None;
-    }
 
     let RawImageData::Float(data) = &mut raw.data else {
         return None; // apply_scaling always leaves Float data
@@ -691,17 +785,17 @@ pub fn demosaic_cfa(
         area
     };
 
-    let half_res = mode == DemosaicMode::Fast || half_res_is_enough(area, max_px);
-    let demosaiced = if is_xtrans {
+    let half_res = mode == DemosaicMode::Fast
+        || bayer
+            .as_ref()
+            .is_some_and(|b| half_res_is_enough(b.shown_size(), max_px))
+        || wasm_needs_bin(area);
+    let demosaiced = match &bayer {
         // Not `PPGDemosaic`: it assumes Bayer neighborhoods and turns an
         // X-Trans mosaic green.
-        XTransBilinearDemosaic::new().demosaic(&pixels, &cfa, &colors, area)
-    } else {
-        if half_res {
-            Superpixel3Channel::new().demosaic(&pixels, &cfa, &colors, area)
-        } else {
-            PPGDemosaic::new().demosaic(&pixels, &cfa, &colors, area)
-        }
+        None => XTransBilinearDemosaic::new().demosaic(&pixels, &cfa, &colors, area),
+        Some(b) if half_res => bin_bayer(&pixels, b),
+        Some(_) => PPGDemosaic::new().demosaic(&pixels, &cfa, &colors, area),
     };
     // The mosaic is 4 bytes a sensor pixel (183 MB at 45 MP). Free it before
     // the steps below allocate, since wasm32 shares one 4 GB heap.
@@ -713,10 +807,7 @@ pub fn demosaic_cfa(
     // the fitted view. `crop_area` is in sensor coordinates, so adapt it to the
     // active area and halve it for the superpixel's quarter-res bin. X-Trans is
     // skipped because its demosaic ran in reduced coordinates.
-    let demosaiced = match (!is_xtrans)
-        .then(|| raw.crop_area.or(Some(original_active_area)))
-        .flatten()
-    {
+    let demosaiced = match bayer.as_ref().map(|b| b.crop.unwrap_or(b.area)) {
         Some(crop) if crop.d != rawler::imgop::Dim2::new(demosaiced.width, demosaiced.height) => {
             // A crop that does not fit (bad metadata) means no crop.
             match crop_in_demosaiced(

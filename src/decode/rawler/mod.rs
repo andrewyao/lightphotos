@@ -286,73 +286,128 @@ const HALF_RES_DEVELOP_STEPS: [rawler::imgop::develop::ProcessingStep; 3] = {
     [WhiteBalance, Calibrate, CropDefault]
 };
 
-/// `raw` binned to half size by rawler's 2x2 `Superpixel3Channel`, as a
-/// linear three-color image `RawDevelop` develops without its demosaic, when
-/// the output is at most half the active area (`half_res_is_enough`). PPG's
-/// full-size result would be box-shrunk at least 2x straight away, so the
-/// detail it adds is lost, and it costs 4x the demosaic work and memory.
+/// Checks `raw` against every layout `RawDevelop` would panic on, and
+/// returns its [`raw_preview::BayerMosaic`] when it is ordinary Bayer data.
+/// A CFA image's active area is trimmed to the sensor's even-sized part (see
+/// `BayerMosaic::area`) and a default crop that does not lie inside it is
+/// dropped, in `raw` itself, so the full and the half-size develop frame
+/// the photo alike.
 ///
-/// `None`, with `raw` untouched, for anything else: a larger output, a layout
-/// the superpixel would panic on, or a Fuji rotated sensor, whose rotation
-/// step only runs inside `RawDevelop`'s own demosaic. Once it has scaled
-/// `raw` in place it no longer returns `None`, since the full develop would
-/// scale it a second time.
-fn half_res_image(
+/// Refused: fewer than 2 pixels a side (rawler's parallel loops panic on a
+/// zero chunk), a sample count that does not match the size, black-is-zero
+/// data, a sample layout `RawDevelop` has no arm for, a Fuji rotated sensor
+/// with an active area, and any CFA other than a supported Bayer, four-color
+/// Bayer or X-Trans layout.
+fn check_develop_layout(
     raw: &mut rawler::RawImage,
-    max_dim: u32,
-) -> Result<Option<rawler::RawImage>, String> {
-    use rawler::imgop::sensor::bayer::superpixel::Superpixel3Channel;
-    use rawler::imgop::sensor::Demosaic;
-    use rawler::rawimage::RawPhotometricInterpretation;
-
-    let RawPhotometricInterpretation::Cfa(config) = &raw.photometric else {
-        return Ok(None);
-    };
+) -> Result<Option<raw_preview::BayerMosaic>, String> {
+    use rawler::rawimage::RawPhotometricInterpretation as P;
+    let unsupported = |what: &str| Err(format!("unsupported RAW layout ({what})"));
+    if raw.width < 2 || raw.height < 2 {
+        return Err(format!(
+            "RAW image too small ({}x{})",
+            raw.width, raw.height
+        ));
+    }
     let samples = match &raw.data {
         rawler::RawImageData::Integer(data) => data.len(),
         rawler::RawImageData::Float(data) => data.len(),
     };
-    let area = raw.active_area.unwrap_or(rawler::imgop::Rect::new(
-        rawler::imgop::Point::new(0, 0),
-        rawler::imgop::Dim2::new(raw.width, raw.height),
-    ));
-    if raw.cpp != 1
-        || raw.width.checked_mul(raw.height) != Some(samples)
-        || raw.fuji_rotation_width.is_some()
-        || config.sensor != rawler::imgop::sensor::SensorType::Bayer
-        || !config.cfa.is_rgb()
-        || !raw_preview::is_supported_bayer_layout(
-            &config.cfa,
-            &config.colors,
-            area,
-            raw.width,
-            raw.height,
-        )
-        || !raw_preview::half_res_is_enough(area, max_dim)
+    let expected = raw
+        .width
+        .checked_mul(raw.height)
+        .and_then(|n| n.checked_mul(raw.cpp));
+    if expected != Some(samples) {
+        return Err("RAW sample count does not match its size".to_string());
+    }
+    let config = match &raw.photometric {
+        P::BlackIsZero => return unsupported("black-is-zero"),
+        P::LinearRaw => {
+            if !matches!(raw.cpp, 1 | 3 | 4) {
+                return unsupported("linear samples per pixel");
+            }
+            let whole = rawler::imgop::Rect::new(
+                rawler::imgop::Point::new(0, 0),
+                rawler::imgop::Dim2::new(raw.width, raw.height),
+            );
+            if !raw
+                .active_area
+                .is_some_and(|area| raw_preview::area_fits(area, raw.width, raw.height))
+            {
+                raw.active_area = None;
+            }
+            raw.crop_area = raw_preview::default_crop(raw, raw.active_area.unwrap_or(whole));
+            return Ok(None);
+        }
+        P::Cfa(config) => config.clone(),
+    };
+    if raw.fuji_rotation_width.is_some() && raw.active_area.is_some() {
+        return unsupported("rotated Fuji sensor");
+    }
+    let Some(area) = raw_preview::scaled_area(raw) else {
+        return unsupported("active area");
+    };
+    let mosaic = raw_preview::bayer_mosaic(raw);
+    let bayer4 = config.cfa.unique_colors() == 4
+        && config.colors.plane_count() == 4
+        && config.sensor == rawler::imgop::sensor::SensorType::Bayer;
+    let xtrans = raw_preview::is_supported_xtrans_layout(
+        &config.cfa,
+        &config.colors,
+        area,
+        raw.width,
+        raw.height,
+    );
+    if mosaic.is_none() && !bayer4 && !xtrans {
+        return unsupported(&format!("cfa={}", config.cfa.name));
+    }
+    raw.active_area = Some(area);
+    raw.crop_area = raw_preview::default_crop(raw, area);
+    Ok(mosaic)
+}
+
+/// `raw` binned to half size over `mosaic.area` by
+/// [`raw_preview::bin_bayer`], as a linear three-color image `RawDevelop`
+/// develops without its demosaic, when the shown size (the default crop) is
+/// at least twice `max_dim` (`half_res_is_enough`). PPG's full-size result
+/// would be box-shrunk at least 2x straight away, so the detail it adds is
+/// lost, and it costs 4x the demosaic work and memory. `None`, with `raw`
+/// untouched, for a larger output or a Fuji rotated sensor, whose rotation
+/// step only runs inside `RawDevelop`'s own demosaic.
+///
+/// `RawDevelop::develop_intermediate` clones the image it is given and then
+/// copies it into its own layout, so a quarter-size buffer is held three
+/// times while it runs; its API leaves no way to hand it ours.
+fn half_res_image(
+    raw: &mut rawler::RawImage,
+    mosaic: &raw_preview::BayerMosaic,
+    max_dim: u32,
+) -> Result<Option<rawler::RawImage>, String> {
+    if raw.fuji_rotation_width.is_some()
+        || !raw_preview::half_res_is_enough(mosaic.shown_size(), max_dim)
     {
         return Ok(None);
     }
-    let (cfa, colors) = (config.cfa.clone(), config.colors.clone());
     raw.apply_scaling().map_err(|e| e.to_string())?;
     let rawler::RawImageData::Float(data) = &mut raw.data else {
         return Err("RAW scaling left integer samples".to_string());
     };
-    let mosaic = rawler::pixarray::Pix2D::new_with(std::mem::take(data), raw.width, raw.height);
-    let binned = Superpixel3Channel::new().demosaic(&mosaic, &cfa, &colors, area);
-    drop(mosaic);
+    let pixels = rawler::pixarray::Pix2D::new_with(std::mem::take(data), raw.width, raw.height);
+    let binned = raw_preview::bin_bayer(&pixels, mosaic);
+    drop(pixels);
     let (width, height) = (binned.width, binned.height);
-    // `crop_area` is in sensor coordinates; the binned image starts at the
-    // active area and is half its size. A crop that does not fit means none.
-    let crop = raw
-        .crop_area
-        .and_then(|crop| raw_preview::crop_in_demosaiced(crop, area, true, width, height));
+    // The binned image starts at the area and is half its size.
+    let crop = mosaic
+        .crop
+        .and_then(|crop| raw_preview::crop_in_demosaiced(crop, mosaic.area, true, width, height));
 
+    // `raw.data` is empty now, so this copies only the metadata.
     let mut half = raw.clone();
     half.data = rawler::RawImageData::Float(binned.into_inner().into_flattened());
     half.width = width;
     half.height = height;
     half.cpp = 3;
-    half.photometric = RawPhotometricInterpretation::LinearRaw;
+    half.photometric = rawler::rawimage::RawPhotometricInterpretation::LinearRaw;
     half.active_area = None;
     half.crop_area = crop;
     Ok(Some(half))
@@ -415,7 +470,12 @@ fn develop_raw_image_to_linear_f16(
     use rawler::imgop::develop::RawDevelop;
     let side = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     check_decode_size(side(raw.width), side(raw.height))?;
-    let developed = match half_res_image(raw, max_dim)? {
+    let mosaic = check_develop_layout(raw)?;
+    let half = match &mosaic {
+        Some(mosaic) => half_res_image(raw, mosaic, max_dim)?,
+        None => None,
+    };
+    let developed = match half {
         Some(half) => RawDevelop::new_with(&HALF_RES_DEVELOP_STEPS).develop_intermediate(&half),
         None => RawDevelop::new_with(&LINEAR_DEVELOP_STEPS).develop_intermediate(raw),
     }
@@ -609,6 +669,117 @@ mod tests {
     use super::{fuji_dynamic_range_gain, linear_rgb, padded_to_tiles};
     use rawler::imgop::develop::Intermediate;
     use rawler::pixarray::{Color2D, PixF32};
+
+    use super::develop_raw_image_to_linear_f16;
+    use rawler::imgop::{Dim2, Point, Rect};
+
+    /// A `w` x `h` 12-bit Bayer image of `pattern`, every sample `v`.
+    fn bayer(w: usize, h: usize, pattern: &str, v: u16) -> rawler::RawImage {
+        let cfa = rawler::CFA::new(pattern);
+        let colors = rawler::cfa::PlaneColor::new("RGB");
+        rawler::RawImage::new(
+            rawler::decoders::Camera::new(),
+            rawler::pixarray::PixU16::new_with(vec![v; w * h], w, h),
+            1,
+            [1.0; 4],
+            rawler::rawimage::RawPhotometricInterpretation::Cfa(rawler::rawimage::CFAConfig::new(
+                &cfa, &colors,
+            )),
+            Some(rawler::rawimage::BlackLevel::new(&[0u16], 1, 1, 1)),
+            Some(rawler::rawimage::WhiteLevel::new(vec![4095])),
+            false,
+        )
+    }
+
+    fn rect(x: usize, y: usize, w: usize, h: usize) -> Rect {
+        Rect::new(Point::new(x, y), Dim2::new(w, h))
+    }
+
+    /// Smallest and largest red channel, as f32.
+    fn red_range(img: &crate::decode::image_decode::DecodedImage) -> (f32, f32) {
+        img.rgba
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|px| half::f16::from_le_bytes([px[0], px[1]]).to_f32())
+            .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)))
+    }
+
+    #[test]
+    fn a_raw_too_small_or_short_of_its_samples_is_refused() {
+        for (w, h) in [(1, 8), (8, 1)] {
+            let mut raw = bayer(w, h, "RGGB", 1000);
+            assert!(develop_raw_image_to_linear_f16(&mut raw, 1, u32::MAX).is_err());
+        }
+        let mut raw = bayer(8, 8, "RGGB", 1000);
+        raw.width = 0;
+        assert!(develop_raw_image_to_linear_f16(&mut raw, 1, u32::MAX).is_err());
+        let mut raw = bayer(8, 8, "RGGB", 1000);
+        raw.height = 9;
+        assert!(develop_raw_image_to_linear_f16(&mut raw, 1, u32::MAX).is_err());
+    }
+
+    /// The half-size develop rejects these layouts, and the full one would
+    /// panic in rawler on them, so the develop refuses them outright.
+    #[test]
+    fn an_unsupported_layout_is_refused_instead_of_reaching_rawler() {
+        let mut raw = bayer(8, 8, "RRRR", 1000);
+        assert!(develop_raw_image_to_linear_f16(&mut raw, 1, u32::MAX).is_err());
+        let mut raw = bayer(8, 8, "RGGB", 1000);
+        raw.active_area = Some(rect(4, 4, 8, 8));
+        assert!(develop_raw_image_to_linear_f16(&mut raw, 1, u32::MAX).is_err());
+        let mut raw = bayer(8, 8, "RGGB", 1000);
+        raw.photometric = rawler::rawimage::RawPhotometricInterpretation::BlackIsZero;
+        assert!(develop_raw_image_to_linear_f16(&mut raw, 1, u32::MAX).is_err());
+    }
+
+    /// An odd sensor with an odd active-area origin and a default crop: the
+    /// full develop and the half-size one frame it alike, and neither shows
+    /// the unscaled last row or column as a bright edge.
+    #[test]
+    fn the_full_and_half_develops_agree_on_an_odd_sensor_and_its_crop() {
+        let odd = || {
+            let mut raw = bayer(33, 25, "RGGB", 1000);
+            raw.active_area = Some(rect(1, 1, 32, 24));
+            raw.crop_area = Some(rect(3, 3, 24, 16));
+            raw
+        };
+        let full = develop_raw_image_to_linear_f16(&mut odd(), 1, u32::MAX).unwrap();
+        assert_eq!((full.width, full.height), (24, 16));
+        let small = develop_raw_image_to_linear_f16(&mut odd(), 1, 8).unwrap();
+        let half = develop_raw_image_to_linear_f16(&mut odd(), 1, 12).unwrap();
+        assert_eq!((half.width, half.height), (12, 8), "binned, then cropped");
+        assert_eq!((small.width, small.height), (8, 5));
+        for img in [&full, &half, &small] {
+            let (lo, hi) = red_range(img);
+            assert!(
+                lo > 0.0 && hi <= lo * 1.05,
+                "flat field, no edge: {lo}..{hi}"
+            );
+        }
+        let (full_lo, _) = red_range(&full);
+        let (half_lo, _) = red_range(&half);
+        assert!(
+            (full_lo - half_lo).abs() <= 0.02 * full_lo,
+            "{full_lo} vs {half_lo}"
+        );
+    }
+
+    /// A default crop outside the active area is bad metadata. Both
+    /// develops drop it and show the whole area, rather than one cropping
+    /// (or asserting in `Rect::adapt`) and the other not.
+    #[test]
+    fn a_crop_outside_the_area_is_dropped_by_both_develops() {
+        let bad = || {
+            let mut raw = bayer(40, 24, "RGGB", 1000);
+            raw.crop_area = Some(rect(30, 0, 20, 24));
+            raw
+        };
+        let full = develop_raw_image_to_linear_f16(&mut bad(), 1, u32::MAX).unwrap();
+        assert_eq!((full.width, full.height), (40, 24));
+        let half = develop_raw_image_to_linear_f16(&mut bad(), 1, 20).unwrap();
+        assert_eq!((half.width, half.height), (20, 12));
+    }
 
     #[test]
     fn linear_rgb_clamps_to_what_f16_holds_and_keeps_headroom() {
