@@ -402,4 +402,54 @@ mod tests {
         let export = agent_runs(&mut app, export_here("b.jpg"));
         assert!(!(in_outside && export.is_ok()), "{export:?}");
     }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_agent_cannot_switch_to_a_catalog_that_lists_other_folders() {
+        use crate::command::{CatalogNameParams, Command};
+        use crate::persist::catalog::{Catalog, CatalogRef};
+        let (mut app, _, _) = user_opened("agent-switch-user");
+        let outside = photo_folder("agent-switch-out");
+        let at = CatalogRef::parse(&outside.join("Elsewhere.lightphotos")).unwrap();
+        drop(Catalog::create_at(at.clone(), vec![outside.clone()]).unwrap());
+        app.recent_catalogs.push(at.clone());
+        let switched = agent_runs(
+            &mut app,
+            Command::SwitchCatalog(CatalogNameParams {
+                name: at.name().to_string(),
+            }),
+        );
+        assert!(
+            switched.as_ref().is_err_and(|e| e.contains("an agent")),
+            "{switched:?}"
+        );
+        assert!(!app
+            .folder_sel
+            .as_deref()
+            .is_some_and(|f| f.starts_with(&outside)));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn opening_one_photo_makes_only_its_folder_a_root() {
+        use crate::command::{Command, OpenFolderParams};
+        let dir = photo_folder("agent-file-open");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let mut app = App::new(None);
+        app.open_from_user(dir.join("b.jpg"));
+        let deeper = agent_runs(
+            &mut app,
+            Command::OpenFolder(OpenFolderParams { path: sub }),
+        );
+        assert!(
+            deeper.as_ref().is_err_and(|e| e.contains("an agent")),
+            "{deeper:?}"
+        );
+        let same = agent_runs(
+            &mut app,
+            Command::OpenFolder(OpenFolderParams { path: dir.clone() }),
+        );
+        assert!(same.is_ok(), "{same:?}");
+    }
 }

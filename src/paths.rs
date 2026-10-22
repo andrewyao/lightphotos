@@ -231,40 +231,43 @@ pub fn atomic_tmp_target(name: &str) -> &str {
     }
 }
 
-/// Whether `dir`, which need not exist yet, is `root` or inside it once
-/// symlinks resolve. A relative path, one with a `..`, or one through a
-/// link that resolves to nothing is not.
+/// `path` with its links resolved, though its tail need not exist yet:
+/// the deepest part that exists, resolved, then the rest as plain names.
+/// `None` for a relative path, one with a `..`, or one through a part that
+/// exists but does not resolve (a link to nothing yet, which a write would
+/// follow out, or a part we may not read).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn is_within(dir: &Path, root: &Path) -> bool {
+pub fn resolve(path: &Path) -> Option<PathBuf> {
     use std::path::Component;
-    if !dir.is_absolute() || dir.components().any(|c| c == Component::ParentDir) {
-        return false;
+    if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
+        return None;
     }
-    let Ok(root) = root.canonicalize() else {
-        return false;
-    };
-    // Resolve the deepest part that exists; the rest is plain names.
     let mut tail = Vec::new();
-    let mut existing = dir;
+    let mut existing = path;
     let base = loop {
         if let Ok(real) = existing.canonicalize() {
             break real;
         }
-        // There but not resolvable: a link to nothing yet, which a write
-        // would follow out, or a part we may not read.
         if existing.symlink_metadata().is_ok() {
-            return false;
+            return None;
         }
-        let (Some(name), Some(parent)) = (existing.file_name(), existing.parent()) else {
-            return false;
-        };
-        tail.push(name);
-        existing = parent;
+        tail.push(existing.file_name()?);
+        existing = existing.parent()?;
     };
-    tail.iter()
-        .rev()
-        .fold(base, |p, name| p.join(name))
-        .starts_with(&root)
+    Some(tail.iter().rev().fold(base, |p, name| p.join(name)))
+}
+
+/// Whether `dir`, which need not exist yet, is `root` or inside it once
+/// both resolve ([`resolve`]). A relative root is inside nothing.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn is_within(dir: &Path, root: &Path) -> bool {
+    if !root.is_absolute() {
+        return false;
+    }
+    match (resolve(dir), root.canonicalize()) {
+        (Some(dir), Ok(root)) => dir.starts_with(root),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

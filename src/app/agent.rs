@@ -7,7 +7,12 @@
 //! hands over, or a catalog the user opens or makes in the UI, whose
 //! folders count then). Nothing else adds a root: not a folder an agent
 //! opened, not a launch restore, not tree or keyboard navigation. The roots
-//! are saved, so a restore uses the saved set and not what a catalog lists.
+//! are saved resolved (absolute, links followed), so a restore uses the
+//! saved set, whatever the working directory, and not what a catalog lists.
+//!
+//! In the browser no folder has a path, so no path rule applies there: an
+//! agent reaches only what the user picked, and catalogs are named entries
+//! in the browser's own storage.
 
 use std::path::{Path, PathBuf};
 
@@ -24,31 +29,94 @@ const MAX_USER_ROOTS: usize = 256;
 pub(super) const EXPORT_REFUSED: &str = "an agent can export only into a folder the user \
                                          opened, or the export form's own folder";
 
-/// The folders the user chose, newest last.
-#[derive(Default)]
-pub(super) struct UserRoots(Vec<PathBuf>);
+/// One folder the user chose, resolved.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Root {
+    path: PathBuf,
+    /// Chosen as one photo's folder: the root covers that folder and its
+    /// `Exports`, not the folders inside it, so opening `~/photo.jpg` does
+    /// not hand an agent the whole home folder.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    shallow: bool,
+}
+
+impl Root {
+    /// Whether this root covers `real`, a resolved path.
+    fn covers(&self, real: &Path) -> bool {
+        match self.shallow {
+            true => {
+                real == self.path || real.starts_with(self.path.join(crate::export::EXPORTS_DIR))
+            }
+            false => real.starts_with(&self.path),
+        }
+    }
+}
+
+/// The folders the user chose, newest last. None is inside another.
+#[derive(Clone, Default)]
+pub(super) struct UserRoots(Vec<Root>);
 
 impl UserRoots {
-    /// The saved set, or none.
+    /// The saved set, or none. A saved entry that is not absolute is
+    /// dropped: it would mean whatever the next working directory is.
     pub(super) fn load() -> UserRoots {
         // A test must never read the developer's own settings.
         if cfg!(test) {
             return UserRoots::default();
         }
         let saved = crate::persist::prefs::load(USER_ROOTS_PREF)
-            .and_then(|s| serde_json::from_str::<Vec<PathBuf>>(&s).ok())
+            .and_then(|s| serde_json::from_str::<Vec<Root>>(&s).ok())
             .unwrap_or_default();
-        UserRoots(saved)
+        UserRoots(saved.into_iter().filter(|r| r.path.is_absolute()).collect())
     }
 
-    fn add(&mut self, dir: &Path) {
-        if self.0.iter().any(|r| r == dir) {
-            return;
+    /// Adds each of `dirs` and saves once. A folder that does not resolve
+    /// is not added.
+    fn add_all<'a>(&mut self, dirs: impl IntoIterator<Item = &'a Path>, shallow: bool) {
+        let mut changed = false;
+        for dir in dirs {
+            changed |= self.insert(dir, shallow);
         }
-        self.0.push(dir.to_path_buf());
+        if changed {
+            self.save();
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn add(&mut self, dir: &Path, shallow: bool) {
+        self.add_all([dir], shallow);
+    }
+
+    /// Adds `dir` resolved, unless a root covers it already; a new deep root
+    /// replaces the roots inside it. Returns whether the set changed.
+    fn insert(&mut self, dir: &Path, shallow: bool) -> bool {
+        let Ok(real) = std::fs::canonicalize(dir) else {
+            eprintln!("[agent] not a folder the user chose: {}", dir.display());
+            return false;
+        };
+        if !real.is_absolute() {
+            return false;
+        }
+        let covered = self.0.iter().any(|r| {
+            if shallow {
+                r.covers(&real)
+            } else {
+                !r.shallow && real.starts_with(&r.path)
+            }
+        });
+        if covered {
+            return false;
+        }
+        if !shallow {
+            self.0.retain(|r| !r.path.starts_with(&real));
+        }
+        self.0.push(Root {
+            path: real,
+            shallow,
+        });
         let over = self.0.len().saturating_sub(MAX_USER_ROOTS);
         self.0.drain(..over);
-        self.save();
+        true
     }
 
     fn save(&self) {
@@ -64,22 +132,70 @@ impl UserRoots {
         }
     }
 
+    /// Whether a root covers `path`. The path resolves once; the roots are
+    /// stored resolved.
     pub(super) fn holds(&self, path: &Path) -> bool {
-        within_any(path, &self.0)
+        resolve(path).is_some_and(|real| self.covers(&real))
     }
+
+    fn covers(&self, real: &Path) -> bool {
+        self.0.iter().any(|r| r.covers(real))
+    }
+}
+
+/// Where an agent's export may land: the user's roots, and the export
+/// form's own folder.
+// The browser's exports go to the picked folder only; nothing reads this there.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(super) struct ExportConfine {
+    roots: UserRoots,
+    /// Resolved.
+    form_folder: Option<PathBuf>,
+}
+
+impl ExportConfine {
+    fn new(roots: UserRoots, form_folder: Option<&Path>) -> ExportConfine {
+        ExportConfine {
+            roots,
+            form_folder: form_folder.and_then(resolve),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn holds(&self, dir: &Path) -> bool {
+        resolve(dir).is_some_and(|real| {
+            self.roots.covers(&real)
+                || self
+                    .form_folder
+                    .as_ref()
+                    .is_some_and(|f| real.starts_with(f))
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve(path: &Path) -> Option<PathBuf> {
+    crate::paths::resolve(path)
+}
+
+/// The browser names no folder by path: it reaches only the picked one.
+#[cfg(target_arch = "wasm32")]
+fn resolve(_path: &Path) -> Option<PathBuf> {
+    None
 }
 
 impl App {
     /// The user opened `path` at an explicit entry point: open it, and make
-    /// it (a file's folder, or a catalog's folders) one of the user's roots.
+    /// it one of the user's roots. A folder becomes a root with everything
+    /// inside it; a photo makes its own folder a shallow root; a catalog
+    /// makes its folders roots.
     pub(crate) fn open_from_user(&mut self, path: PathBuf) {
         #[cfg(not(target_arch = "wasm32"))]
         let catalog = crate::persist::catalog::CatalogRef::parse(&path).ok();
         #[cfg(not(target_arch = "wasm32"))]
-        let root = if path.is_dir() {
-            Some(path.clone())
-        } else {
-            path.parent().map(Path::to_path_buf)
+        let root = match path.is_dir() {
+            true => Some((path.clone(), false)),
+            false => path.parent().map(|dir| (dir.to_path_buf(), true)),
         };
         self.open(path);
         #[cfg(not(target_arch = "wasm32"))]
@@ -87,8 +203,8 @@ impl App {
             Some(at) if self.catalog.at() == &at => self.adopt_catalog_folders(),
             Some(_) => {}
             None => {
-                if let Some(root) = root {
-                    self.user_roots.add(&root);
+                if let Some((dir, shallow)) = root {
+                    self.user_roots.add(&dir, shallow);
                 }
             }
         }
@@ -97,9 +213,9 @@ impl App {
     /// The user opened or made the open catalog in the UI: its folders are
     /// the user's.
     pub(super) fn adopt_catalog_folders(&mut self) {
-        for dir in self.catalog.folders().to_vec() {
-            self.user_roots.add(&dir);
-        }
+        let folders = self.catalog.folders().to_vec();
+        self.user_roots
+            .add_all(folders.iter().map(PathBuf::as_path), false);
     }
 
     /// Runs a command an agent sent, once its paths pass the checks here.
@@ -109,19 +225,28 @@ impl App {
         };
         match &cmd {
             Command::Export(p) => return self.agent_export(p.clone()),
+            #[cfg(not(target_arch = "wasm32"))]
             Command::OpenCatalog(p) => {
                 self.check(&cmd)?;
                 self.agent_open_catalog(&p.path).map_err(|e| refuse(&e))?;
                 return Ok(Outcome::default());
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            Command::SwitchCatalog(p) => {
+                self.check(&cmd)?;
+                self.agent_switch_catalog(&p.name).map_err(|e| refuse(&e))?;
+                return Ok(Outcome::default());
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             Command::NewCatalog(p) => {
-                if !self
-                    .user_roots
-                    .holds(&agent_catalog_path(&p.path).map_err(|e| refuse(&e))?)
-                {
+                let at = super::catalog::catalog_ref_for(&p.path).map_err(|e| refuse(&e))?;
+                if !self.user_roots.holds(at.path()) {
                     return Err(refuse(CATALOG_REFUSED));
                 }
             }
+            // The browser's catalogs are named entries in its own storage.
+            #[cfg(target_arch = "wasm32")]
+            Command::OpenCatalog(_) | Command::SwitchCatalog(_) | Command::NewCatalog(_) => {}
             Command::OpenFolder(p) => {
                 if !self.user_roots.holds(&p.path) {
                     return Err(refuse(
@@ -139,8 +264,7 @@ impl App {
             }
             // These act on the open folder's photos (a folder the user or a
             // check above chose) or on nothing on disk.
-            Command::SwitchCatalog(_)
-            | Command::View(_)
+            Command::View(_)
             | Command::Zoom(_)
             | Command::Filter(_)
             | Command::Sort(_)
@@ -172,29 +296,23 @@ impl App {
     fn agent_export(&mut self, p: ExportParams) -> Result<Outcome, CommandError> {
         let refuse = |reason: String| CommandError::Failed { reason };
         self.check(&Command::Export(p.clone()))?;
-        let form_folder = match &self.export_settings().target {
+        let form_folder: Option<PathBuf> = match &self.export_settings().target {
             #[cfg(not(target_arch = "wasm32"))]
             ExportTarget::Folder(FolderChoice::Custom(dir)) => Some(dir.clone()),
             _ => None,
         };
-        let roots: Vec<PathBuf> = self
-            .user_roots
-            .0
-            .iter()
-            .cloned()
-            .chain(form_folder)
-            .collect();
+        let confine = ExportConfine::new(self.user_roots.clone(), form_folder.as_deref());
         let Ok(settings) = confine_agent_export(
             p.settings,
             self.export_settings(),
             self.folder_sel.as_deref(),
-            &roots,
+            &confine,
         ) else {
             return Err(refuse(self.refuse_agent_export()));
         };
         let paths = self.resolve(&p.photos)?;
         let pending = self
-            .export_with(paths.clone(), Some(settings), Some(&roots))
+            .export_with(paths.clone(), Some(settings), Some(&confine))
             .map_err(refuse)?;
         self.request_redraw();
         Ok(Outcome {
@@ -210,72 +328,84 @@ impl App {
         EXPORT_REFUSED.into()
     }
 
-    /// Opens a catalog inside the user's roots whose folders all are too, so
-    /// opening it (and any later launch restore of it) reaches no folder the
-    /// user never chose. It adds no roots.
+    /// Opens a catalog inside the user's roots that passes
+    /// [`agent_may_use`](Self::agent_may_use). It adds no roots.
     #[cfg(not(target_arch = "wasm32"))]
     fn agent_open_catalog(&mut self, path: &Path) -> Result<(), String> {
         let at = super::catalog::catalog_ref_for(path)?;
         if !self.user_roots.holds(at.path()) {
             return Err(CATALOG_REFUSED.into());
         }
-        let catalog = crate::persist::catalog::Catalog::open(at).map_err(|e| e.to_string())?;
-        if let Some(dir) = catalog.folders().iter().find(|d| !self.user_roots.holds(d)) {
-            return Err(format!(
-                "an agent can open only a catalog whose folders the user opened, and \
-                 this one lists {}",
-                dir.display()
-            ));
+        self.agent_switch_to(at)
+    }
+
+    /// `catalog.switch` by name, under the same rule as `catalog.open`
+    /// except where the catalog itself lives: one opened before or the
+    /// default one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn agent_switch_catalog(&mut self, name: &str) -> Result<(), String> {
+        if name == self.catalog.name() {
+            return Ok(());
         }
+        let at = self.catalog_named(name)?;
+        self.agent_switch_to(at)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn agent_switch_to(&mut self, at: crate::persist::catalog::CatalogRef) -> Result<(), String> {
+        let catalog = crate::persist::catalog::Catalog::open(at).map_err(|e| e.to_string())?;
+        self.agent_may_use(&catalog)?;
         self.switch_catalog(catalog);
+        // The restore it ran must have stayed inside the roots; if not, put
+        // nothing on screen rather than the folder it reached.
+        if let Some(dir) = self.folder_sel.clone() {
+            if !self.user_roots.holds(&dir) {
+                self.close_folder();
+                return Err(format!("{} is not a folder the user opened", dir.display()));
+            }
+        }
         Ok(())
     }
 
-    /// The browser's catalogs live in its own storage; an agent switches
-    /// among them by name only.
-    #[cfg(target_arch = "wasm32")]
-    fn agent_open_catalog(&mut self, _path: &Path) -> Result<(), String> {
-        Err(CATALOG_REFUSED.into())
+    /// Whether an agent may switch to `catalog`: every folder it lists, and
+    /// the folder switching to it would reopen, is inside the user's roots,
+    /// so neither opening it nor a later launch restore of it reaches a
+    /// folder the user never chose.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn agent_may_use(&self, catalog: &crate::persist::catalog::Catalog) -> Result<(), String> {
+        let restored =
+            super::session::to_restore(self.session.as_ref(), catalog.folders(), Path::is_dir)
+                .and_then(|session| session.dir);
+        let outside = catalog
+            .folders()
+            .iter()
+            .chain(restored.as_ref())
+            .find(|dir| !self.user_roots.holds(dir));
+        match outside {
+            Some(dir) => Err(format!(
+                "an agent can open only a catalog whose folders the user opened, and \
+                 this one reaches {}",
+                dir.display()
+            )),
+            None => Ok(()),
+        }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const CATALOG_REFUSED: &str = "an agent can make or open a catalog only inside a folder the \
                                user opened";
-
-/// Where `catalog.new` would put the catalog at `path`.
-#[cfg(not(target_arch = "wasm32"))]
-fn agent_catalog_path(path: &Path) -> Result<PathBuf, String> {
-    super::catalog::catalog_ref_for(path).map(|at| at.path().to_path_buf())
-}
-
-/// The browser's catalogs live in its own storage, so no path is the
-/// user's there and `catalog.new` is refused.
-#[cfg(target_arch = "wasm32")]
-fn agent_catalog_path(_path: &Path) -> Result<PathBuf, String> {
-    Err(CATALOG_REFUSED.into())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) fn within_any(dir: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| crate::paths::is_within(dir, root))
-}
-
-/// The browser names no folder by path: it reaches only the picked one.
-#[cfg(target_arch = "wasm32")]
-pub(super) fn within_any(_dir: &Path, _roots: &[PathBuf]) -> bool {
-    false
-}
 
 /// The settings an agent's `export` runs with, or why it may not run. An
 /// agent picks the size, format, sharpening and naming. The rest is the
 /// form's: the album, the copyright, and whether location and identity data
 /// stay in (only when the form keeps them too). The destination must be
-/// inside `roots`, or Immich when the form uploads there.
+/// inside `confine`, or Immich when the form uploads there.
 pub(super) fn confine_agent_export(
     given: Option<ExportSettings>,
     form: &ExportSettings,
     open_folder: Option<&Path>,
-    roots: &[PathBuf],
+    confine: &ExportConfine,
 ) -> Result<ExportSettings, String> {
     let mut settings = given.unwrap_or_else(|| form.clone());
     settings.keep = Keep {
@@ -289,15 +419,15 @@ pub(super) fn confine_agent_export(
         // The browser writes only into the picked folder's own Exports.
         #[cfg(target_arch = "wasm32")]
         ExportTarget::Folder(FolderChoice::ExportsSubfolder) => {
-            let _ = (open_folder, roots);
+            let _ = (open_folder, confine);
             true
         }
         #[cfg(not(target_arch = "wasm32"))]
         ExportTarget::Folder(FolderChoice::ExportsSubfolder) => {
-            open_folder.is_some_and(|dir| within_any(&dir.join(crate::export::EXPORTS_DIR), roots))
+            open_folder.is_some_and(|dir| confine.holds(&dir.join(crate::export::EXPORTS_DIR)))
         }
         #[cfg(not(target_arch = "wasm32"))]
-        ExportTarget::Folder(FolderChoice::Custom(dir)) => within_any(dir, roots),
+        ExportTarget::Folder(FolderChoice::Custom(dir)) => confine.holds(dir),
     };
     if !allowed {
         return Err(EXPORT_REFUSED.into());
@@ -312,6 +442,76 @@ mod tests {
     use crate::app::test_support::temp_folder;
     use crate::export::AlbumChoice;
 
+    #[test]
+    fn a_root_is_stored_absolute_and_a_relative_root_holds_nothing() {
+        let mut roots = UserRoots::default();
+        roots.add(Path::new("."), false);
+        let saved = serde_json::to_string(&roots.0).unwrap();
+        assert!(!saved.contains("\".\""), "{saved}");
+        let cwd = std::env::current_dir().unwrap();
+        assert!(!crate::paths::is_within(&cwd.join("src"), Path::new(".")));
+    }
+
+    #[test]
+    fn a_root_inside_another_is_one_root() {
+        let root = temp_folder("agent-nested");
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        let mut roots = UserRoots::default();
+        roots.add(&root.join("a"), false);
+        roots.add(&root, false);
+        roots.add(&root.join("a/b"), false);
+        assert_eq!(roots.0.len(), 1, "the outer root covers the rest");
+        assert!(roots.holds(&root.join("a/b")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_cannot_be_made_fails_the_agents_export() {
+        let root = temp_folder("agent-nomake");
+        let photo = root.join("a.jpg");
+        std::fs::write(&photo, []).unwrap();
+        std::fs::write(root.join("blocker"), []).unwrap();
+        let mut app = App::new(None);
+        app.start_exporter();
+        let settings = ExportSettings {
+            target: ExportTarget::Folder(FolderChoice::Custom(root.join("blocker/new"))),
+            ..ExportSettings::default()
+        };
+        let confine = confine_to(&root);
+        let started = app.export_with(vec![photo], Some(settings), Some(&confine));
+        assert!(started.is_err(), "{started:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Exports held to `root` alone.
+    fn confine_to(root: &Path) -> ExportConfine {
+        let mut roots = UserRoots::default();
+        roots.add(root, false);
+        ExportConfine::new(roots, None)
+    }
+
+    fn nowhere() -> ExportConfine {
+        ExportConfine::new(UserRoots::default(), None)
+    }
+
+    #[test]
+    fn a_photos_folder_is_a_shallow_root() {
+        let root = temp_folder("agent-shallow");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let mut roots = UserRoots::default();
+        roots.add(&root, true);
+        assert!(roots.holds(&root));
+        assert!(roots.holds(&root.join("Exports/web")), "its Exports");
+        assert!(!roots.holds(&root.join("sub")), "not the folders inside it");
+        roots.add(&root.join("sub"), true);
+        assert_eq!(roots.0.len(), 2, "a shallow root covers no other folder");
+        roots.add(&root, false);
+        assert_eq!(roots.0.len(), 1, "opening the folder itself covers both");
+        assert!(roots.holds(&root.join("sub")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn to(target: ExportTarget) -> ExportSettings {
         ExportSettings {
             target,
@@ -322,7 +522,7 @@ mod tests {
     #[test]
     fn an_agent_exports_only_where_the_user_would() {
         let folder = temp_folder("agent-export");
-        let roots = vec![folder.clone()];
+        let roots = confine_to(&folder);
         let form = ExportSettings::default();
         let confine = |given| confine_agent_export(Some(given), &form, Some(&folder), &roots);
         let custom = |dir: PathBuf| to(ExportTarget::Folder(FolderChoice::Custom(dir)));
@@ -343,7 +543,7 @@ mod tests {
         );
 
         let immich = to(ExportTarget::Immich);
-        assert!(confine_agent_export(None, &immich, None, &[]).is_ok());
+        assert!(confine_agent_export(None, &immich, None, &nowhere()).is_ok());
         let _ = std::fs::remove_dir_all(&folder);
         let _ = std::fs::remove_dir_all(&other);
     }
@@ -362,11 +562,8 @@ mod tests {
             target: ExportTarget::Folder(FolderChoice::Custom(root.join("link/new"))),
             ..ExportSettings::default()
         };
-        let started = app.export_with(
-            vec![photo],
-            Some(settings),
-            Some(std::slice::from_ref(&root)),
-        );
+        let confine = confine_to(&root);
+        let started = app.export_with(vec![photo], Some(settings), Some(&confine));
         assert!(started.is_err(), "{started:?}");
         assert!(!outside.join("new").exists(), "made outside the roots");
         let _ = std::fs::remove_dir_all(&root);
@@ -392,7 +589,7 @@ mod tests {
             copyright: "© someone else".into(),
             ..form.clone()
         };
-        let got = confine_agent_export(Some(asks), &form, None, &[]).unwrap();
+        let got = confine_agent_export(Some(asks), &form, None, &nowhere()).unwrap();
         assert_eq!(got.album, form.album);
         assert_eq!(got.copyright, form.copyright);
     }
@@ -408,13 +605,14 @@ mod tests {
             location: true,
             identity: true,
         };
-        let stripped = confine_agent_export(Some(immich(all)), &immich(Keep::NONE), None, &[]);
+        let stripped =
+            confine_agent_export(Some(immich(all)), &immich(Keep::NONE), None, &nowhere());
         assert_eq!(stripped.map(|s| s.keep), Ok(Keep::NONE));
         let location = Keep {
             location: true,
             identity: false,
         };
-        let kept = confine_agent_export(Some(immich(all)), &immich(location), None, &[]);
+        let kept = confine_agent_export(Some(immich(all)), &immich(location), None, &nowhere());
         assert_eq!(kept.map(|s| s.keep), Ok(location));
     }
 }

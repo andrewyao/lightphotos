@@ -277,6 +277,12 @@ impl App {
         if name == self.catalog.name() {
             return Ok(());
         }
+        let at = self.catalog_named(name)?;
+        self.open_catalog_ref(at)
+    }
+
+    /// The catalog `name` means: one opened before, or the default one.
+    pub(super) fn catalog_named(&self, name: &str) -> Result<CatalogRef, String> {
         let known = self
             .recent_catalogs
             .iter()
@@ -287,10 +293,9 @@ impl App {
                 .then(|| CatalogRef::in_dir(&default_dir()?, DEFAULT_NAME).ok())
                 .flatten()
         };
-        let at = known.or_else(default).ok_or_else(|| {
+        known.or_else(default).ok_or_else(|| {
             format!("no catalog named {name} has been opened; give its path to catalog.open")
-        })?;
-        self.open_catalog_ref(at)
+        })
     }
 
     /// New Catalog…: a save dialog in the catalog folder, then a switch.

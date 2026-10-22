@@ -7,8 +7,7 @@ use std::sync::mpsc::Receiver;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
-#[cfg(not(target_arch = "wasm32"))]
-use super::agent::within_any;
+use super::agent::ExportConfine;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::export::immich::{Account, Album, ImmichServer};
 #[cfg(not(target_arch = "wasm32"))]
@@ -310,7 +309,7 @@ impl App {
         &mut self,
         paths: Vec<PathBuf>,
         settings: Option<ExportSettings>,
-        confine: Option<&[PathBuf]>,
+        confine: Option<&ExportConfine>,
     ) -> Result<bool, String> {
         let saved = settings.map(|given| std::mem::replace(&mut self.exports.settings, given));
         let nothing_selected = crate::i18n::t().export_nothing_selected;
@@ -491,7 +490,7 @@ impl App {
     pub(super) fn start_export(
         &mut self,
         paths: Vec<PathBuf>,
-        _confine: Option<&[PathBuf]>,
+        _confine: Option<&ExportConfine>,
     ) -> Result<(), String> {
         self.start_web_export(paths);
         Ok(())
@@ -658,7 +657,7 @@ impl App {
     pub(super) fn start_export(
         &mut self,
         paths: Vec<PathBuf>,
-        confine: Option<&[PathBuf]>,
+        confine: Option<&ExportConfine>,
     ) -> Result<(), String> {
         let Some(exporter) = self.exports.exporter.as_ref() else {
             return Ok(());
@@ -687,17 +686,15 @@ impl App {
                 let Some(dir) = self.export_folder() else {
                     return Ok(());
                 };
-                let outside = |dir: &Path| confine.is_some_and(|roots| !within_any(dir, roots));
+                let outside = |dir: &Path| confine.is_some_and(|c| !c.holds(dir));
                 if outside(&dir) {
                     return Err(self.refuse_agent_export());
                 }
                 if let Err(e) = std::fs::create_dir_all(&dir) {
-                    self.set_status(
-                        StatusKind::Error,
-                        (crate::i18n::t().export_no_folder)(&e.to_string()),
-                    );
+                    let why = (crate::i18n::t().export_no_folder)(&e.to_string());
+                    self.set_status(StatusKind::Error, why.clone());
                     self.request_redraw();
-                    return Ok(());
+                    return Err(why);
                 }
                 if outside(&dir) {
                     return Err(self.refuse_agent_export());
