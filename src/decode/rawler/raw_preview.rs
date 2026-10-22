@@ -140,19 +140,11 @@ fn decode_raw_preview(
     super::normalize_linear_levels(&mut raw)?;
     super::apply_fuji_dynamic_range_gain(&mut raw, source.buf());
     // A file smaller than its sensor (a lossy RAW) asked for too little.
-    // Asking again for the whole amount, rather than the difference while
-    // holding the first grant, keeps two decodes from each waiting on the
-    // other.
+    // The grant grows in place, keeping its place ahead of new requests
+    // while this decode holds the sensor buffer; one already at the whole
+    // budget stays as it is.
     #[cfg(target_arch = "wasm32")]
-    let _grant = {
-        let needed = scratch_estimate(&raw, mode);
-        if needed > grant.bytes() {
-            drop(grant);
-            crate::decode::decode_budget::acquire(needed)
-        } else {
-            grant
-        }
-    };
+    let _grant = grant.grow(scratch_estimate(&raw, mode));
 
     let (w, h, rgba) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         raw.apply_scaling().map_err(|e| e.to_string())?;
