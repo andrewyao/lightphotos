@@ -103,7 +103,8 @@ enum Job {
 }
 
 /// Which [`Loader::forget_loupe_decodes`] era a Loupe decode was asked for
-/// in. A result from an earlier one was decoded under the old settings.
+/// in. A result from an earlier one was decoded under the old settings, or,
+/// for a full decode, asked for before [`Loader::drop_fulls`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Generation(u64);
 
@@ -791,7 +792,7 @@ pub struct Loader {
 
     limits: CacheLimits,
 
-    // Full-resolution tier. `order` is insertion order for LRU eviction.
+    // Full-resolution tier. `order` runs from least to most recently used.
     cache: HashMap<PathBuf, Arc<DecodedImage>>,
     order: VecDeque<PathBuf>,
     inflight: HashSet<PathBuf>,
@@ -865,8 +866,11 @@ pub struct Loader {
     /// fails and the browser's Web Worker pool decodes instead.
     workers: usize,
 
-    /// Stamped on every Loupe decode job; see [`Generation`].
+    /// Stamped on every Speed and Preview job; see [`Generation`].
     generation: Generation,
+    /// Stamped on every Full job. `drop_fulls` moves it on alone, so leaving
+    /// the Loupe drops a running full decode and keeps its previews.
+    full_generation: Generation,
 }
 
 /// What one `Loader::poll_all` drained from the workers.
@@ -964,6 +968,7 @@ impl Loader {
             res_tx,
             workers: started,
             generation: Generation::default(),
+            full_generation: Generation::default(),
         }
     }
 
@@ -1063,7 +1068,11 @@ impl Loader {
         if self.cache.contains_key(&path) || self.inflight.contains(&path) {
             return;
         }
-        if self.enqueue(Job::Full(path.clone(), self.full_target, self.generation)) == Enqueued::Yes
+        if self.enqueue(Job::Full(
+            path.clone(),
+            self.full_target,
+            self.full_generation,
+        )) == Enqueued::Yes
         {
             self.inflight.insert(path);
         }
@@ -1410,18 +1419,12 @@ impl Loader {
     }
 
     /// Forgets every Loupe decode, cached, queued or running, for a setting
-    /// that changes how photos decode. The next request decodes afresh; a
-    /// decode already running finishes and its result is dropped.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "only macOS has a decode setting")
-    )]
+    /// that changes how photos decode or for a folder change. The next
+    /// request decodes afresh; a decode already running finishes and its
+    /// result is dropped.
     pub fn forget_loupe_decodes(&mut self) {
         self.generation = Generation(self.generation.0.wrapping_add(1));
-        self.cache.clear();
-        self.order.clear();
-        self.inflight.clear();
-        self.embedded_fulls.clear();
+        self.drop_fulls();
         self.preview_cache.clear();
         self.speed_cache.clear();
         self.preview_order.clear();
@@ -1433,7 +1436,57 @@ impl Loader {
         };
         q.speed.retain(|job| !matches!(job, Job::Speed(..)));
         q.preview.retain(|job| !matches!(job, Job::Preview(..)));
+    }
+
+    /// Forgets every full decode, cached, queued or running, for leaving the
+    /// Loupe: each one is a whole frame, up to hundreds of MB, that the Grid
+    /// never shows. Previews stay, so going back is instant. Cheap when
+    /// there is nothing to drop, so the frame loop calls it every frame
+    /// outside the Loupe.
+    pub fn drop_fulls(&mut self) {
+        if self.cache.is_empty() && self.inflight.is_empty() && self.pinned_full.is_none() {
+            return;
+        }
+        self.full_generation = Generation(self.full_generation.0.wrapping_add(1));
+        self.cache.clear();
+        self.order.clear();
+        self.inflight.clear();
+        self.embedded_fulls.clear();
+        self.pinned_full = None;
+        let Ok(mut q) = lock_queue(&self.shared) else {
+            return;
+        };
         q.full.retain(|job| !matches!(job, Job::Full(..)));
+    }
+
+    /// Marks `path`'s full decode and its preview at `target_px` as just
+    /// used, so the photo on screen is the last of the Loupe tiers to go.
+    pub fn touch(&mut self, path: &Path, target_px: u32) {
+        if self.order.back().map(PathBuf::as_path) != Some(path) {
+            if let Some(i) = self.order.iter().position(|p| p == path) {
+                if let Some(p) = self.order.remove(i) {
+                    self.order.push_back(p);
+                }
+            }
+        }
+        let is_key = |k: &(PathBuf, u32)| k.0 == path && k.1 == target_px;
+        if !self.preview_order.back().is_some_and(is_key) {
+            if let Some(i) = self.preview_order.iter().position(is_key) {
+                if let Some(k) = self.preview_order.remove(i) {
+                    self.preview_order.push_back(k);
+                }
+            }
+        }
+    }
+
+    /// Whether `photos` full decodes the size of `path`'s fit in the full
+    /// tier at once. False until `path`'s own full decode has landed.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn fulls_fit(&self, path: &Path, photos: usize) -> bool {
+        self.cache.get(path).is_some_and(|img| {
+            photos <= self.limits.fulls
+                && img.rgba.len().saturating_mul(photos) <= self.limits.full_bytes
+        })
     }
 
     /// Drops queued `Preview` decodes whose path `keep` rejects. Neighbors
@@ -1697,8 +1750,8 @@ impl Loader {
                 // which already cleared its in-flight marker.
                 JobResult::Speed(_, _, generation, ..)
                 | JobResult::Preview(_, _, generation, _)
-                | JobResult::Full(_, generation, _)
                     if generation != self.generation => {}
+                JobResult::Full(_, generation, _) if generation != self.full_generation => {}
                 JobResult::Speed(path, target, _, r, origin, whole) => {
                     let key = (path.clone(), target);
                     self.speed_inflight.remove(&key);
@@ -1792,10 +1845,17 @@ impl Loader {
             self.order.push_back(path.clone());
         }
         self.embedded_fulls.remove(&path);
-        self.cache.insert(path, img);
-        while self.order.len() > self.limits.fulls {
+        self.cache.insert(path.clone(), img);
+        let bytes = |cache: &HashMap<PathBuf, Arc<DecodedImage>>| -> usize {
+            cache.values().map(|img| img.rgba.len()).sum()
+        };
+        while self.order.len() > self.limits.fulls || bytes(&self.cache) > self.limits.full_bytes {
             let pinned = self.pinned_full.as_deref();
-            let Some(i) = self.order.iter().position(|p| Some(p.as_path()) != pinned) else {
+            let Some(i) = self
+                .order
+                .iter()
+                .position(|p| Some(p.as_path()) != pinned && *p != path)
+            else {
                 break;
             };
             if let Some(old) = self.order.remove(i) {
@@ -1820,8 +1880,8 @@ impl Loader {
         } else {
             self.embedded_previews.remove(&key);
         }
-        self.speed_cache.insert(key, img);
-        self.evict_previews();
+        self.speed_cache.insert(key.clone(), img);
+        self.evict_previews(&key);
     }
 
     fn insert_preview(&mut self, key: (PathBuf, u32), img: Arc<DecodedImage>) {
@@ -1831,13 +1891,24 @@ impl Loader {
             self.preview_order.push_back(key.clone());
         }
         self.embedded_previews.remove(&key);
-        self.preview_cache.insert(key, img);
-        self.evict_previews();
+        self.preview_cache.insert(key.clone(), img);
+        self.evict_previews(&key);
     }
 
-    fn evict_previews(&mut self) {
-        while self.preview_order.len() > self.limits.previews {
-            if let Some(old) = self.preview_order.pop_front() {
+    /// Evicts the least recently used previews down to the count and byte
+    /// caps, never `newest`, the one just filed.
+    fn evict_previews(&mut self, newest: &(PathBuf, u32)) {
+        let bytes =
+            |a: &HashMap<(PathBuf, u32), Arc<DecodedImage>>,
+             b: &HashMap<(PathBuf, u32), Arc<DecodedImage>>|
+             -> usize { a.values().chain(b.values()).map(|img| img.rgba.len()).sum() };
+        while self.preview_order.len() > self.limits.previews
+            || bytes(&self.preview_cache, &self.speed_cache) > self.limits.preview_bytes
+        {
+            let Some(i) = self.preview_order.iter().position(|k| k != newest) else {
+                break;
+            };
+            if let Some(old) = self.preview_order.remove(i) {
                 self.preview_cache.remove(&old);
                 self.speed_cache.remove(&old);
                 self.embedded_previews.remove(&old);
@@ -2670,5 +2741,127 @@ mod tests {
 
         loader.request_preview(path("preview"), 2560);
         assert!(loader.has_pending_image(), "a new request queues afresh");
+    }
+    /// Caps of `previews` and `fulls` entries, each `bytes` bytes of pixels.
+    fn byte_capped(bytes: usize) -> Loader {
+        let limits = CacheLimits {
+            preview_bytes: bytes,
+            full_bytes: bytes,
+            ..CacheLimits::PLATFORM
+        };
+        Loader::with_workers(16384, 0, limits)
+    }
+
+    /// 10 x 10 RGBA8: 400 bytes.
+    fn img400() -> Arc<DecodedImage> {
+        image(10, 10)
+    }
+
+    #[test]
+    fn the_full_tier_evicts_by_bytes_below_its_count() {
+        let mut loader = byte_capped(800);
+        for p in ["a", "b", "c"] {
+            loader.insert(path(p), img400());
+        }
+        assert!(
+            loader.get_full(&path("a")).is_none(),
+            "three would be 1200 bytes"
+        );
+        assert!(loader.get_full(&path("b")).is_some());
+        assert!(loader.get_full(&path("c")).is_some());
+    }
+
+    #[test]
+    fn one_full_decode_larger_than_the_byte_cap_still_caches() {
+        let mut loader = byte_capped(100);
+        loader.insert(path("shown"), img400());
+        loader.retain_full(path("shown"), |_| true);
+        loader.insert(path("big"), img400());
+        assert!(loader.get_full(&path("shown")).is_some(), "pinned");
+        assert!(loader.get_full(&path("big")).is_some(), "newest");
+        loader.insert(path("next"), img400());
+        assert!(loader.get_full(&path("big")).is_none());
+        assert!(loader.get_full(&path("next")).is_some());
+    }
+
+    #[test]
+    fn the_preview_tier_evicts_by_bytes_but_keeps_the_newest() {
+        let mut loader = byte_capped(800);
+        loader.insert_speed((path("a"), 2560), img400(), Origin::Decoded);
+        loader.insert_preview((path("b"), 2560), img400());
+        loader.insert_preview((path("c"), 2560), img400());
+        assert!(loader.get_preview(&path("a"), 2560).is_none());
+        assert!(loader.get_preview(&path("b"), 2560).is_some());
+        assert!(loader.get_preview(&path("c"), 2560).is_some());
+
+        let mut loader = byte_capped(100);
+        loader.insert_preview((path("huge"), 2560), img400());
+        assert!(loader.get_preview(&path("huge"), 2560).is_some());
+    }
+
+    /// Stepping back to a photo marks it used, so the neighbors that land
+    /// next evict an older one instead.
+    #[test]
+    fn touching_a_photo_keeps_it_over_older_entries() {
+        let mut loader = byte_capped(800);
+        loader.insert_preview((path("a"), 2560), img400());
+        loader.insert(path("a"), img400());
+        loader.insert_preview((path("b"), 2560), img400());
+        loader.insert(path("b"), img400());
+        loader.touch(&path("a"), 2560);
+        loader.insert_preview((path("c"), 2560), img400());
+        loader.insert(path("c"), img400());
+        assert!(loader.get_preview(&path("a"), 2560).is_some());
+        assert!(loader.get_full(&path("a")).is_some());
+        assert!(loader.get_preview(&path("b"), 2560).is_none());
+        assert!(loader.get_full(&path("b")).is_none());
+    }
+
+    /// Leaving the Loupe frees every full decode, queued and running ones
+    /// included, and keeps the previews for coming back.
+    #[test]
+    fn drop_fulls_frees_the_full_tier_and_keeps_previews() {
+        let mut loader = Loader::queue_only_for_test();
+        let results = worker_results(&mut loader);
+        loader.insert(path("cached"), image(1, 1));
+        loader.retain_full(path("cached"), |_| true);
+        loader.insert_preview((path("cached"), 2560), image(1, 1));
+        loader.request_full(path("running"));
+        let running = loader.shared.queue.lock().unwrap().full.pop_front();
+        let Some(Job::Full(_, _, running)) = running else {
+            panic!("the full decode was queued");
+        };
+        loader.request_full(path("queued"));
+
+        loader.drop_fulls();
+        assert!(loader.get_full(&path("cached")).is_none());
+        assert!(loader.get_preview(&path("cached"), 2560).is_some());
+        assert!(!loader.has_pending_image());
+        assert!(loader.shared.queue.lock().unwrap().full.is_empty());
+
+        results
+            .send(JobResult::Full(
+                path("running"),
+                running,
+                Ok(Arc::into_inner(image(1, 1)).unwrap()),
+            ))
+            .unwrap();
+        assert!(loader.poll_all().full.is_empty());
+        assert!(
+            loader.get_full(&path("running")).is_none(),
+            "landed after the drop"
+        );
+    }
+
+    #[test]
+    fn neighbor_fulls_fit_only_when_all_of_them_do() {
+        let mut loader = byte_capped(1200);
+        assert!(!loader.fulls_fit(&path("a"), 3), "not landed yet");
+        loader.insert(path("a"), img400());
+        assert!(loader.fulls_fit(&path("a"), 3));
+        let mut loader = byte_capped(1199);
+        loader.insert(path("a"), img400());
+        assert!(!loader.fulls_fit(&path("a"), 3));
+        assert!(!loader.fulls_fit(&path("a"), CacheLimits::PLATFORM.fulls + 1));
     }
 }

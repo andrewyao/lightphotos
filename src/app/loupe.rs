@@ -89,7 +89,12 @@ impl App {
     /// previous photo's zoom is still set, and the new photo fits only when
     /// its first image uploads.
     pub(super) fn full_wanted(&self) -> bool {
-        if self.want.is_none() || self.shown.path() != self.want.as_deref() {
+        // Outside the Loupe, `pump` drops every full decode, so asking for
+        // one would decode it again on every frame.
+        if self.mode != ViewMode::Loupe
+            || self.want.is_none()
+            || self.shown.path() != self.want.as_deref()
+        {
             return false;
         }
         let zoom = self.slide_view().map_or(self.zoom(), |(zoom, _)| zoom);

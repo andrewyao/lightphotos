@@ -1,26 +1,38 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! How many decoded images each `Loader` tier keeps in memory. One value per
-//! target, so a platform with less memory to spare, or a slower disk behind
-//! the thumbnail cache, is tuned here rather than in the loader.
+//! How many decoded images, and how many bytes of them, each `Loader` tier
+//! keeps in memory. One value per target, so a platform with less memory to
+//! spare, or a slower disk behind the thumbnail cache, is tuned here rather
+//! than in the loader.
 //!
-//! `LIGHTPHOTOS_CACHE_THUMBS`, `_PREVIEWS` and `_FULLS` override a target's
-//! defaults for a tuning run. The browser build has no environment, so it
-//! always gets its defaults.
+//! `LIGHTPHOTOS_CACHE_THUMBS`, `_PREVIEWS`, `_FULLS`, `_PREVIEW_MB` and
+//! `_FULL_MB` override a target's defaults for a tuning run. The browser
+//! build has no environment, so it always gets its defaults.
+
+const MIB: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CacheLimits {
     /// 512px thumbnails, about 700 KB each. A floor: the loader raises it to
     /// the grid's working set so a large grid never evicts itself.
     pub thumbs: usize,
-    /// Loupe previews, about 5 MB each (twice that for a macOS RAW, which
-    /// decodes to half floats): the current photo plus a few neighbors
-    /// either way.
+    /// Loupe previews: the current photo plus a few neighbors either way.
+    /// One is sized to the window's longest side, up to 4096 px: 45 MB at
+    /// 4096 x 2731 in RGBA8, twice that for a macOS RAW, which decodes to
+    /// half floats.
     pub previews: usize,
+    /// Most bytes of pixels the preview tier holds. Eviction stops at the
+    /// newest preview, so a single large one still caches.
+    pub preview_bytes: usize,
     /// Full-resolution decodes, a whole RGBA8 frame each (about 180 MB at
     /// 45 MP), or 8 bytes a pixel for a macOS RAW (360 MB). They only happen
-    /// on zoom, so extra entries do not help navigation.
+    /// on zoom or on a screen larger than the preview, and the loader drops
+    /// them when the Loupe closes.
     pub fulls: usize,
+    /// Most bytes of pixels the full tier holds. Eviction stops at the
+    /// newest decode and the Loupe's photo, so a single large one still
+    /// caches.
+    pub full_bytes: usize,
     /// Most decode threads the loader starts, below its default of every
     /// core but two. On wasm32 every thread's decode scratch comes out of one
     /// shared heap of at most 4 GB, which never shrinks.
@@ -28,11 +40,23 @@ pub struct CacheLimits {
 }
 
 impl CacheLimits {
+    /// Eight RGBA8 previews at 4096 px, or four half-float RAW previews.
+    #[cfg(not(target_arch = "wasm32"))]
+    const NATIVE_PREVIEW_BYTES: usize = 384 * MIB;
+
+    /// Three half-float decodes of a 48 MP RAW: the Loupe's photo and both
+    /// neighbors, which `App::request_neighbors` prefetches on a large
+    /// screen only when all three fit. A larger photo keeps fewer.
+    #[cfg(not(target_arch = "wasm32"))]
+    const NATIVE_FULL_BYTES: usize = 1152 * MIB;
+
     #[cfg(target_os = "macos")]
     pub const PLATFORM: CacheLimits = CacheLimits {
         thumbs: 256,
         previews: 8,
+        preview_bytes: Self::NATIVE_PREVIEW_BYTES,
         fulls: 3,
+        full_bytes: Self::NATIVE_FULL_BYTES,
         decode_threads: usize::MAX,
     };
 
@@ -40,7 +64,9 @@ impl CacheLimits {
     pub const PLATFORM: CacheLimits = CacheLimits {
         thumbs: 256,
         previews: 8,
+        preview_bytes: Self::NATIVE_PREVIEW_BYTES,
         fulls: 3,
+        full_bytes: Self::NATIVE_FULL_BYTES,
         decode_threads: usize::MAX,
     };
 
@@ -52,7 +78,9 @@ impl CacheLimits {
     pub const PLATFORM: CacheLimits = CacheLimits {
         thumbs: 256,
         previews: 8,
+        preview_bytes: Self::NATIVE_PREVIEW_BYTES,
         fulls: 3,
+        full_bytes: Self::NATIVE_FULL_BYTES,
         decode_threads: usize::MAX,
     };
 
@@ -64,7 +92,9 @@ impl CacheLimits {
     pub const PLATFORM: CacheLimits = CacheLimits {
         thumbs: 256,
         previews: 8,
+        preview_bytes: 256 * MIB,
         fulls: 1,
+        full_bytes: 512 * MIB,
         decode_threads: 6,
     };
 
@@ -82,10 +112,18 @@ impl CacheLimits {
                 .filter(|&n| n > 0)
                 .unwrap_or(fallback)
         };
+        let pick_mb = |key: &str, fallback: usize| {
+            var(key)
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .map_or(fallback, |mb| mb.saturating_mul(MIB))
+        };
         CacheLimits {
             thumbs: pick("LIGHTPHOTOS_CACHE_THUMBS", self.thumbs),
             previews: pick("LIGHTPHOTOS_CACHE_PREVIEWS", self.previews),
+            preview_bytes: pick_mb("LIGHTPHOTOS_CACHE_PREVIEW_MB", self.preview_bytes),
             fulls: pick("LIGHTPHOTOS_CACHE_FULLS", self.fulls),
+            full_bytes: pick_mb("LIGHTPHOTOS_CACHE_FULL_MB", self.full_bytes),
             decode_threads: pick("LIGHTPHOTOS_DECODE_THREADS", self.decode_threads),
         }
     }
@@ -106,6 +144,14 @@ mod tests {
                 ..CacheLimits::PLATFORM
             }
         );
+    }
+
+    #[test]
+    fn a_byte_override_is_read_in_megabytes() {
+        let limits = CacheLimits::PLATFORM
+            .overridden_by(|key| (key == "LIGHTPHOTOS_CACHE_FULL_MB").then(|| "64".to_string()));
+        assert_eq!(limits.full_bytes, 64 * MIB);
+        assert_eq!(limits.preview_bytes, CacheLimits::PLATFORM.preview_bytes);
     }
 
     #[test]

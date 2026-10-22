@@ -115,6 +115,7 @@ impl App {
     pub(super) fn close_folder(&mut self) {
         self.teardown_loupe_state();
         self.finish_folder_jobs();
+        self.forget_loupe_decodes();
         self.burst_scan = None;
         self.expanded_stacks.clear();
         self.playlist = None;
@@ -169,6 +170,45 @@ mod tests {
         for row in [&a, &a.join("sub"), &b, &b.join("sub")] {
             assert!(rows.contains(row), "{} not in the tree", row.display());
         }
+    }
+
+    fn one_pixel() -> std::sync::Arc<crate::decode::image_decode::DecodedImage> {
+        use crate::decode::image_decode::{DecodedImage, DecodedImageFields};
+        std::sync::Arc::new(DecodedImage::new_tracked(DecodedImageFields {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+            pixel_format: crate::decode::image_decode::PixelFormat::Srgb8,
+        }))
+    }
+
+    /// A full decode is a whole frame the Grid never shows, and another
+    /// folder never shows the old one's previews either.
+    #[test]
+    fn leaving_the_loupe_drops_fulls_and_a_new_folder_drops_previews() {
+        use crate::jobs::loader::Loader;
+        use crate::jobs::thumbnail::Origin;
+        let (a, b) = (photos("loupe-trim-a"), photos("loupe-trim-b"));
+        let mut app = App::new(None);
+        app.open(a.clone());
+        app.loader = Some(Loader::queue_only_for_test());
+        let photo = a.join("a.jpg");
+        let loader = app.loader.as_mut().unwrap();
+        loader.insert_full_external(photo.clone(), one_pixel(), Origin::Decoded);
+        loader.insert_preview_external(photo.clone(), 2560, one_pixel(), Origin::Decoded);
+
+        app.mode = ViewMode::Loupe;
+        app.pump();
+        assert!(app.loader.as_ref().unwrap().get_full(&photo).is_some());
+        app.mode = ViewMode::Grid;
+        app.pump();
+        let loader = app.loader.as_ref().unwrap();
+        assert!(loader.get_full(&photo).is_none(), "left the Loupe");
+        assert!(loader.get_preview(&photo, 2560).is_some());
+
+        app.open(b);
+        let loader = app.loader.as_ref().unwrap();
+        assert!(loader.get_preview(&photo, 2560).is_none(), "changed folder");
     }
 
     #[test]

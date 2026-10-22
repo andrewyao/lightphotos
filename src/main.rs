@@ -488,6 +488,9 @@ impl App {
                 metas,
                 exifs,
             } = loader.poll_all();
+            if self.mode != ViewMode::Loupe {
+                loader.drop_fulls();
+            }
             let any = !full.is_empty()
                 || !thumbs.is_empty()
                 || !metas.is_empty()
