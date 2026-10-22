@@ -4,12 +4,12 @@
 //! given, and bound to 127.0.0.1 only.
 //!
 //! Each TCP connection carries one JSON request per line and gets one JSON
-//! reply per line. A connection signs in first, without sending the token
-//! (`lightphotos::control_auth`), so whatever holds the port can't learn it:
+//! reply per line. A connection signs in first, and each side proves it
+//! holds the token without sending it (`lightphotos::control_auth`):
 //!
 //! ```text
-//! {"op": "hello"}                        → {"ok": true, "result": {"nonce": "…", …}}
-//! {"op": "auth", "mac": "<hex HMAC-SHA256 of lightphotos-control:<nonce>, keyed by the token>"}
+//! {"op": "hello", "nonce": "<client nonce>"}  → {"ok": true, "result": {"nonce": "<server nonce>", "proof": "…"}}
+//! {"op": "auth", "mac": "…"}                  → {"ok": true, "result": {"signed_in": true}}
 //! {"op": "run", "command": {"id": "photo.rate", "params": {"stars": 3}}}
 //! {"op": "commands" | "state" | "list" | "screenshot"}
 //! {"op": "wait", "timeout_ms": 10000}
@@ -38,7 +38,7 @@ use winit::event_loop::EventLoopProxy;
 use super::{Answer, ChannelError, Failure, Op, Payload, Reply, Request, DEFAULT_WAIT};
 use crate::command::Command;
 use crate::shell::macos_delegate::UserEvent;
-use lightphotos::control_auth;
+use lightphotos::control_auth::{self, Side};
 
 /// The longest request line. A longer one ends the connection.
 const MAX_LINE: usize = 1 << 20;
@@ -114,54 +114,48 @@ fn check_token(token: String) -> Result<String, String> {
 
 /// 32 hex characters from the OS random source.
 fn new_token() -> Result<String, String> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(|e| format!("can't make a token: {e}"))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    control_auth::random_hex::<16>().map_err(|e| format!("can't make a token: {e}"))
 }
 
-/// 64 hex characters from the OS random source: one connection's nonce.
-fn new_nonce() -> Result<String, Failure> {
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(|e| ChannelError::Failed {
-        reason: format!("can't make a sign-in nonce: {e}"),
-    })?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-}
-
-/// One connection's sign-in: the nonce it was last sent, and whether it
-/// has answered one.
+/// One connection's sign-in: the nonces of its last `hello`, and whether
+/// it has answered them.
 struct Session {
     token: Arc<str>,
-    nonce: Option<String>,
+    /// The client's nonce, then the app's.
+    nonces: Option<(String, String)>,
     signed_in: bool,
+    /// A wrong `mac` ends the connection, so each guess costs a new one.
+    closing: bool,
 }
 
 impl Session {
     fn new(token: Arc<str>) -> Session {
         Session {
             token,
-            nonce: None,
+            nonces: None,
             signed_in: false,
+            closing: false,
         }
     }
 
     /// Answers one line: a sign-in step here, a request on the main thread.
     fn answer(&mut self, line: &[u8], app: &impl Fn(Request, Reply) -> bool) -> Answer {
         match parse_request(line)? {
-            Asked::Hello => {
-                let nonce = new_nonce()?;
-                self.nonce = Some(nonce.clone());
-                Ok(Payload::Json(json!({
-                    "nonce": nonce,
-                    "mac": "hmac-sha256",
-                    "prefix": control_auth::PREFIX,
-                })))
+            Asked::Hello(client) => {
+                let server = control_auth::new_nonce().map_err(|reason| ChannelError::Failed {
+                    reason: format!("can't make a sign-in nonce: {reason}"),
+                })?;
+                let proof = control_auth::mac_hex(&self.token, Side::Server, &client, &server);
+                self.nonces = Some((client, server.clone()));
+                Ok(Payload::Json(json!({ "nonce": server, "proof": proof })))
             }
             Asked::Auth(mac) => {
-                // A nonce answers once, right or wrong.
-                let nonce = self.nonce.take().ok_or(ChannelError::AuthRequired)?;
-                self.signed_in = control_auth::verify(&self.token, &nonce, &mac);
+                // The nonces answer once, right or wrong.
+                let (client, server) = self.nonces.take().ok_or(ChannelError::AuthRequired)?;
+                self.signed_in =
+                    control_auth::verify(&self.token, Side::Client, &client, &server, &mac);
                 if !self.signed_in {
+                    self.closing = true;
                     return Err(ChannelError::BadToken.into());
                 }
                 Ok(Payload::Json(json!({ "signed_in": true })))
@@ -277,7 +271,7 @@ fn serve(
             continue;
         }
         let answer = session.answer(&line, app);
-        if write_reply(&mut writer, answer).is_err() {
+        if write_reply(&mut writer, answer).is_err() || session.closing {
             return;
         }
     }
@@ -307,7 +301,8 @@ fn read_line(reader: &mut impl BufRead) -> std::io::Result<Line> {
 /// What one line asks for.
 #[derive(Debug)]
 enum Asked {
-    Hello,
+    /// The client's nonce.
+    Hello(String),
     /// The client's MAC of the nonce, as hex.
     Auth(String),
     Op(Op),
@@ -332,7 +327,14 @@ fn parse_request(line: &[u8]) -> Result<Asked, Failure> {
         .and_then(Value::as_str)
         .ok_or_else(|| bad("missing a string `op`"))?;
     match op {
-        "hello" => return Ok(Asked::Hello),
+        "hello" => {
+            let nonce = value
+                .get("nonce")
+                .and_then(Value::as_str)
+                .filter(|n| control_auth::is_nonce(n))
+                .ok_or_else(|| bad("`hello` takes a fresh hex `nonce` of your own"))?;
+            return Ok(Asked::Hello(nonce.into()));
+        }
         "auth" => {
             let mac = value
                 .get("mac")
@@ -437,9 +439,8 @@ mod tests {
     /// A connection that has already signed in.
     fn signed_in() -> Session {
         Session {
-            token: token(),
-            nonce: None,
             signed_in: true,
+            ..Session::new(token())
         }
     }
 
@@ -514,41 +515,66 @@ mod tests {
         }
     }
 
+    const CLIENT: &str = "00ff";
+
+    fn hello(client: &str) -> String {
+        format!(r#"{{"op":"hello","nonce":"{client}"}}"#)
+    }
+
     #[test]
-    fn a_connection_must_answer_its_nonce_before_any_request() {
+    fn each_side_proves_the_token_and_a_connection_signs_in_before_any_request() {
         let mut session = Session::new(token());
         let mut say = |line: &str| json_answer(session.answer(line.as_bytes(), &fake_app));
         let auth = |mac: &str| format!(r#"{{"op":"auth","mac":"{mac}"}}"#);
-        let nonce_of =
-            |reply: Result<Value, String>| reply.unwrap()["nonce"].as_str().unwrap().to_string();
 
         assert_eq!(say(&request("state")), Err("auth_required".into()));
         assert_eq!(
             say(&auth("00")),
             Err("auth_required".into()),
-            "no nonce yet"
+            "no hello yet"
+        );
+        assert_eq!(
+            say(&request("hello")),
+            Err("bad_json".into()),
+            "no client nonce"
         );
 
-        let nonce = nonce_of(say(&request("hello")));
+        let first = say(&hello(CLIENT)).unwrap();
+        let server = first["nonce"].as_str().unwrap().to_string();
         assert!(
-            control_auth::is_nonce(&nonce) && nonce.len() == 64,
-            "{nonce}"
+            control_auth::is_nonce(&server) && server.len() == 64,
+            "{server}"
         );
-        let wrong = control_auth::mac_hex("not-the-token-at-all", &nonce);
-        assert_eq!(say(&auth(&wrong)), Err("bad_token".into()));
-        let right = control_auth::mac_hex(TOKEN, &nonce);
+        let proof = first["proof"].as_str().unwrap();
+        assert!(control_auth::verify(
+            TOKEN,
+            Side::Server,
+            CLIENT,
+            &server,
+            proof
+        ));
+        assert!(
+            !control_auth::verify(TOKEN, Side::Client, CLIENT, &server, proof),
+            "the app's proof is no client MAC"
+        );
+        assert_eq!(
+            say(&auth(proof)),
+            Err("bad_token".into()),
+            "echoing the proof back fails"
+        );
+        let right = control_auth::mac_hex(TOKEN, Side::Client, CLIENT, &server);
         assert_eq!(
             say(&auth(&right)),
             Err("auth_required".into()),
-            "a nonce answers once"
+            "the nonces answer once"
         );
-        assert_eq!(say(&request("state")), Err("auth_required".into()));
 
-        let fresh = nonce_of(say(&request("hello")));
-        assert_ne!(fresh, nonce);
-        assert_eq!(say(&auth(&right)), Err("bad_token".into()), "an old MAC");
-        let fresh = nonce_of(say(&request("hello")));
-        let mac = control_auth::mac_hex(TOKEN, &fresh);
+        let fresh = say(&hello(CLIENT)).unwrap()["nonce"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(fresh, server);
+        let mac = control_auth::mac_hex(TOKEN, Side::Client, CLIENT, &fresh);
         assert_eq!(say(&auth(&mac)).unwrap()["signed_in"], true);
         assert_eq!(say(&request("state")).unwrap()["mode"], "grid");
     }
@@ -655,6 +681,30 @@ mod tests {
     }
 
     #[test]
+    fn a_wrong_mac_closes_the_connection() {
+        let input = format!(
+            "{}\n{}\n{}\n",
+            hello(CLIENT),
+            r#"{"op":"auth","mac":"00"}"#,
+            hello(CLIENT)
+        );
+        let mut out = Vec::new();
+        serve(
+            Cursor::new(input.into_bytes()),
+            &mut out,
+            &mut Session::new(token()),
+            &fake_app,
+        );
+        let replies: Vec<Value> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(replies.len(), 2, "nothing after the wrong mac: {replies:?}");
+        assert_eq!(replies[1]["error"]["error"], "bad_token");
+    }
+
+    #[test]
     fn a_too_long_line_is_refused_and_the_connection_closes() {
         let input = format!("{}\n{}\n", "x".repeat(MAX_LINE + 10), request("state"));
         let replies = replies(&input);
@@ -686,11 +736,11 @@ mod tests {
         serde_json::from_str(&reply).unwrap()
     }
 
-    /// Signs `stream` in as a client does: `hello`, then the nonce's MAC.
+    /// Signs `stream` in as a client does: `hello`, then the MAC of both nonces.
     fn sign_in(stream: &mut TcpStream) {
-        let hello = ask_line(stream, &request("hello"));
-        let nonce = hello["result"]["nonce"].as_str().unwrap();
-        let mac = control_auth::mac_hex(TOKEN, nonce);
+        let reply = ask_line(stream, &hello(CLIENT));
+        let server = reply["result"]["nonce"].as_str().unwrap();
+        let mac = control_auth::mac_hex(TOKEN, Side::Client, CLIENT, server);
         let auth = ask_line(stream, &format!(r#"{{"op":"auth","mac":"{mac}"}}"#));
         assert_eq!(auth["ok"], true, "{auth}");
     }
@@ -701,7 +751,7 @@ mod tests {
         loop {
             // A refused connection may close before the request is written.
             let mut again = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-            let _ = again.write_all(format!("{}\n", request("hello")).as_bytes());
+            let _ = again.write_all(format!("{}\n", hello(CLIENT)).as_bytes());
             let mut reply = String::new();
             let _ = BufReader::new(again).read_line(&mut reply);
             if reply.contains(r#""ok":true"#) {

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+use lightphotos::control_auth::{self, Side};
 use lightphotos::decode::image_decode;
 use lightphotos::decode::image_encode::{self, Encoding, Pixels};
 use lightphotos::sidecar::{self, Flag};
@@ -317,6 +318,7 @@ fn fake_app(png: Vec<u8>) -> (u16, Arc<Mutex<Vec<Value>>>) {
             let mut stream = stream.unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut signed_in = false;
+            let mut client = String::new();
             loop {
                 let mut line = String::new();
                 if reader.read_line(&mut line).unwrap_or(0) == 0 {
@@ -327,10 +329,14 @@ fn fake_app(png: Vec<u8>) -> (u16, Arc<Mutex<Vec<Value>>>) {
                     log.lock().unwrap().push(req.clone());
                 }
                 let reply = match (signed_in, req["op"].as_str()) {
-                    (_, Some("hello")) => json!({ "ok": true, "result": { "nonce": NONCE } }),
+                    (_, Some("hello")) => {
+                        client = req["nonce"].as_str().unwrap_or("").to_string();
+                        let proof = control_auth::mac_hex(TOKEN, Side::Server, &client, NONCE);
+                        json!({ "ok": true, "result": { "nonce": NONCE, "proof": proof } })
+                    }
                     (_, Some("auth")) => {
                         let mac = req["mac"].as_str().unwrap_or("");
-                        signed_in = lightphotos::control_auth::verify(TOKEN, NONCE, mac);
+                        signed_in = control_auth::verify(TOKEN, Side::Client, &client, NONCE, mac);
                         match signed_in {
                             true => json!({ "ok": true, "result": { "signed_in": true } }),
                             false => {

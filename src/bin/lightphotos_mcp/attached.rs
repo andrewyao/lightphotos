@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
-use lightphotos::control_auth;
+use lightphotos::control_auth::{self, Side};
 
 use crate::tools::{command_request, image, text, Tool, ToolResult};
 
@@ -122,8 +122,9 @@ impl App {
         let io = |e: std::io::Error| fail(self.explain(&e, patience));
         let mut conn = Conn::open(self.port, Instant::now() + patience).map_err(io)?;
 
+        let client = control_auth::new_nonce().map_err(fail)?;
         let hello = conn
-            .line(&json!({ "op": "hello" }).to_string())
+            .line(&json!({ "op": "hello", "nonce": client }).to_string())
             .map_err(io)?;
         let hello = reply_result(&hello).map_err(|f| match f.code.as_deref() {
             // An app from before the sign-in reads `hello` as a request
@@ -135,12 +136,25 @@ impl App {
             )),
             _ => f,
         })?;
-        let nonce = hello
+        // Nothing that depends on the token goes out until the other end
+        // has shown it holds the token too.
+        let server = hello
             .get("nonce")
             .and_then(Value::as_str)
-            .filter(|n| control_auth::is_nonce(n))
-            .ok_or_else(|| fail("the app's hello reply had no usable `nonce`".into()))?;
-        let auth = json!({ "op": "auth", "mac": control_auth::mac_hex(token, nonce) });
+            .filter(|n| control_auth::is_nonce(n));
+        let proof = hello.get("proof").and_then(Value::as_str).unwrap_or("");
+        let Some(server) = server
+            .filter(|server| control_auth::verify(token, Side::Server, &client, server, proof))
+        else {
+            return Err(fail(format!(
+                "the program on 127.0.0.1:{} could not prove it holds the token, so nothing \
+                 was sent to it. Either {TOKEN_ENV} for lightphotos-mcp differs from the \
+                 app's, or something other than LightPhotos is on the port.",
+                self.port
+            )));
+        };
+        let mac = control_auth::mac_hex(token, Side::Client, &client, server);
+        let auth = json!({ "op": "auth", "mac": mac });
         reply_result(&conn.line(&auth.to_string()).map_err(io)?)?;
 
         reply_result(&conn.line(&request.to_string()).map_err(io)?)
@@ -333,11 +347,21 @@ mod tests {
     #[test]
     fn the_client_signs_in_without_sending_the_token() {
         const NONCE: &str = "00112233445566778899aabbccddeeff";
-        let (port, heard) = peer(|request| match request["op"].as_str() {
-            Some("hello") => json!({ "ok": true, "result": { "nonce": NONCE } }),
+        let client = std::sync::Mutex::new(String::new());
+        let (port, heard) = peer(move |request| match request["op"].as_str() {
+            Some("hello") => {
+                let theirs = request["nonce"].as_str().unwrap().to_string();
+                let proof = control_auth::mac_hex(TOKEN, Side::Server, &theirs, NONCE);
+                *client.lock().unwrap() = theirs;
+                json!({ "ok": true, "result": { "nonce": NONCE, "proof": proof } })
+            }
             Some("auth") => {
                 let mac = request["mac"].as_str().unwrap_or("");
-                assert!(control_auth::verify(TOKEN, NONCE, mac), "{request}");
+                let theirs = client.lock().unwrap().clone();
+                assert!(
+                    control_auth::verify(TOKEN, Side::Client, &theirs, NONCE, mac),
+                    "{request}"
+                );
                 json!({ "ok": true, "result": { "signed_in": true } })
             }
             _ => json!({ "ok": true, "result": { "mode": "grid" } }),
@@ -350,6 +374,22 @@ mod tests {
             !heard.contains(TOKEN),
             "the token crossed the socket: {heard}"
         );
+    }
+
+    #[test]
+    fn a_squatter_that_cannot_prove_the_token_gets_no_mac() {
+        let (port, heard) = peer(|request| match request["op"].as_str() {
+            Some("hello") => json!({ "ok": true, "result": { "nonce": "00ff", "proof": "00" } }),
+            _ => json!({ "ok": true, "result": { "signed_in": true } }),
+        });
+        let err = App::new(port, Some(TOKEN.into()))
+            .ask(json!({ "op": "state" }))
+            .map_err(String::from)
+            .unwrap_err();
+        assert!(err.contains("could not prove"), "{err}");
+        let heard = heard.join().unwrap();
+        assert_eq!(heard.lines().count(), 1, "only the hello: {heard}");
+        assert!(!heard.contains("mac"), "{heard}");
     }
 
     #[test]

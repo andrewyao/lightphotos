@@ -95,14 +95,19 @@ Three processes run, because lightphotos emits only half the picture by itself. 
 
 Set `LIGHTPHOTOS_CONTROL_TOKEN` (16 characters or more) to choose the token. The app then doesn't print it. Send one JSON object per line on a TCP connection. Each request gets one JSON line back.
 
-A connection signs in first. The token itself never goes over the socket, so a program that took the port before the app learns nothing it can use. Send `{"op": "hello"}`. The reply holds a fresh `nonce` (64 hex characters). Send back the HMAC-SHA256 of `lightphotos-control:<nonce>`, keyed by the token, as lowercase hex:
+A connection signs in first. The token never goes over the socket, and each side proves it holds the token before the other trusts it. Each proof is an HMAC-SHA256 keyed by the token, as lowercase hex.
+
+1. Send `{"op": "hello", "nonce": "<64 random hex characters>"}`.
+2. The reply holds the app's own `nonce` and a `proof`: the MAC of `lightphotos-control/server:<your nonce>:<app nonce>`. Check it. If it is wrong, the program on the port is not the app, or your token is wrong; send nothing more.
+3. Send `{"op": "auth", "mac": …}` with the MAC of `lightphotos-control/client:<your nonce>:<app nonce>`.
 
 ```sh
-mac=$(printf 'lightphotos-control:%s' "$nonce" | openssl dgst -sha256 -hmac "$TOKEN" | awk '{print $NF}')
+mac() { printf 'lightphotos-control/%s:%s:%s' "$1" "$client_nonce" "$app_nonce" | openssl dgst -sha256 -hmac "$TOKEN" | awk '{print $NF}'; }
+[ "$(mac server)" = "$proof" ] && mac client
 ```
 
 ```json
-{"op": "hello"}
+{"op": "hello", "nonce": "…"}
 {"op": "auth", "mac": "…"}
 {"op": "run", "command": {"id": "photo.rate", "params": {"stars": 3}}}
 {"op": "commands"}
@@ -112,7 +117,7 @@ mac=$(printf 'lightphotos-control:%s' "$nonce" | openssl dgst -sha256 -hmac "$TO
 {"op": "screenshot"}
 ```
 
-Each nonce answers one `auth`, right or wrong. A wrong `mac` gets `bad_token`; send `hello` again to retry. A request before the sign-in gets `auth_required`. A request that carries a `token`, as clients before the sign-in did, gets `raw_token_refused` with a message to update the client.
+Each `hello` answers one `auth`. A wrong `mac` gets `bad_token` and closes the connection. A request before the sign-in gets `auth_required`. A request that carries a `token`, as clients before the sign-in did, gets `raw_token_refused` with a message to update the client. A program that holds the port while the app is not running gets no MAC from a client, since it can't give the proof first, so it learns nothing to test token guesses against. Any local program can still connect to the app and get a proof for a nonce of its choice, so a guessable token can be found offline: keep the token the app makes, or set 32 or more random characters.
 
 - `run` runs one command. `commands` lists every command id with an example, and every develop control with its range and current value.
 - `state` returns the view, the selection, and the current photo's rating, flag and label.
@@ -132,7 +137,7 @@ Headless, it works on one folder with no app open. Commands marked `headless` (r
 claude mcp add lightphotos -- /path/to/lightphotos-mcp --folder ~/Pictures/shoot
 ```
 
-Attached, it drives a running app through the control channel, and `screenshot` returns the window. Start the app and the server with the same token; the server signs in with it and never sends it. The app and the server must be the same version: an older server gets `raw_token_refused` from a newer app, and a newer server says the app is older. The token goes in `LIGHTPHOTOS_CONTROL_TOKEN`, not on the command line, where `ps` shows it to every user:
+Attached, it drives a running app through the control channel, and `screenshot` returns the window. Start the app and the server with the same token; the server signs in with it, never sends it, and refuses a program on the port that can't prove it holds the same token. The app and the server must be the same version: an older server gets `raw_token_refused` from a newer app, and a newer server says the app is older. The token goes in `LIGHTPHOTOS_CONTROL_TOKEN`, not on the command line, where `ps` shows it to every user:
 
 ```sh
 LIGHTPHOTOS_CONTROL_TOKEN=<32 hex characters> ./target/release/lightphotos --control 7777 ~/Pictures/shoot

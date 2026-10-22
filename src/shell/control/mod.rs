@@ -115,7 +115,7 @@ pub(crate) enum ChannelError {
     BadJson {
         reason: String,
     },
-    /// A wrong `mac` in `auth`.
+    /// A wrong `mac` in `auth`. The connection closes after it.
     BadToken,
     /// A request before the connection signed in.
     AuthRequired,
@@ -146,12 +146,12 @@ impl std::fmt::Display for ChannelError {
                 "not a request: {reason}; send one JSON object per line with an `op`"
             ),
             ChannelError::BadToken => f.write_str(
-                "wrong `mac`: sign `lightphotos-control:<nonce>` with HMAC-SHA256 keyed by \
-                 the token the app printed at startup, then send `hello` again",
+                "wrong `mac`: use the token the app printed at startup. The connection \
+                 closes; open a new one and send `hello` again",
             ),
             ChannelError::AuthRequired => f.write_str(
-                "not signed in: send {\"op\":\"hello\"} for a nonce, then \
-                 {\"op\":\"auth\",\"mac\":\"…\"} with its HMAC-SHA256 keyed by the token",
+                "not signed in: send {\"op\":\"hello\",\"nonce\":\"…\"}, then \
+                 {\"op\":\"auth\",\"mac\":\"…\"}",
             ),
             ChannelError::RawTokenRefused => f.write_str(
                 "this app no longer takes the token in a request, so nothing on the port can \
