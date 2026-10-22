@@ -210,8 +210,8 @@ mod tests {
     fn an_agent_export_outside_the_open_folder_is_refused() {
         use crate::command::{Command, ExportParams, Photos};
         use crate::export::{ExportSettings, ExportTarget, FolderChoice};
-        let (mut app, dir, photos) = crate::app::test_support::folder_app("control-export", 1);
-        app.folder_sel = Some(dir.clone());
+        let (mut app, _, photo) = user_opened("control-export");
+        let photos = vec![photo];
         let outside = crate::app::test_support::temp_folder("control-export-out");
         let export = Command::Export(ExportParams {
             photos: Photos::Named(photos),
@@ -223,8 +223,107 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         app.answer_control(live(Op::Run(Box::new(export))), tx);
         let refused = json_of(rx.try_recv().unwrap()).unwrap_err();
-        assert!(refused.contains("open folder"), "{refused}");
+        assert!(refused.contains("an agent can export only"), "{refused}");
         assert!(!app.export_running(), "no batch started");
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    /// An App where the user (not an agent) opened a folder of one photo.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn user_opened(tag: &str) -> (App, std::path::PathBuf, std::path::PathBuf) {
+        use crate::command::{Command, OpenFolderParams};
+        let dir = crate::app::test_support::temp_folder(tag);
+        let photo = dir.join("a.jpg");
+        std::fs::write(&photo, []).unwrap();
+        let mut app = App::new(None);
+        app.run(Command::OpenFolder(OpenFolderParams { path: dir.clone() }))
+            .unwrap();
+        (app, dir, photo)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn agent_runs(
+        app: &mut App,
+        cmd: crate::command::Command,
+    ) -> Result<serde_json::Value, String> {
+        let (tx, rx) = mpsc::channel();
+        app.answer_control(live(Op::Run(Box::new(cmd))), tx);
+        json_of(rx.try_recv().unwrap())
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_folder_an_agent_opened_is_no_export_root() {
+        use crate::command::{Command, ExportParams, OpenFolderParams, Photos};
+        let (mut app, user_dir, _) = user_opened("agent-root-user");
+        let elsewhere = crate::app::test_support::temp_folder("agent-root-elsewhere");
+        std::fs::write(elsewhere.join("b.jpg"), []).unwrap();
+        agent_runs(
+            &mut app,
+            Command::OpenFolder(OpenFolderParams {
+                path: elsewhere.clone(),
+            }),
+        )
+        .unwrap();
+        let export = |name: &str| {
+            Command::Export(ExportParams {
+                photos: Photos::Named(vec![name.into()]),
+                settings: None,
+            })
+        };
+        let refused = agent_runs(&mut app, export("b.jpg")).unwrap_err();
+        assert!(refused.contains("an agent can export only"), "{refused}");
+        assert!(!elsewhere.join("Exports").exists());
+
+        // Back in the folder the user opened, the same export is allowed.
+        agent_runs(
+            &mut app,
+            Command::OpenFolder(OpenFolderParams {
+                path: user_dir.clone(),
+            }),
+        )
+        .unwrap();
+        let allowed = agent_runs(&mut app, export("a.jpg"));
+        assert!(
+            !format!("{allowed:?}").contains("an agent can export only"),
+            "{allowed:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_agent_cannot_place_a_catalog_or_preset_folder_outside_the_users_folders() {
+        use crate::command::{CatalogPathParams, Command, PresetFolderParams};
+        let (mut app, _, _) = user_opened("agent-paths-user");
+        let outside = crate::app::test_support::temp_folder("agent-paths-out");
+        let catalog = outside.join("Evil.lightphotos");
+        let made = agent_runs(
+            &mut app,
+            Command::NewCatalog(CatalogPathParams {
+                path: catalog.clone(),
+            }),
+        );
+        assert!(made.is_err(), "{made:?}");
+        assert!(!catalog.exists(), "nothing written outside");
+        let opened = agent_runs(
+            &mut app,
+            Command::OpenCatalog(CatalogPathParams {
+                path: catalog.clone(),
+            }),
+        );
+        assert!(
+            opened.as_ref().is_err_and(|e| e.contains("an agent")),
+            "{opened:?}"
+        );
+        let presets = agent_runs(
+            &mut app,
+            Command::AddPresetFolder(PresetFolderParams {
+                path: outside.clone(),
+            }),
+        );
+        assert!(
+            presets.as_ref().is_err_and(|e| e.contains("an agent")),
+            "{presets:?}"
+        );
     }
 }
