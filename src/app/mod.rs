@@ -855,9 +855,7 @@ impl App {
                 eprintln!("[lightphotos] could not save the RAW tone curve: {e}");
             }
         }
-        if let Some(loader) = self.loader.as_mut() {
-            loader.forget_loupe_decodes();
-        }
+        self.forget_loupe_decodes();
         // The old pixels stay up as the placeholder, so the photo doesn't
         // flash to its thumbnail, and whichever decode lands next replaces
         // them.
@@ -1236,7 +1234,7 @@ impl App {
     fn seed_mirrors(&mut self, playlist: &Playlist) {
         self.finish_folder_jobs();
         if self.playlist.as_ref().map(Playlist::dir) != Some(playlist.dir()) {
-            self.forget_loupe_decodes();
+            self.forget_folder_decodes();
             self.expanded_stacks.clear();
             self.thumb_aspect.clear();
             // Read from the files, which may change while the user is away.
@@ -1248,12 +1246,22 @@ impl App {
         self.request_folder_store_load(playlist.dir());
     }
 
-    /// Drops the Loupe tiers' decodes and what they hold, which another
-    /// folder never shows. `sync_loupe_tiers` sets the hold again from the
-    /// new folder's photos.
+    /// Drops every Loupe decode, cached, queued or running, and has the
+    /// Compare tiles waiting on a full ask again, since the one they wait on
+    /// is gone. The one way to forget them, so the two cannot come apart.
     fn forget_loupe_decodes(&mut self) {
         if let Some(loader) = self.loader.as_mut() {
             loader.forget_loupe_decodes();
+        }
+        self.forget_compare_fulls_waiting();
+    }
+
+    /// [`App::forget_loupe_decodes`] for a folder change or close, which
+    /// also drops what the tiers hold: another folder never shows it.
+    /// `sync_loupe_tiers` sets the hold again from the new folder's photos.
+    fn forget_folder_decodes(&mut self) {
+        self.forget_loupe_decodes();
+        if let Some(loader) = self.loader.as_mut() {
             loader.set_hold(Default::default());
         }
     }
