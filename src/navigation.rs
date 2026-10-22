@@ -7,6 +7,7 @@ use crate::decode::image_decode::is_image_extension;
 use crate::sidecar::Flag;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
@@ -207,7 +208,12 @@ fn group_by_time(times: &[Option<SystemTime>], gap: Duration) -> Vec<u32> {
 /// The kind comes from the directory listing, so a folder of 10k photos
 /// costs no `stat` per entry. Only a symlink, or a listing without the
 /// kind, is stat'ed, so a link counts as what it leads to.
-fn read_dir_paths(dir: &Path, kind: EntryKind, keep_name: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+/// Each kept path comes with whether the listing says it is a symlink.
+fn read_dir_paths(
+    dir: &Path,
+    kind: EntryKind,
+    keep_name: impl Fn(&Path) -> bool,
+) -> Vec<(PathBuf, bool)> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -224,7 +230,8 @@ fn read_dir_paths(dir: &Path, kind: EntryKind, keep_name: impl Fn(&Path) -> bool
                 EntryKind::Dir => p.is_dir(),
             },
         })
-        .map(|(p, _)| p)
+        // A listing without the kind counts as a link, so it is checked.
+        .map(|(p, ft)| (p, ft.map_or(true, |ft| ft.is_symlink())))
         .collect()
 }
 
@@ -257,10 +264,17 @@ fn cmp_name_key(name: Option<&OsStr>, key: Option<&str>) -> std::cmp::Ordering {
 }
 
 #[hotpath::measure]
-fn sorted_images_in(dir: &Path) -> Vec<PathBuf> {
-    let mut entries = read_dir_paths(dir, EntryKind::File, is_image_extension);
+/// The images in `dir`, sorted, and which of them are symlinks.
+fn sorted_images_in(dir: &Path) -> (Vec<PathBuf>, HashSet<PathBuf>) {
+    let listed = read_dir_paths(dir, EntryKind::File, is_image_extension);
+    let links = listed
+        .iter()
+        .filter(|(_, link)| *link)
+        .map(|(p, _)| p.clone())
+        .collect();
+    let mut entries: Vec<PathBuf> = listed.into_iter().map(|(p, _)| p).collect();
     sort_by_name(&mut entries);
-    entries
+    (entries, links)
 }
 
 /// Whether a folder named `name` shows in the folder tree. Hides dot-folders
@@ -287,11 +301,14 @@ pub fn is_listable_subdir(name: &str) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 #[hotpath::measure]
 pub fn list_subdirs(dir: &Path) -> Vec<PathBuf> {
-    let mut entries = read_dir_paths(dir, EntryKind::Dir, |p| {
+    let mut entries: Vec<PathBuf> = read_dir_paths(dir, EntryKind::Dir, |p| {
         p.file_name()
             .and_then(|s| s.to_str())
             .is_some_and(is_listable_subdir)
-    });
+    })
+    .into_iter()
+    .map(|(p, _)| p)
+    .collect();
     sort_by_name(&mut entries);
     entries
 }
@@ -340,19 +357,31 @@ pub struct Playlist {
     entries: Vec<PathBuf>,
     index: usize,
     dir: PathBuf,
+    /// The entries that are symlinks, noted from the listing, so a check
+    /// for links that lead out of the folder looks only at these.
+    // The browser lists file handles, never links, so nothing reads it there.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    links: HashSet<PathBuf>,
 }
 
 impl Playlist {
+    /// The entries that are symlinks.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn links(&self) -> &HashSet<PathBuf> {
+        &self.links
+    }
+
     /// The images inside `dir`, positioned at index 0. Used when a folder is
     /// opened directly.
     #[cfg(not(target_arch = "wasm32"))]
     #[hotpath::measure]
     pub fn from_dir(dir: &Path) -> Self {
-        let entries = sorted_images_in(dir);
+        let (entries, links) = sorted_images_in(dir);
         Self {
             entries,
             index: 0,
             dir: dir.to_path_buf(),
+            links,
         }
     }
 
@@ -365,6 +394,7 @@ impl Playlist {
             entries,
             index: 0,
             dir,
+            links: HashSet::new(),
         }
     }
 
@@ -372,7 +402,7 @@ impl Playlist {
     #[hotpath::measure]
     pub fn from_file(current: &Path) -> Self {
         let dir = current.parent().unwrap_or_else(|| Path::new("."));
-        let mut entries = sorted_images_in(dir);
+        let (mut entries, mut links) = sorted_images_in(dir);
 
         // Every entry is `dir` joined with a name, so the entry with
         // `current`'s name is `current`. Only when no name matches (another
@@ -390,6 +420,12 @@ impl Playlist {
             .unwrap_or(0);
 
         if entries.is_empty() {
+            if current
+                .symlink_metadata()
+                .map_or(true, |m| m.file_type().is_symlink())
+            {
+                links.insert(current.to_path_buf());
+            }
             entries.push(current.to_path_buf());
         }
 
@@ -397,6 +433,7 @@ impl Playlist {
             entries,
             index,
             dir: dir.to_path_buf(),
+            links,
         }
     }
 
@@ -575,7 +612,22 @@ mod tests {
             entries,
             index: 0,
             dir: PathBuf::from("/f"),
+            links: HashSet::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_playlist_notes_which_photos_are_links() {
+        let dir = std::env::temp_dir().join(format!("lp-playlist-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.jpg"), []).unwrap();
+        std::os::unix::fs::symlink(dir.join("a.jpg"), dir.join("b.jpg")).unwrap();
+        let pl = Playlist::from_dir(&dir);
+        assert_eq!(pl.entries().len(), 2);
+        assert_eq!(pl.links().iter().collect::<Vec<_>>(), [&dir.join("b.jpg")]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

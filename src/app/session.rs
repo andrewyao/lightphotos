@@ -222,7 +222,11 @@ impl App {
             }
             self.load_folder(dir.clone());
         }
-        self.folder_anchor = self.restored_anchor(session.anchor.as_ref(), &root);
+        // A session saved without an anchor (by an older build, or a
+        // catalog's first folder) keeps the folder it reopened as the anchor.
+        if let Some(saved) = session.anchor.as_ref() {
+            self.folder_anchor = self.restored_anchor(saved, &root);
+        }
         self.restore_session_view(session);
     }
 
@@ -651,6 +655,32 @@ mod tests {
         assert!(
             answer.is_err(),
             "the restored anchor still holds no subfolder"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_restore_without_a_saved_anchor_anchors_the_restored_folder() {
+        use crate::command::{Command, OpenFolderParams};
+        let root = tree("anchor-unsaved");
+        let saved = Session {
+            anchor: None,
+            ..session(&root, None, SessionView::Grid)
+        };
+        let mut app = app_listing(&[&root]);
+        app.restore_session(&saved);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let open = Command::OpenFolder(OpenFolderParams {
+            path: root.join("sub"),
+        });
+        let request = crate::shell::control::Request {
+            op: crate::shell::control::Op::Run(Box::new(open)),
+            expires: web_time::Instant::now() + std::time::Duration::from_secs(60),
+        };
+        app.answer_control(request, tx);
+        assert!(
+            rx.try_recv().unwrap().is_ok(),
+            "the restored folder is the anchor"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
