@@ -152,7 +152,7 @@ fn launch(last: Option<&Path>, default_dir: Option<&Path>, legacy: &[PathBuf]) -
 /// `path` as a catalog location. A bare name means that catalog in the
 /// app's catalog folder; a path without the extension gets it.
 #[cfg(not(target_arch = "wasm32"))]
-fn catalog_ref_for(path: &Path) -> Result<CatalogRef, String> {
+pub(super) fn catalog_ref_for(path: &Path) -> Result<CatalogRef, String> {
     let bare = path.components().count() == 1 && !path.has_root();
     let path = if bare {
         default_dir()

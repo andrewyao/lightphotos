@@ -743,6 +743,8 @@ pub(crate) struct App {
     /// The folder shown in the grid, and also the tree's keyboard cursor.
     /// Moving in the tree loads the folder in the same step.
     folder_sel: Option<PathBuf>,
+    /// What an agent may touch, and the folders the user opened.
+    agent: agent::AgentScope,
     expanded: HashSet<PathBuf>,
     /// Immediate subdirectories, listed once per folder on demand.
     subdirs: HashMap<PathBuf, Vec<PathBuf>>,
@@ -776,6 +778,7 @@ pub(crate) struct App {
 
 mod accessors;
 mod adjust;
+mod agent;
 mod autotone;
 mod bulk_delete;
 mod bursts;
@@ -1057,6 +1060,7 @@ impl App {
             launch_notice: launch.fallback,
             missing_roots,
             folder_sel: None,
+            agent: Default::default(),
             expanded: HashSet::new(),
             subdirs: HashMap::new(),
             focus: Region::Folders,
@@ -1147,6 +1151,7 @@ impl App {
                 let parent = parent.to_path_buf();
                 self.add_root(&parent);
                 self.reveal_folder(&parent);
+                self.note_opened_folder(&parent);
                 self.folder_sel = Some(parent);
             }
 
@@ -1272,6 +1277,7 @@ impl App {
         self.reset_eyes_filter();
         self.recompute_visible();
         self.clear_selection();
+        self.note_opened_folder(&dir);
         self.folder_sel = Some(dir);
         self.update_window_title();
         // `redraw` syncs textures against `grid_range` before layout updates

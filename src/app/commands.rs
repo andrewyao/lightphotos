@@ -445,7 +445,7 @@ impl App {
                 let paths = self.resolve(&p.photos)?;
                 let pending = self
                     .export_with(paths.clone(), p.settings)
-                    .map_err(|why| CommandError::Failed { reason: why.into() })?;
+                    .map_err(|why| CommandError::Failed { reason: why })?;
                 Ok(Outcome {
                     photos: paths.len(),
                     pending,

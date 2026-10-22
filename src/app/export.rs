@@ -156,62 +156,7 @@ impl Exports {
     }
 }
 
-/// The settings an agent's `export` (control channel, MCP, WebMCP) runs
-/// with, or why it may not run. An agent may pick the size, format and
-/// naming, but never a place or a disclosure the user did not choose:
-/// - the destination is the form's own, `Exports/`, or a folder under
-///   `folder` (the open folder). An Immich upload needs the form set to it.
-/// - location and identity data stay in only when the form keeps them.
-pub(super) fn confine_agent_export(
-    given: ExportSettings,
-    form: &ExportSettings,
-    folder: Option<&std::path::Path>,
-) -> Result<ExportSettings, String> {
-    use crate::export::{ExportTarget, FolderChoice};
-    // A folder export has no choice of folder on wasm.
-    #[cfg(target_arch = "wasm32")]
-    let _ = folder;
-    let allowed = given.target == form.target
-        || match &given.target {
-            ExportTarget::Folder(FolderChoice::ExportsSubfolder) => true,
-            #[cfg(not(target_arch = "wasm32"))]
-            ExportTarget::Folder(FolderChoice::Custom(dir)) => {
-                folder.is_some_and(|root| paths::is_within(dir, root))
-            }
-            ExportTarget::Immich => false,
-        };
-    if !allowed {
-        return Err(
-            "an agent can export only to the export form's destination, the \
-                    open folder's Exports folder, or a folder inside the open folder"
-                .into(),
-        );
-    }
-    let keep = crate::export::metadata::Keep {
-        location: given.keep.location && form.keep.location,
-        identity: given.keep.identity && form.keep.identity,
-    };
-    Ok(ExportSettings { keep, ..given })
-}
-
 impl App {
-    /// Runs a command an agent sent, with its export confined as
-    /// [`confine_agent_export`] says.
-    pub(crate) fn run_from_agent(
-        &mut self,
-        mut cmd: crate::command::Command,
-    ) -> Result<crate::command::Outcome, crate::command::CommandError> {
-        if let crate::command::Command::Export(p) = &mut cmd {
-            if let Some(given) = p.settings.take() {
-                let confined =
-                    confine_agent_export(given, &self.exports.settings, self.folder_sel.as_deref())
-                        .map_err(|reason| crate::command::CommandError::Failed { reason })?;
-                p.settings = Some(confined);
-            }
-        }
-        self.run(cmd)
-    }
-
     pub(crate) fn export_form_open(&self) -> bool {
         self.exports.form_open
     }
@@ -360,7 +305,7 @@ impl App {
         &mut self,
         paths: Vec<PathBuf>,
         settings: Option<ExportSettings>,
-    ) -> Result<bool, &'static str> {
+    ) -> Result<bool, String> {
         let saved = settings.map(|given| std::mem::replace(&mut self.exports.settings, given));
         let nothing_selected = crate::i18n::t().export_nothing_selected;
         let blocked = self.export_blocker().filter(|&why| why != nothing_selected);
@@ -371,7 +316,7 @@ impl App {
             self.exports.settings = saved;
         }
         match blocked {
-            Some(why) => Err(why),
+            Some(why) => Err(why.into()),
             None => Ok(self.exports.progress.is_some()),
         }
     }
@@ -725,6 +670,9 @@ impl App {
                         (crate::i18n::t().export_no_folder)(&e.to_string()),
                     );
                     self.request_redraw();
+                    return;
+                }
+                if !self.agent.export_folder_ok(&dir) {
                     return;
                 }
                 // Pick destinations one at a time so `taken` keeps same-stem
@@ -1634,70 +1582,5 @@ mod form_tests {
             painted.has(t().album_name_needed),
             "the blocker shows under Export"
         );
-    }
-}
-
-#[cfg(test)]
-#[cfg(not(target_arch = "wasm32"))]
-mod agent_export_tests {
-    use super::*;
-    use crate::app::test_support::temp_folder;
-    use crate::export::metadata::Keep;
-
-    fn to(target: ExportTarget) -> ExportSettings {
-        ExportSettings {
-            target,
-            ..ExportSettings::default()
-        }
-    }
-
-    #[test]
-    fn an_agent_exports_only_where_the_user_would() {
-        let folder = temp_folder("agent-export");
-        let form = ExportSettings::default();
-        let confine = |given| confine_agent_export(given, &form, Some(&folder));
-        let custom = |dir: PathBuf| to(ExportTarget::Folder(FolderChoice::Custom(dir)));
-
-        assert!(confine(to(ExportTarget::default())).is_ok());
-        assert!(confine(custom(folder.join("Exports/web"))).is_ok());
-        assert!(confine(custom(std::env::temp_dir())).is_err());
-        assert!(confine(custom(folder.join("../elsewhere"))).is_err());
-        assert!(confine(to(ExportTarget::Immich)).is_err());
-        assert!(
-            confine_agent_export(custom(folder.join("x")), &form, None).is_err(),
-            "no open folder, no folder under it"
-        );
-
-        let chosen = custom(std::env::temp_dir().join("chosen-in-the-form"));
-        assert!(
-            confine_agent_export(chosen.clone(), &chosen, Some(&folder)).is_ok(),
-            "the form's own folder"
-        );
-        let immich = to(ExportTarget::Immich);
-        assert!(confine_agent_export(immich.clone(), &immich, Some(&folder)).is_ok());
-        let _ = std::fs::remove_dir_all(&folder);
-    }
-
-    #[test]
-    fn an_agent_keeps_location_and_identity_only_when_the_form_does() {
-        let all = Keep {
-            location: true,
-            identity: true,
-        };
-        let asks = ExportSettings {
-            keep: all,
-            ..ExportSettings::default()
-        };
-        let stripped = confine_agent_export(asks.clone(), &ExportSettings::default(), None);
-        assert_eq!(stripped.map(|s| s.keep), Ok(Keep::NONE));
-        let form = ExportSettings {
-            keep: Keep {
-                location: true,
-                identity: false,
-            },
-            ..ExportSettings::default()
-        };
-        let kept = confine_agent_export(asks, &form, None).map(|s| s.keep);
-        assert_eq!(kept, Ok(form.keep));
     }
 }
