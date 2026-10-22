@@ -257,45 +257,39 @@ pub fn resolve(path: &Path) -> Option<PathBuf> {
     Some(tail.iter().rev().fold(base, |p, name| p.join(name)))
 }
 
-/// Whether `dir`, which need not exist yet, is `root` or inside it once
-/// both resolve ([`resolve`]). A relative root is inside nothing.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn is_within(dir: &Path, root: &Path) -> bool {
-    if !root.is_absolute() {
-        return false;
-    }
-    match (resolve(dir), root.canonicalize()) {
-        (Some(dir), Ok(root)) => dir.starts_with(root),
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[cfg(unix)]
     #[test]
-    fn is_within_resolves_links_and_refuses_dot_dot() {
-        let root = std::env::temp_dir().join(format!("lp-within-{}", std::process::id()));
+    fn resolve_follows_links_and_refuses_dot_dot() {
+        let root = std::env::temp_dir().join(format!("lp-resolve-{}", std::process::id()));
         let outside = root.with_extension("outside");
         std::fs::create_dir_all(root.join("Exports")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let real = root.canonicalize().unwrap();
+        let real_out = outside.canonicalize().unwrap();
 
-        assert!(is_within(&root, &root));
-        assert!(is_within(&root.join("Exports"), &root));
-        assert!(is_within(&root.join("new/deeper"), &root), "need not exist");
-        assert!(!is_within(&outside, &root));
-        assert!(!is_within(&root.join("link"), &root), "a link out");
-        assert!(!is_within(&root.join("link/new"), &root));
-        assert!(!is_within(&root.join("../outside"), &root));
-        assert!(!is_within(Path::new("Exports"), &root), "relative");
-        assert!(!is_within(Path::new("/"), &root));
+        assert_eq!(resolve(&root.join("Exports")), Some(real.join("Exports")));
+        assert_eq!(
+            resolve(&root.join("new/deeper")),
+            Some(real.join("new/deeper")),
+            "need not exist"
+        );
+        assert_eq!(
+            resolve(&root.join("link/new")),
+            Some(real_out.join("new")),
+            "a link out"
+        );
+        assert_eq!(resolve(&root.join("../outside")), None);
+        assert_eq!(resolve(Path::new("Exports")), None, "relative");
         std::os::unix::fs::symlink(outside.join("missing"), root.join("dangling")).unwrap();
-        assert!(
-            !is_within(&root.join("dangling/new"), &root),
-            "a link to nothing yet still points out"
+        assert_eq!(
+            resolve(&root.join("dangling/new")),
+            None,
+            "a link to nothing yet"
         );
 
         let _ = std::fs::remove_dir_all(&root);
