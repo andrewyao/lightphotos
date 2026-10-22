@@ -318,7 +318,7 @@ const CACHE_SUFFIX: &str = ".thumb.jpg";
 pub(crate) fn cache_key(mtime_ms: u64, len: u64) -> u64 {
     let mut h = crate::hash::Fnv1a::new();
     // Bump the version to invalidate every existing entry on native and web.
-    h.write(b"lightphotos-thumb-v3");
+    h.write(b"lightphotos-thumb-v4");
     h.write(&mtime_ms.to_le_bytes());
     h.write(&len.to_le_bytes());
     h.finish()

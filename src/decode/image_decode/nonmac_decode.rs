@@ -78,26 +78,122 @@ pub fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedIma
         ))
     };
 
-    let mut img = image::DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
-    img.apply_orientation(orientation);
-    let img = img.into_rgba8();
+    let img = image::DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
+    let img = fit_and_orient(img, max_dim, orientation)?;
+    Ok(DecodedImage::new_tracked(DecodedImageFields {
+        width: img.width(),
+        height: img.height(),
+        rgba: img.into_raw(),
+        pixel_format: PixelFormat::Srgb8,
+    }))
+}
 
+/// `img` fit within `max_dim`, then turned upright by `orientation`, as
+/// RGBA8. A large shrink first box-averages whole blocks down to two to four
+/// times the target, then Lanczos3 finishes: Lanczos's kernel widens with the
+/// ratio, so going straight from 24 MP to a 512 px thumbnail read every
+/// source pixel dozens of times. The RGBA8 copy and the rotation then happen
+/// at the small size rather than the whole frame's.
+///
+/// zune-jpeg, the `image` crate's JPEG decoder, has no reduced-size IDCT, so
+/// the full frame is still decoded once.
+#[cfg(not(target_os = "macos"))]
+fn fit_and_orient(
+    img: image::DynamicImage,
+    max_dim: u32,
+    orientation: image::metadata::Orientation,
+) -> Result<image::RgbaImage, String> {
     let (src_w, src_h) = (img.width(), img.height());
     if src_w == 0 || src_h == 0 {
         return Err("decoded image has zero dimension".into());
     }
+    // `fit_within` treats both sides alike, so fitting before the rotation
+    // gives the rotated fit's size, turned.
     let (w, h) = fit_within(src_w, src_h, max_dim);
     let rgba = if (w, h) == (src_w, src_h) {
-        img.into_raw()
+        img.into_rgba8()
     } else {
-        image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3).into_raw()
+        let factor = (src_w / w.saturating_mul(2).max(1)).min(src_h / h.saturating_mul(2).max(1));
+        let img = if factor >= 2 {
+            box_shrink(img, factor)
+        } else {
+            img
+        };
+        // Lanczos3 runs faster on RGBA8 than on RGB8.
+        image::imageops::resize(
+            &img.into_rgba8(),
+            w,
+            h,
+            image::imageops::FilterType::Lanczos3,
+        )
     };
-    Ok(DecodedImage::new_tracked(DecodedImageFields {
-        width: w,
-        height: h,
-        rgba,
-        pixel_format: PixelFormat::Srgb8,
-    }))
+    let mut img = image::DynamicImage::ImageRgba8(rgba);
+    img.apply_orientation(orientation);
+    Ok(img.into_rgba8())
+}
+
+/// `img` shrunk `factor` times on each side by averaging `factor` x `factor`
+/// blocks, with the partial blocks at the right and bottom edges averaged
+/// over the pixels they have, so nothing is cropped. 8-bit images stay in
+/// their own layout; anything else becomes RGBA8 first. Should the shrunk
+/// buffer not fit its size, the unshrunk image is returned, which is only
+/// slower to resize.
+#[cfg(not(target_os = "macos"))]
+fn box_shrink(img: image::DynamicImage, factor: u32) -> image::DynamicImage {
+    use image::DynamicImage as D;
+    match img {
+        D::ImageLuma8(b) => box_shrink_buffer(&b, factor).map_or(D::ImageLuma8(b), D::ImageLuma8),
+        D::ImageLumaA8(b) => {
+            box_shrink_buffer(&b, factor).map_or(D::ImageLumaA8(b), D::ImageLumaA8)
+        }
+        D::ImageRgb8(b) => box_shrink_buffer(&b, factor).map_or(D::ImageRgb8(b), D::ImageRgb8),
+        D::ImageRgba8(b) => box_shrink_buffer(&b, factor).map_or(D::ImageRgba8(b), D::ImageRgba8),
+        other => {
+            let b = other.into_rgba8();
+            box_shrink_buffer(&b, factor).map_or(D::ImageRgba8(b), D::ImageRgba8)
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn box_shrink_buffer<P: image::Pixel<Subpixel = u8>>(
+    src: &image::ImageBuffer<P, Vec<u8>>,
+    factor: u32,
+) -> Option<image::ImageBuffer<P, Vec<u8>>> {
+    let channels = usize::from(P::CHANNEL_COUNT);
+    let (sw, sh) = (src.width() as usize, src.height() as usize);
+    let k = factor.max(1) as usize;
+    let (dw, dh) = (sw.div_ceil(k), sh.div_ceil(k));
+    let data = src.as_raw();
+    let mut out = vec![0u8; dw * dh * channels];
+    let mut sums = vec![0u64; dw * channels];
+    for (dy, out_row) in out.chunks_exact_mut(dw * channels).enumerate() {
+        sums.fill(0);
+        let y0 = dy * k;
+        let y1 = (y0 + k).min(sh);
+        for y in y0..y1 {
+            let row = &data[y * sw * channels..(y + 1) * sw * channels];
+            for (x, px) in row.chunks_exact(channels).enumerate() {
+                let at = (x / k) * channels;
+                for (s, &v) in sums[at..at + channels].iter_mut().zip(px) {
+                    *s += u64::from(v);
+                }
+            }
+        }
+        let rows = (y1 - y0) as u64;
+        for (dx, (o, s)) in out_row
+            .chunks_exact_mut(channels)
+            .zip(sums.chunks_exact(channels))
+            .enumerate()
+        {
+            let cols = ((dx + 1) * k).min(sw) - dx * k;
+            let n = rows * cols as u64;
+            for (o, &s) in o.iter_mut().zip(s) {
+                *o = ((s + n / 2) / n) as u8;
+            }
+        }
+    }
+    image::ImageBuffer::from_raw(u32::try_from(dw).ok()?, u32::try_from(dh).ok()?, out)
 }
 
 /// What the Grid's sorts and burst grouping read from `path`. The capture
@@ -332,6 +428,52 @@ pub fn orientation_of(path: &Path) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_box_shrink_averages_blocks_and_keeps_the_partial_edges() {
+        let src = image::GrayImage::from_raw(5, 3, (0..15).map(|v| v * 10).collect()).unwrap();
+        let out = box_shrink_buffer(&src, 2).unwrap();
+        assert_eq!(out.dimensions(), (3, 2));
+        // Rows 0-1 by columns 0-1, 2-3 and the lone 4; then row 2 alone.
+        assert_eq!(out.as_raw(), &vec![30, 50, 65, 105, 125, 140]);
+    }
+
+    /// Fitting before turning lands the same size and the same corners as
+    /// turning first, and the large shrink stays close to a straight
+    /// Lanczos3 of the whole frame.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn fitting_then_orienting_matches_orienting_then_fitting() {
+        use image::metadata::Orientation;
+        let src = image::RgbImage::from_fn(1200, 600, |x, y| {
+            let r = if x < 600 { 230 } else { 20 };
+            image::Rgb([r, (y * 255 / 599) as u8, ((x / 5) % 256) as u8])
+        });
+        let img = image::DynamicImage::ImageRgb8(src);
+        let fast = fit_and_orient(img.clone(), 100, Orientation::Rotate90).unwrap();
+
+        let mut slow = img;
+        slow.apply_orientation(Orientation::Rotate90);
+        let slow = image::imageops::resize(
+            &slow.into_rgba8(),
+            50,
+            100,
+            image::imageops::FilterType::Lanczos3,
+        );
+        assert_eq!(fast.dimensions(), (50, 100));
+        let diff: u64 = fast
+            .as_raw()
+            .iter()
+            .zip(slow.as_raw())
+            .map(|(&a, &b)| u64::from(a.abs_diff(b)))
+            .sum();
+        let mean = diff as f64 / fast.as_raw().len() as f64;
+        assert!(mean < 3.0, "mean abs diff {mean}");
+        // The red left half turns to the top.
+        assert!(fast.get_pixel(25, 10)[0] > 200);
+        assert!(fast.get_pixel(25, 90)[0] < 50);
+    }
 
     /// A 16x8 JPEG carrying an APP1 EXIF segment with the given fields,
     /// built the way a camera lays it out: SOI, APP1, then the image.
