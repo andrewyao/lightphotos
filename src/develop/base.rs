@@ -66,6 +66,9 @@ pub const GAUSS_WIDE: [f32; 25] = [
     0.0005551916,
 ];
 
+/// The fewest texel rows one thread's band of the layer build covers.
+const BAND_TEXEL_ROWS: u64 = 32;
+
 /// Below this the detail ratio stops trusting a luma, in gamma-2.2 units.
 const DETAIL_EPS: f32 = 1.0 / 255.0;
 
@@ -206,16 +209,21 @@ impl BaseLayer {
             })
             .collect();
 
-        // A row of cells at a time, on any thread: each sums its own texel
-        // rows top to bottom, the order base.wgsl adds them in. A texel row
-        // that straddles two cell rows is read by both.
+        // A band of cell rows at a time, on any thread. Each band sums its
+        // texel rows top to bottom, the order base.wgsl adds them in, so
+        // every cell gets the same f32 sum as a single pass. A band covers
+        // at least `BAND_TEXEL_ROWS` texel rows, so only the one texel row a
+        // band edge may split is read twice, however dense the grid.
+        let band_cells = (BAND_TEXEL_ROWS * gh64).div_ceil(h64).max(1);
         let mut sums = vec![[0f32; 3]; gw * gh];
-        super::parallel::for_each_row(&mut sums, gw, |j, cells| {
-            let j = j as u64;
+        super::parallel::for_each_chunk(&mut sums, gw * band_cells as usize, |band, cells| {
+            let j_first = band as u64 * band_cells;
+            let j_end = j_first + (cells.len() / gw) as u64;
             let mut row = vec![[0f32; 3]; w as usize];
             let mut row_sums = vec![[0f32; 3]; gw];
-            let (y0, y1) = cell_span(j, gh64, h64);
-            for y64 in y0..y1 {
+            let y_first = cell_span(j_first, gh64, h64).0;
+            let y_end = cell_span(j_end - 1, gh64, h64).1;
+            for y64 in y_first..y_end {
                 let y = y64 as u32;
                 for (x, px) in row.iter_mut().enumerate() {
                     *px = pre(x as u32, y);
@@ -229,10 +237,16 @@ impl BaseLayer {
                         }
                     }
                 }
-                let oy = overlap(y64, j, gh64, h64) as f32;
-                for (cell, rs) in cells.iter_mut().zip(&row_sums) {
-                    for c in 0..3 {
-                        cell[c] += oy * rs[c];
+                // The cell rows this texel row overlaps, within the band.
+                let j0 = (y64 * gh64 / h64).max(j_first);
+                let j1 = (((y64 + 1) * gh64 - 1) / h64).min(j_end - 1);
+                for j in j0..=j1 {
+                    let oy = overlap(y64, j, gh64, h64) as f32;
+                    let at = (j - j_first) as usize * gw;
+                    for (cell, rs) in cells[at..at + gw].iter_mut().zip(&row_sums) {
+                        for c in 0..3 {
+                            cell[c] += oy * rs[c];
+                        }
                     }
                 }
             }
