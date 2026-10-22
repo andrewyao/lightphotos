@@ -131,7 +131,7 @@ A reply is `{"ok": true, "result": …}` or `{"ok": false, "error": {"error": "<
 
 `lightphotos-mcp` is an MCP server on stdio, so an agent such as Claude Code can cull, edit and look at photos. Build it with `cargo build --release --bin lightphotos-mcp`. Its tools are `list_commands`, `run_command`, `get_state`, `list_photos`, and `screenshot` or `render`. Call `list_commands` first: it gives every command id with an example of its params.
 
-Headless, it works on one folder with no app open. Commands marked `headless` (rate, flag, label, rotate, develop, crop) write the photos' sidecars, and `render` returns a photo with its saved edits as a JPEG. Do not run it headless on a folder the app has open: the two overwrite each other's edits. Use `--attach` (below) instead, until the folder-lock work lands:
+Headless, it works on one folder with no app open. Commands marked `headless` (rate, flag, label, rotate, develop, crop) write the photos' sidecars, and `render` returns a photo with its saved edits as a JPEG. Only one program writes a folder at a time ([design](docs/design/folder-lock.md)): while the app has the folder open, a headless command that writes is refused with the app's pid and a pointer to `--attach` (below), and changes nothing; reads still work. A second app window on the same folder opens it read-only:
 
 ```sh
 claude mcp add lightphotos -- /path/to/lightphotos-mcp --folder ~/Pictures/shoot
