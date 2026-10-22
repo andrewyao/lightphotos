@@ -401,22 +401,22 @@ fn render(
     let Some(kb) = output.jpeg_limit_kb else {
         return jpeg(None);
     };
-    let sample = sample_rows(w, &rgba);
-    let sample = sample
-        .as_ref()
-        .map(|(rows, pixels)| image_encode::Prepared::new(w, *rows, Pixels::Rgba8(pixels)))
-        .transpose()?;
-    let sample_len = sample.as_ref().map(|sample| {
-        move |quality| {
-            sample
-                .encode(
-                    Encoding::Jpeg(JpegOptions { quality, preset }),
-                    Embedded::NONE,
-                )
-                .map(|bytes| bytes.len())
-        }
-    });
-    within_limit(kb, jpeg, sample_len)
+    // Built on the first call, so an export that fits at the default
+    // quality never copies the sample.
+    let sample_rgba = std::cell::OnceCell::new();
+    let sample = std::cell::OnceCell::new();
+    let sample_len = |quality| {
+        let (rows, pixels) = sample_rgba.get_or_init(|| sample_rows(w, &rgba)).as_ref()?;
+        let prepared = sample
+            .get_or_init(|| image_encode::Prepared::new(w, *rows, Pixels::Rgba8(pixels)).ok())
+            .as_ref()?;
+        let encoding = Encoding::Jpeg(JpegOptions { quality, preset });
+        prepared
+            .encode(encoding, Embedded::NONE)
+            .ok()
+            .map(|bytes| bytes.len())
+    };
+    within_limit(kb, meta.len(), jpeg, sample_len)
 }
 
 /// Rows in one band of [`sample_rows`]: two 4:2:0 MCU rows, so each band
@@ -447,6 +447,11 @@ struct FileMeta {
 }
 
 impl FileMeta {
+    /// Bytes the metadata adds to a file, whatever its pixels.
+    fn len(&self) -> usize {
+        self.exif.as_ref().map_or(0, Vec::len) + self.xmp.as_ref().map_or(0, Vec::len)
+    }
+
     fn embedded(&self) -> Embedded<'_> {
         Embedded {
             exif: self.exif.as_deref(),
@@ -462,12 +467,14 @@ impl FileMeta {
 /// A full-size encode takes hundreds of milliseconds, so `sample`, the byte
 /// count of a cheaper stand-in at a quality, picks the first quality to try.
 /// The tries after it step away from the guess, twice as far each time,
-/// until the answer is bracketed; the rest, and every try without a sample,
-/// is a bisection.
+/// until the answer is bracketed; the rest, and every try once `sample`
+/// gives `None`, is a bisection. The sample carries no metadata, so the
+/// `meta_len` bytes every encode has are left out of the guess.
 fn within_limit(
     kb: u32,
+    meta_len: usize,
     encode: impl Fn(Option<u8>) -> Result<Vec<u8>, String>,
-    sample: Option<impl Fn(Option<u8>) -> Result<usize, String>>,
+    sample: impl Fn(Option<u8>) -> Option<usize>,
 ) -> Result<Vec<u8>, String> {
     let limit = u64::from(kb) * 1024;
     let fits = |len: usize| len as u64 <= limit;
@@ -477,10 +484,12 @@ fn within_limit(
     }
     // The next quality to try off the guess, and how far past it the one
     // after goes, doubling until the answer is bracketed.
-    let mut probe = match sample {
-        Some(sample) => predict_quality(default.len(), limit, sample)?.map(|q| (q, 1u8)),
-        None => None,
-    };
+    let mut probe = predict_quality(
+        default.len().saturating_sub(meta_len),
+        limit.saturating_sub(meta_len as u64),
+        sample,
+    )
+    .map(|q| (q, 1u8));
     // Qualities run 1 to 95. `fit` fits; `over` and every quality above it
     // do not.
     let (mut fit, mut over): (Option<(u8, Vec<u8>)>, u8) = (None, 96);
@@ -518,15 +527,16 @@ fn within_limit(
 
 /// The highest quality whose `sample`, scaled by the full encode's size at
 /// the default quality over the sample's, fits `limit`. A bisection over
-/// the sample, so it costs about seven sample encodes.
+/// the sample, so it costs about seven sample encodes. `None` when the
+/// sample gives none.
 fn predict_quality(
     default_len: usize,
     limit: u64,
-    sample: impl Fn(Option<u8>) -> Result<usize, String>,
-) -> Result<Option<u8>, String> {
+    sample: impl Fn(Option<u8>) -> Option<usize>,
+) -> Option<u8> {
     let base = sample(None)?;
     if base == 0 {
-        return Ok(None);
+        return None;
     }
     let scale = default_len as f64 / base as f64;
     let (mut lo, mut hi, mut best) = (1u8, 95u8, 1u8);
@@ -541,7 +551,7 @@ fn predict_quality(
             hi = q - 1;
         }
     }
-    Ok(Some(best))
+    Some(best)
 }
 
 /// Bake the edits into the decode, shrink the result to `output.max_px` on
@@ -1214,8 +1224,8 @@ mod tests {
                     encodes.set(encodes.get() + 1);
                     Ok(vec![0u8; size(q)])
                 };
-                let sample = |q| Ok((size(q) as f64 * bias) as usize);
-                let got = within_limit(limit_kb as u32, encode, Some(sample)).ok();
+                let sample = |q| Some((size(q) as f64 * bias) as usize);
+                let got = within_limit(limit_kb as u32, 0, encode, sample).ok();
                 assert_eq!(
                     got.map(|b| b.len()),
                     best.map(|q| size(Some(q))),
@@ -1226,6 +1236,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The guess only saves encodes. A sample that cannot be made, or fails
+    /// partway, still gives the best quality, and an export that fits at the
+    /// default quality never asks for one.
+    #[test]
+    fn a_size_limit_needs_no_sample() {
+        let size = |q: Option<u8>| 1000 + usize::from(q.unwrap_or(90)) * 100;
+        let encode = |q| Ok(vec![0u8; size(q)]);
+        let best = (1..=95u8).rev().find(|&q| size(Some(q)) <= 5 * 1024);
+        let calls = std::cell::Cell::new(0);
+        let fails_partway = |q| {
+            calls.set(calls.get() + 1);
+            (calls.get() < 3).then(|| size(q) / 8)
+        };
+        for got in [
+            within_limit(5, 0, encode, |_| None),
+            within_limit(5, 0, encode, fails_partway),
+        ] {
+            assert_eq!(got.map(|b| b.len()).ok(), best.map(|q| size(Some(q))));
+        }
+
+        let asked = std::cell::Cell::new(false);
+        let sample = |q| {
+            asked.set(true);
+            Some(size(q))
+        };
+        assert!(within_limit(1000, 0, encode, sample).is_ok());
+        assert!(!asked.get(), "the default fits, so no sample is needed");
+    }
+
+    /// Metadata is the same size at every quality and the sample has none,
+    /// so it must not scale the guess. With 40 KB of EXIF, a right guess
+    /// still costs three full encodes.
+    #[test]
+    fn metadata_does_not_skew_the_guess() {
+        let meta = 40 * 1024;
+        let pixels = |q: Option<u8>| {
+            let q = usize::from(q.unwrap_or(90));
+            2000 + q * 40 + q.saturating_sub(60) * 1600
+        };
+        let encodes = std::cell::Cell::new(0);
+        let encode = |q| {
+            encodes.set(encodes.get() + 1);
+            Ok(vec![0u8; meta + pixels(q)])
+        };
+        let limit_kb = 45;
+        let best = (1..=95u8)
+            .rev()
+            .find(|&q| meta + pixels(Some(q)) <= limit_kb * 1024);
+        let got = within_limit(limit_kb as u32, meta, encode, |q| Some(pixels(q) / 8));
+
+        assert_eq!(
+            got.ok().map(|b| b.len()),
+            best.map(|q| meta + pixels(Some(q)))
+        );
+        assert_eq!(encodes.get(), 3);
     }
 
     /// Every format this build writes carries the date, the camera and the
