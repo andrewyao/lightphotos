@@ -180,18 +180,19 @@ fn decode_raw_preview(
         }));
     }
 
-    let (nw, nh) = fit_within(w, h, max_px);
-    let rgba = if (nw, nh) == (w, h) {
-        rgba
-    } else {
-        let buf = image::RgbaImage::from_raw(w, h, rgba)
-            .ok_or_else(|| "fast preview buffer size mismatch".to_string())?;
-        image::imageops::resize(&buf, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
-    };
+    // Already turned upright by `demosaic_preview`. This decode's grant
+    // covers the fit.
+    let buf = image::RgbaImage::from_raw(w, h, rgba)
+        .ok_or_else(|| "fast preview buffer size mismatch".to_string())?;
+    let img = crate::decode::image_decode::fit_decoded(
+        image::DynamicImage::ImageRgba8(buf),
+        max_px,
+        image::metadata::Orientation::NoTransforms,
+    )?;
     Ok(DecodedImage::new_tracked(DecodedImageFields {
-        width: nw,
-        height: nh,
-        rgba,
+        width: img.width(),
+        height: img.height(),
+        rgba: img.into_raw(),
         pixel_format: PixelFormat::Srgb8,
     }))
 }

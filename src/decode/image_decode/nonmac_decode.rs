@@ -53,10 +53,7 @@ pub fn read_photo(path: &Path) -> Result<Vec<u8>, String> {
 #[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedImage, String> {
-    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?;
-    let img = crate::decode::image_decode::decode_fit(reader, max_dim, None)?;
+    let img = crate::decode::image_decode::decode_fit(bytes, None, max_dim, None)?;
     Ok(DecodedImage::new_tracked(DecodedImageFields {
         width: img.width(),
         height: img.height(),

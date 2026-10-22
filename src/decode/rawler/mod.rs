@@ -26,31 +26,58 @@ use crate::decode::image_decode::{
 /// u16), checked before rawler runs. A long side alone is fine: a 40,000 px
 /// panorama decodes.
 pub fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<(), String> {
-    use rawler::decoders::WellKnownIFD;
-    use rawler::tags::TiffCommonTag;
-
-    let Some(ifd) = rawler::get_decoder(source)
-        .ok()
-        .and_then(|decoder| decoder.ifd(WellKnownIFD::Raw).ok().flatten())
+    let Some(RawIfdSize {
+        width,
+        height,
+        cpp,
+        row,
+        rows,
+    }) = raw_ifd_size(source)
     else {
         return Ok(());
     };
-    let tag = |t| ifd.get_entry(t).map(|e| e.value.force_usize(0));
-    let (Some(width), Some(height)) = (
-        tag(TiffCommonTag::ImageWidth),
-        tag(TiffCommonTag::ImageLength),
-    ) else {
-        return Ok(());
-    };
-    let cpp = tag(TiffCommonTag::SamplesPerPixel).unwrap_or(1).max(1);
-    let row = padded_to_tiles(width, tag(TiffCommonTag::TileWidth)).saturating_mul(cpp);
-    let rows = padded_to_tiles(height, tag(TiffCommonTag::TileLength));
+    let row = row.saturating_mul(cpp);
     if width == 0 || height == 0 || row.saturating_mul(rows) > 500_000_000 {
         return Err(format!(
             "{width}x{height} with {cpp} samples per pixel is too large to decode"
         ));
     }
     Ok(())
+}
+
+/// The raw image's size as its TIFF tags give it, before rawler decodes.
+struct RawIfdSize {
+    width: usize,
+    height: usize,
+    cpp: usize,
+    /// `width` and `height` padded to whole tiles.
+    row: usize,
+    rows: usize,
+}
+
+/// The raw IFD's size tags, or `None` for a format without one (CR3) or
+/// tags that are missing.
+fn raw_ifd_size(source: &rawler::rawsource::RawSource) -> Option<RawIfdSize> {
+    use rawler::decoders::WellKnownIFD;
+    use rawler::tags::TiffCommonTag;
+
+    let ifd = rawler::get_decoder(source)
+        .ok()?
+        .ifd(WellKnownIFD::Raw)
+        .ok()
+        .flatten()?;
+    let tag = |t| ifd.get_entry(t).map(|e| e.value.force_usize(0));
+    let (width, height) = (
+        tag(TiffCommonTag::ImageWidth)?,
+        tag(TiffCommonTag::ImageLength)?,
+    );
+    Some(RawIfdSize {
+        width,
+        height,
+        cpp: tag(TiffCommonTag::SamplesPerPixel).unwrap_or(1).max(1),
+        row: padded_to_tiles(width, tag(TiffCommonTag::TileWidth)),
+        rows: padded_to_tiles(height, tag(TiffCommonTag::TileLength)),
+    })
 }
 
 /// `n` rounded up to whole tiles of `tile`. Saturating, because both come
@@ -487,10 +514,25 @@ pub fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<Decoded
             return None;
         }
 
+        // One grant for the camera JPEG's decode inside rawler and the fit
+        // after it, taken first. The JPEG is about the sensor's size; a
+        // format without size tags (CR3) is guessed at a pixel a file byte,
+        // which a RAW's raw data alone exceeds.
+        #[cfg(target_arch = "wasm32")]
+        let _grant = {
+            let side = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+            let size = raw_ifd_size(&source).map_or_else(
+                || {
+                    let side_px = side((bytes.len() as f64).sqrt() as usize);
+                    (side_px, side_px)
+                },
+                |s| (side(s.width), side(s.height)),
+            );
+            crate::decode::decode_budget::acquire(crate::decode::image_decode::decoded_grant_bytes(
+                size, max_px,
+            ))
+        };
         let dynamic = decoder.full_image(&source, &params).ok().flatten()?;
-        if dynamic.width() == 0 || dynamic.height() == 0 {
-            return None;
-        }
 
         // Take orientation from the RAW metadata, as `decode_raw_nonmac`
         // does. The embedded image's own EXIF may lack it.

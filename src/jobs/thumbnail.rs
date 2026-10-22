@@ -210,12 +210,10 @@ pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<D
         .and_then(|code| u8::try_from(code).ok())
         .and_then(image::metadata::Orientation::from_exif)
         .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let reader =
-        image::ImageReader::with_format(std::io::Cursor::new(jpeg_bytes), image::ImageFormat::Jpeg);
-    let img = crate::decode::image_decode::decode_fit(reader, max_px, Some(orientation)).ok()?;
-    if img.width() == 0 || img.height() == 0 {
-        return None;
-    }
+    let format = Some(image::ImageFormat::Jpeg);
+    let img =
+        crate::decode::image_decode::decode_fit(jpeg_bytes, format, max_px, Some(orientation))
+            .ok()?;
     Some(DecodedImage::new_tracked(DecodedImageFields {
         width: img.width(),
         height: img.height(),
@@ -299,13 +297,10 @@ pub(crate) fn preview_is_large_enough(width: u32, height: u32, max_px: u32) -> b
 /// scans skip these files.
 const CACHE_SUFFIX: &str = ".thumb.jpg";
 
-/// Bump to invalidate every existing entry this build made. Per decode path:
-/// macOS thumbnails come from ImageIO, the rest from the `image` crate, and
-/// v4 marks the block-shrink resize (`image_decode::fit`), which changed
-/// only the latter. The web and native non-mac builds share a key.
-#[cfg(target_os = "macos")]
-const CACHE_KEY_VERSION: &[u8] = b"lightphotos-thumb-v3";
-#[cfg(not(target_os = "macos"))]
+/// Bump to invalidate every existing entry on native and web. Every build
+/// computes the same key, so a folder shared between them (a synced drive,
+/// or the browser build) keeps one set. v4 marks the block-shrink resize
+/// (`image_decode::fit`); macOS's ImageIO thumbnails regenerate once too.
 const CACHE_KEY_VERSION: &[u8] = b"lightphotos-thumb-v4";
 
 /// Cache key from the source's mtime and length. FNV-1a instead of
@@ -591,19 +586,14 @@ mod tests {
     }
 
     /// Thumbnails resized straight from full size by Lanczos3 are not
-    /// reused off macOS; macOS keeps its v3 entries.
+    /// reused, on any build, since every build shares one key.
     #[test]
-    fn cache_key_invalidates_full_size_lanczos_thumbnails_off_mac() {
+    fn cache_key_invalidates_full_size_lanczos_thumbnails() {
         let mut v3 = crate::hash::Fnv1a::new();
         v3.write(b"lightphotos-thumb-v3");
         v3.write(&1_000u64.to_le_bytes());
         v3.write(&4_096u64.to_le_bytes());
-        let v3 = v3.finish();
-        if cfg!(target_os = "macos") {
-            assert_eq!(cache_key(1_000, 4_096), v3);
-        } else {
-            assert_ne!(cache_key(1_000, 4_096), v3);
-        }
+        assert_ne!(cache_key(1_000, 4_096), v3.finish());
     }
 
     #[test]
