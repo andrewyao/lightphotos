@@ -19,6 +19,8 @@ use crate::sidecar::{ColorLabel, Flag, ImageRecord, StoredScore, MAX_RATING};
 use crate::sidecar::{SIDECAR_DIR, SIDECAR_EXT};
 
 pub(crate) mod group_file;
+#[cfg(not(target_arch = "wasm32"))]
+mod locks;
 mod writeback;
 pub(crate) use writeback::{changed_onto, LoadMark, Patch};
 use writeback::{WriteOp, Writeback};
@@ -47,6 +49,19 @@ pub struct FolderStore {
     /// Sidecar mutations on their way to disk. Every write goes through here,
     /// so no caller blocks a frame on the filesystem.
     writeback: Writeback,
+    /// The folder locks this store holds. See [`locks`].
+    #[cfg(not(target_arch = "wasm32"))]
+    locks: locks::Locks,
+    /// What the open folder's visit may write.
+    #[cfg(not(target_arch = "wasm32"))]
+    visit: locks::Visit,
+    /// The open folder's key, for the read-only test on each write.
+    #[cfg(not(target_arch = "wasm32"))]
+    open_key: Option<crate::sidecar::FolderKey>,
+    /// See [`FolderStore::take_lockless_notice`].
+    lockless_notice: bool,
+    /// See [`FolderStore::take_refused`].
+    refused: Vec<PathBuf>,
 
     /// The active folder's File System Access handle. wasm32 has no OS paths,
     /// so sidecar I/O goes through this.
@@ -57,6 +72,8 @@ pub struct FolderStore {
 impl FolderStore {
     /// An empty folder store with no active directory.
     pub fn new() -> FolderStore {
+        #[cfg(not(target_arch = "wasm32"))]
+        let locks = locks::Locks::default();
         FolderStore {
             images: HashMap::new(),
             groups: None,
@@ -65,7 +82,18 @@ impl FolderStore {
             last_error: None,
             sort_revision: 0,
             marks_revision: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            writeback: Writeback::new(locks.shared()),
+            #[cfg(target_arch = "wasm32")]
             writeback: Writeback::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            locks,
+            #[cfg(not(target_arch = "wasm32"))]
+            visit: locks::Visit::Unlocked,
+            #[cfg(not(target_arch = "wasm32"))]
+            open_key: None,
+            lockless_notice: false,
+            refused: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             wasm_dir_handle: None,
         }
@@ -77,6 +105,11 @@ impl FolderStore {
     pub(crate) fn pump(&mut self) {
         for e in self.writeback.pump() {
             self.note_persist_error(e);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let writeback = &self.writeback;
+            self.locks.settle(|key| writeback.writes_pending_in(key));
         }
     }
 
@@ -120,9 +153,9 @@ impl FolderStore {
     #[cfg(test)]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_dir(&mut self, dir: &Path) {
-        let mark = self.switch_dir(dir);
-        let loaded = load_sidecars(dir);
         let photos = crate::navigation::Playlist::from_dir(dir);
+        let mark = self.switch_dir(dir, !photos.entries().is_empty());
+        let loaded = load_sidecars(dir);
         self.apply_loaded(dir, mark, loaded, photos.entries());
     }
 
@@ -132,13 +165,108 @@ impl FolderStore {
     /// Every load starts here, so this is also where a load takes its place in
     /// the write order. The returned mark must reach [`FolderStore::apply_loaded`],
     /// or [`FolderStore::abandon_load`] if the load never runs.
+    ///
+    /// Natively it first takes `dir`'s lock when `dir` has photos, so no
+    /// other program changes the sidecars under the cache. A lock another
+    /// program holds makes the whole visit read-only; opening the folder
+    /// again tries again. See `docs/design/folder-lock.md`.
     #[must_use]
-    pub(crate) fn switch_dir(&mut self, dir: &Path) -> LoadMark {
+    pub(crate) fn switch_dir(
+        &mut self,
+        dir: &Path,
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] has_photos: bool,
+    ) -> LoadMark {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (key, visit) = self.locks.open(dir, has_photos);
+            if visit == (locks::Visit::Lockless { new: true }) {
+                self.lockless_notice = true;
+            }
+            self.open_key = key;
+            self.visit = visit;
+        }
         self.dir = Some(dir.to_path_buf());
         self.images.clear();
         self.groups = None;
         self.dirty.clear();
         self.writeback.begin_load()
+    }
+
+    /// Who holds the open folder, when the visit is read-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn read_only(&self) -> Option<HeldBy> {
+        match &self.visit {
+            locks::Visit::ReadOnly(by) => Some(*by),
+            _ => None,
+        }
+    }
+
+    /// The browser build has no locks.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn read_only(&self) -> Option<HeldBy> {
+        None
+    }
+
+    /// The open folder's key while the visit is read-only, so the photos
+    /// of that folder, and only those, are treated as read-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn read_only_folder(&self) -> Option<&crate::sidecar::FolderKey> {
+        self.read_only().and(self.open_key.as_ref())
+    }
+
+    /// Whether the folder just opened can't be locked, so a headless MCP
+    /// there is unsafe. True once per session per folder.
+    pub(crate) fn take_lockless_notice(&mut self) -> bool {
+        std::mem::take(&mut self.lockless_notice)
+    }
+
+    /// The open folder is left, by a close. Its lock goes once its queued
+    /// writes have landed.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn leave_dir(&mut self) {
+        self.locks.leave();
+        self.visit = locks::Visit::Unlocked;
+        self.open_key = None;
+    }
+
+    /// The app is quitting: the folders it holds say so in their holder
+    /// line, so a relaunch on one waits for it a moment.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn begin_quit(&mut self) {
+        self.locks.mark_quitting();
+    }
+
+    /// Photos whose edit was refused because the folder is read-only,
+    /// since the last call, so the app can put its own copies back.
+    pub(crate) fn take_refused(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.refused)
+    }
+
+    /// Refuse an edit to `path` in a read-only folder, before anything
+    /// changes. True when refused.
+    fn refuse(&mut self, path: &Path) -> bool {
+        if self.read_only().is_none() || !self.in_open_folder(path) {
+            return false;
+        }
+        self.refused.push(path.to_path_buf());
+        true
+    }
+
+    /// Whether `path`'s folder is the open one, however either is spelled.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn in_open_folder(&self, path: &Path) -> bool {
+        if self.cache_key(path).is_some() {
+            return true;
+        }
+        let Some(open) = &self.open_key else {
+            return false;
+        };
+        crate::sidecar::FolderKey::of_photo(path).as_ref() == Some(open)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn in_open_folder(&self, path: &Path) -> bool {
+        self.cache_key(path).is_some()
     }
 
     /// Give back a mark whose load was never started, so the write history it
@@ -211,6 +339,9 @@ impl FolderStore {
             return Ok(());
         }
         let dir = self.dir.clone().ok_or(GroupWriteRefused::NoFolder)?;
+        if let Some(by) = self.read_only() {
+            return Err(GroupWriteRefused::ReadOnly(by));
+        }
         let groups = self.groups.as_mut().ok_or(GroupWriteRefused::LoadPending)?;
         for write in &writes {
             groups.apply(write);
@@ -334,8 +465,14 @@ impl FolderStore {
     /// photo's sidecar when it runs and changes only that part, so its other
     /// fields survive and a same-named photo in the active directory is never
     /// touched.
+    ///
+    /// A photo of the open folder is refused while the visit is read-only,
+    /// as any edit is.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn patch_uncached(&mut self, path: &Path, patch: Patch) {
+        if self.refuse(path) {
+            return;
+        }
         self.writeback
             .enqueue(path, WriteOp::Patch(Box::new(patch)));
     }
@@ -474,7 +611,12 @@ impl FolderStore {
     /// Refused for a photo outside the active directory. The cache holds no
     /// record for it to start from, so writing would replace its sidecar with
     /// only this one field.
+    ///
+    /// In a read-only visit it is refused before anything changes.
     fn update(&mut self, path: &Path, mutate: impl FnOnce(&mut ImageRecord)) {
+        if self.refuse(path) {
+            return;
+        }
         let Some(name) = self.cache_key(path).map(OsStr::to_os_string) else {
             self.note_persist_error(format!("{} is not in the open folder", path.display()));
             return;
@@ -498,8 +640,16 @@ impl FolderStore {
         }
     }
 
+    /// A read-only visit writes nothing into its folder, a photo's removal
+    /// or a group's included.
     #[cfg(not(target_arch = "wasm32"))]
     fn enqueue(&mut self, path: &Path, op: WriteOp) {
+        if let Some(open) = self.read_only_folder() {
+            let into = writeback::op_folder(path, &op).and_then(crate::sidecar::FolderKey::of);
+            if into.as_ref() == Some(open) {
+                return;
+            }
+        }
         self.writeback.enqueue(path, op);
     }
 
@@ -560,6 +710,8 @@ impl Default for FolderStore {
 pub(crate) enum GroupWriteRefused {
     NoFolder,
     LoadPending,
+    /// The folder is read-only for this visit.
+    ReadOnly(HeldBy),
 }
 
 impl std::fmt::Display for GroupWriteRefused {
@@ -567,7 +719,38 @@ impl std::fmt::Display for GroupWriteRefused {
         f.write_str(match self {
             GroupWriteRefused::NoFolder => "no folder is open for these groups",
             GroupWriteRefused::LoadPending => "the folder's groups are still loading",
+            GroupWriteRefused::ReadOnly(by) => return f.write_str(&by.read_only_text()),
         })
+    }
+}
+
+/// Why a folder opened read-only: who holds it, or that it can't be locked.
+// The browser build has no locks, so it never opens a folder read-only.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldBy {
+    /// Another LightPhotos window or instance, by pid.
+    App(u32),
+    /// A headless `lightphotos-mcp`, by pid.
+    Mcp(u32),
+    /// A holder the lock file doesn't name.
+    Other,
+    /// No one: the lock couldn't be made (a read-only volume, no
+    /// permission), so nothing would stop another writer.
+    Unlockable,
+}
+
+impl HeldBy {
+    /// The read-only line and every refusal, in the UI's language.
+    pub(crate) fn read_only_text(self) -> String {
+        let t = crate::i18n::t();
+        let who = match self {
+            HeldBy::App(pid) => (t.held_by_app)(pid),
+            HeldBy::Mcp(pid) => (t.held_by_mcp)(pid),
+            HeldBy::Other => t.held_by_other.to_string(),
+            HeldBy::Unlockable => return t.folder_cant_lock.to_string(),
+        };
+        (t.folder_read_only)(&who)
     }
 }
 
@@ -654,6 +837,74 @@ mod tests {
 
     fn sidecar_for(dir: &Path, filename: &str) -> PathBuf {
         dir.join(SIDECAR_DIR).join(format!("{filename}.xmp"))
+    }
+
+    /// Design rows 9 and 11: a write for a photo of the open folder,
+    /// spelled relative to the working directory, lands under the app's
+    /// own lock; the writer never turns away its own writes.
+    #[test]
+    fn a_relative_photo_path_in_the_open_folder_is_saved() {
+        let dir = temp_folder("relative-photo");
+        std::fs::write(dir.join("a.jpg"), b"").unwrap();
+        let mut cat = FolderStore::with_dir(dir.clone());
+        let cwd = std::env::current_dir().unwrap();
+        let mut rel = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            rel.push("..");
+        }
+        let photo = rel
+            .join(dir.strip_prefix("/").unwrap_or(&dir))
+            .join("a.jpg");
+        let patch = Patch::Score(crate::sidecar::StoredScore {
+            score: crate::scoring::quality::QualityScore {
+                value: 50,
+                basis: crate::scoring::quality::Basis::TechnicalOnly,
+                base: None,
+                deductions: Vec::new(),
+            },
+            edits: 0,
+        });
+        cat.patch_uncached(&photo, patch);
+        flush(&mut cat);
+        let error = cat.take_error();
+        let saved = crate::sidecar::read_record(&dir.join("a.jpg")).unwrap();
+        drop(cat);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(error, None);
+        assert_eq!(saved.score.map(|s| s.score.value), Some(50));
+    }
+
+    /// Design rows 1 and 29: a write into a folder another program holds
+    /// is parked, not dropped: it lands once the folder is free, and a
+    /// quit before then reports it.
+    #[test]
+    fn a_write_into_a_held_folder_waits_and_lands_once_free() {
+        use crate::sidecar::{FolderLock, Writer};
+        let dir = temp_folder("parked-write");
+        let photo = dir.join("a.jpg");
+        let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
+        let mut cat = FolderStore::new();
+        cat.patch_uncached(
+            &photo,
+            Patch::adjustments(
+                crate::develop::Adjustments::default(),
+                crate::develop::Adjustments {
+                    exposure: 1.0,
+                    ..Default::default()
+                },
+            ),
+        );
+        cat.flush_blocking(std::time::Duration::from_millis(200));
+        let waiting = cat.take_error();
+        let before = crate::sidecar::read_record(&photo).unwrap().adjustments;
+        drop(other);
+        cat.flush_blocking(std::time::Duration::from_secs(10));
+        let after = crate::sidecar::read_record(&photo).unwrap().adjustments;
+        drop(cat);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(waiting.is_some_and(|e| e.contains("did not finish")));
+        assert_eq!(before.exposure, 0.0, "nothing written while held");
+        assert_eq!(after.exposure, 1.0, "and it lands once free");
     }
 
     #[test]
@@ -1108,6 +1359,7 @@ mod tests {
         assert!(!sidecar_for(&dir, "photo.jpg").exists());
         // Removing again is a no-op.
         cat.forget_photos(std::slice::from_ref(&p));
+        flush(&mut cat);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1204,7 +1456,7 @@ mod tests {
         cat.set(&pa, 5);
         // A background load for `a` was started, but before it lands the
         // active directory switches to `b`.
-        let mark = cat.switch_dir(&b);
+        let mark = cat.switch_dir(&b, true);
         assert_eq!(cat.get(&pa), None, "switching clears the cache immediately");
 
         // The stale `a` load lands and must be ignored.
@@ -1233,7 +1485,7 @@ mod tests {
         drop(seed);
 
         let mut cat = FolderStore::new();
-        let mark = cat.switch_dir(&dir);
+        let mark = cat.switch_dir(&dir, true);
         // A write lands after switch_dir but before the background load,
         // whose snapshot predates the write, returns.
         cat.set(&written, 5);
@@ -1264,7 +1516,7 @@ mod tests {
         FolderStore::with_dir(dir.clone()).set(&p, 4);
 
         let mut cat = FolderStore::new();
-        let mark = cat.switch_dir(&dir);
+        let mark = cat.switch_dir(&dir, true);
         let loaded = load_sidecars(&dir); // snapshot still carries the rating
         cat.forget_photos(std::slice::from_ref(&p));
         cat.apply_loaded(&dir, mark, loaded, &images_in(&dir));
@@ -1288,9 +1540,9 @@ mod tests {
         std::fs::write(sidecar_for(&a, "bad.jpg"), b"{not valid json").unwrap();
 
         let mut cat = FolderStore::new();
-        let mark = cat.switch_dir(&a);
+        let mark = cat.switch_dir(&a, true);
         let loaded = load_sidecars(&a); // has skipped == 1
-        let _ = cat.switch_dir(&b); // the user already left `a` before the load lands
+        let _ = cat.switch_dir(&b, true); // the user already left `a` before the load lands
         cat.apply_loaded(&a, mark, loaded, &images_in(&a));
 
         assert!(
@@ -1359,8 +1611,8 @@ mod tests {
         cat.set(&p, 5);
         // The user leaves and comes back while that write is still queued,
         // which clears both the cache and `dirty`.
-        let _ = cat.switch_dir(&elsewhere);
-        let mark = cat.switch_dir(&dir);
+        let _ = cat.switch_dir(&elsewhere, true);
+        let mark = cat.switch_dir(&dir, true);
         cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
 
         assert_eq!(
@@ -1401,8 +1653,8 @@ mod tests {
         let mut cat = FolderStore::with_dir(dir.clone());
         let stale = load_sidecars(&dir);
         cat.set(&p, 5);
-        let _ = cat.switch_dir(&elsewhere);
-        let mark = cat.switch_dir(&dir);
+        let _ = cat.switch_dir(&elsewhere, true);
+        let mark = cat.switch_dir(&dir, true);
         flush(&mut cat);
         cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
 
@@ -1430,9 +1682,9 @@ mod tests {
         let mut cat = FolderStore::with_dir(dir.clone());
         let stale = load_sidecars(&dir);
         cat.set(&p, 5);
-        let _ = cat.switch_dir(&elsewhere);
+        let _ = cat.switch_dir(&elsewhere, true);
         cat.abandon_load();
-        let mark = cat.switch_dir(&dir);
+        let mark = cat.switch_dir(&dir, true);
         flush(&mut cat);
         cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
 
@@ -1458,8 +1710,8 @@ mod tests {
         // Another tool rewrites the sidecar while the user is elsewhere.
         FolderStore::with_dir(dir.clone()).set(&p, 1);
 
-        let _ = cat.switch_dir(&elsewhere);
-        let mark = cat.switch_dir(&dir);
+        let _ = cat.switch_dir(&elsewhere, true);
+        let mark = cat.switch_dir(&dir, true);
         let loaded = load_sidecars(&dir);
         cat.apply_loaded(&dir, mark, loaded, &images_in(&dir));
 
@@ -1716,9 +1968,18 @@ mod tests {
         photos(&dir, &["a.jpg", "b.jpg"]);
         let cat = FolderStore::with_dir(dir.clone());
         assert!(cat.groups().unwrap().is_empty());
-        assert!(
-            !dir.join(SIDECAR_DIR).exists(),
-            "loading a pristine folder must not create .lightphotos"
+        let made: Vec<String> = std::fs::read_dir(dir.join(SIDECAR_DIR))
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n != crate::sidecar::LOCK_FILE && n != crate::sidecar::WHO_FILE)
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            made,
+            Vec::<String>::new(),
+            "loading a pristine folder writes nothing but its lock"
         );
 
         FolderStore::with_dir(dir.clone()).set(&dir.join("a.jpg"), 3);
@@ -1899,9 +2160,9 @@ mod tests {
             .unwrap()
             .create(group.clone(), std::time::SystemTime::now());
         cat.apply_group_writes(writes).unwrap();
-        let _ = cat.switch_dir(&elsewhere);
+        let _ = cat.switch_dir(&elsewhere, true);
         cat.abandon_load();
-        let mark = cat.switch_dir(&dir);
+        let mark = cat.switch_dir(&dir, true);
         flush(&mut cat);
         cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
 
@@ -1919,7 +2180,7 @@ mod tests {
         let writes = Groups::default().create(group, std::time::SystemTime::now());
 
         let mut cat = FolderStore::new();
-        let mark = cat.switch_dir(&dir);
+        let mark = cat.switch_dir(&dir, true);
         assert_eq!(
             cat.apply_group_writes(writes.clone()),
             Err(GroupWriteRefused::LoadPending)
@@ -1932,7 +2193,7 @@ mod tests {
         assert!(cat.groups().unwrap().is_empty());
         assert!(!groups_dir(&dir).exists());
 
-        let _ = cat.switch_dir(&dir);
+        let _ = cat.switch_dir(&dir, true);
         cat.abandon_load();
         assert_eq!(
             cat.apply_group_writes(writes),
@@ -1967,9 +2228,9 @@ mod tests {
             &group_file::path(&dir, &first),
             WriteOp::PutGroup(second_group.clone()),
         );
-        let _ = cat.switch_dir(&elsewhere);
+        let _ = cat.switch_dir(&elsewhere, true);
         cat.abandon_load();
-        let mark = cat.switch_dir(&dir);
+        let mark = cat.switch_dir(&dir, true);
         flush(&mut cat);
         cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
 

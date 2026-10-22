@@ -44,6 +44,13 @@ impl App {
         if let Some(by) = self.blocker(cmd) {
             return Err(CommandError::Busy { by });
         }
+        // Before anything runs, so an undo neither stops a batch nor pops
+        // its step in a folder that can't save the result.
+        if cmd.writes_photos() {
+            if let Some(reason) = self.folder_read_only_text() {
+                return Err(CommandError::Failed { reason });
+            }
+        }
         let loupe = self.mode == ViewMode::Loupe;
         match cmd {
             Command::Zoom(_) if !loupe => {

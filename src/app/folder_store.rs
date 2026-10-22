@@ -168,8 +168,8 @@ impl App {
     /// Points the folder store at `dir` and reads its sidecars in the background.
     /// `switch_dir` clears the cache first, so the old folder's ratings never
     /// show for the new one. `poll_folder_store_load` folds in the result.
-    pub(super) fn request_folder_store_load(&mut self, dir: &Path) {
-        let mark = self.folder_store.switch_dir(dir);
+    pub(super) fn request_folder_store_load(&mut self, dir: &Path, has_photos: bool) {
+        let mark = self.folder_store.switch_dir(dir, has_photos);
         self.folder_store_load.token += 1;
         let token = self.folder_store_load.token;
         let dir = dir.to_path_buf();
@@ -291,39 +291,78 @@ impl App {
         // folder store overwrites it.
         self.save_edit();
         for p in playlist.entries() {
-            match self.folder_store.get(p) {
-                Some(stars) => self.ratings.insert(p.clone(), stars),
-                None => self.ratings.remove(p),
-            };
-            let adj = self.folder_store.adjustments(p);
-            if adj.is_identity() {
-                self.edits.remove(p);
-            } else {
-                self.edits.insert(p.clone(), adj);
-            }
-            let touchups = self.folder_store.touchups(p);
-            if touchups.is_empty() {
-                self.touchups.remove(p);
-            } else {
-                self.touchups.insert(p.clone(), touchups);
-            }
-            let masks = self.folder_store.masks(p);
-            if masks.is_empty() {
-                self.masks.remove(p);
-            } else {
-                self.masks.insert(p.clone(), masks);
-            }
-            let detections = self.folder_store.detections(p);
-            if detections.is_empty() {
-                self.detections.remove(p);
-            } else {
-                self.detections.insert(p.clone(), detections);
-            }
-            match self.folder_store.rotation(p) {
-                0 => self.rotations.remove(p),
-                rot => self.rotations.insert(p.clone(), rot),
-            };
+            self.reconcile_photo(p);
         }
+    }
+
+    /// Copy `p`'s record from the folder store into the mirrors.
+    fn reconcile_photo(&mut self, p: &PathBuf) {
+        match self.folder_store.get(p) {
+            Some(stars) => self.ratings.insert(p.clone(), stars),
+            None => self.ratings.remove(p),
+        };
+        let adj = self.folder_store.adjustments(p);
+        if adj.is_identity() {
+            self.edits.remove(p);
+        } else {
+            self.edits.insert(p.clone(), adj);
+        }
+        let touchups = self.folder_store.touchups(p);
+        if touchups.is_empty() {
+            self.touchups.remove(p);
+        } else {
+            self.touchups.insert(p.clone(), touchups);
+        }
+        let masks = self.folder_store.masks(p);
+        if masks.is_empty() {
+            self.masks.remove(p);
+        } else {
+            self.masks.insert(p.clone(), masks);
+        }
+        let detections = self.folder_store.detections(p);
+        if detections.is_empty() {
+            self.detections.remove(p);
+        } else {
+            self.detections.insert(p.clone(), detections);
+        }
+        match self.folder_store.rotation(p) {
+            0 => self.rotations.remove(p),
+            rot => self.rotations.insert(p.clone(), rot),
+        };
+    }
+
+    /// The open folder's read-only reason, in the UI's language.
+    pub(crate) fn folder_read_only_text(&self) -> Option<String> {
+        self.folder_store.read_only().map(|by| by.read_only_text())
+    }
+
+    /// Refuse a job that would write the open folder while it is read-only,
+    /// saying why. True when refused.
+    pub(super) fn refuse_if_read_only(&mut self) -> bool {
+        let Some(why) = self.folder_read_only_text() else {
+            return false;
+        };
+        self.set_status(StatusKind::Error, why);
+        self.request_redraw();
+        true
+    }
+
+    /// Put back the app's copies of the photos whose edit the read-only
+    /// folder refused, and say why. The edit controls are off there, so
+    /// only a job result from before the visit gets this far.
+    pub(crate) fn revert_refused_edits(&mut self) {
+        let refused = self.folder_store.take_refused();
+        if refused.is_empty() {
+            return;
+        }
+        for p in &refused {
+            self.reconcile_photo(p);
+            if self.shown.path() == Some(p.as_path()) {
+                self.push_adjustments();
+                self.hist.invalidate();
+            }
+        }
+        self.refuse_if_read_only();
     }
 
     /// Whether a rating or flag goes to `action_paths` rather than the one
@@ -423,10 +462,11 @@ impl App {
                 let t = crate::i18n::t();
                 let msg = match e {
                     GroupWriteRefused::NoFolder | GroupWriteRefused::LoadPending => {
-                        t.group_refused_loading
+                        t.group_refused_loading.to_string()
                     }
+                    GroupWriteRefused::ReadOnly(by) => by.read_only_text(),
                 };
-                self.set_status(StatusKind::Error, msg.to_string());
+                self.set_status(StatusKind::Error, msg);
                 self.request_redraw();
                 false
             }

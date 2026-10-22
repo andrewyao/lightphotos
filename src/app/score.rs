@@ -31,7 +31,7 @@ impl App {
         if self.score_pool.is_none() {
             return;
         }
-        if paths.is_empty() {
+        if paths.is_empty() || self.refuse_if_read_only() {
             return;
         }
         // The worker reads the edits from the mirrors, and staleness is judged

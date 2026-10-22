@@ -184,7 +184,7 @@ impl App {
     pub(super) fn start_delete(&mut self, mut paths: Vec<PathBuf>) {
         let mut seen = HashSet::new();
         paths.retain(|p| seen.insert(p.clone()));
-        if paths.is_empty() {
+        if paths.is_empty() || self.refuse_if_read_only() {
             return;
         }
         if self.bulk_delete.is_some() || self.export_running() {

@@ -1243,7 +1243,7 @@ impl App {
             self.sort_meta.clear();
         }
         self.adopt_signal_cache(playlist);
-        self.request_folder_store_load(playlist.dir());
+        self.request_folder_store_load(playlist.dir(), !playlist.entries().is_empty());
     }
 
     /// Drops every Loupe decode, cached, queued or running, and has the
@@ -1409,6 +1409,9 @@ impl App {
         self.save_edit_unless_dragging();
 
         // Show folder store write failures, or the user loses the change silently.
+        if self.folder_store.take_lockless_notice() {
+            self.set_status(StatusKind::Info, crate::i18n::t().folder_lockless.into());
+        }
         if let Some(cause) = self.folder_store.take_error() {
             self.set_status(
                 StatusKind::Error,

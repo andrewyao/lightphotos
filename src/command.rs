@@ -1083,6 +1083,20 @@ impl Command {
         }
     }
 
+    /// Whether the command saves into the photos' sidecars, so a folder
+    /// open read-only refuses it.
+    pub fn writes_photos(&self) -> bool {
+        use Command::*;
+        match self {
+            Rate(_) | Flag(_) | Label(_) | Rotate(_) | Score(_) | Develop(_) | Reset(_)
+            | AutoTone(_) | Monochrome(_) | Crop(_) | AddMask(_) | SetMask(_) | ClearMasks(_)
+            | PasteSettings(_) | Preset(_) | Undo => true,
+            OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
+            | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | CopySettings(_)
+            | SavePreset(_) | AddPresetFolder(_) | Export(_) => false,
+        }
+    }
+
     /// The photos a command acts on, for the commands that take `photos`.
     pub fn photos(&self) -> Option<&Photos> {
         use Command::*;

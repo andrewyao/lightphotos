@@ -181,6 +181,9 @@ pub(super) struct Writeback {
     authored: HashMap<PathBuf, Authored>,
     /// Loads requested and not yet applied or abandoned.
     loads: usize,
+    /// The folder locks this store holds. See [`super::locks`].
+    #[cfg(not(target_arch = "wasm32"))]
+    locks: super::locks::SharedLocks,
 
     done_tx: Sender<Done>,
     done_rx: Receiver<Done>,
@@ -200,7 +203,9 @@ pub(super) struct Writeback {
 }
 
 impl Writeback {
-    pub(super) fn new() -> Writeback {
+    pub(super) fn new(
+        #[cfg(not(target_arch = "wasm32"))] locks: super::locks::SharedLocks,
+    ) -> Writeback {
         let (done_tx, done_rx) = channel();
         Writeback {
             pending: HashMap::new(),
@@ -208,6 +213,8 @@ impl Writeback {
             outstanding: std::collections::BTreeSet::new(),
             authored: HashMap::new(),
             loads: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            locks,
             done_tx,
             done_rx,
             #[cfg(not(target_arch = "wasm32"))]
@@ -397,8 +404,15 @@ impl Writeback {
         }
     }
 
+    /// Without a worker thread the write runs here; one that would park
+    /// runs unlocked instead, since nothing would try it again.
     fn perform_inline(&self, path: &Path, seq: u64, op: &WriteOp) {
-        let err = perform(path, op).err();
+        let mut locks = super::locks::SaveLocks::new(self.locks.clone());
+        let err = match perform_locked(&mut locks, path, op) {
+            Saved::Done(result) => result.err(),
+            Saved::Parked => perform(path, op).err(),
+        };
+        locks.release_except(None);
         let _ = self.done_tx.send((path.to_path_buf(), seq, err));
     }
 
@@ -406,14 +420,10 @@ impl Writeback {
         if self.tx.is_none() {
             let (tx, rx) = channel::<(PathBuf, u64, WriteOp)>();
             let done_tx = self.done_tx.clone();
+            let locks = super::locks::SaveLocks::new(self.locks.clone());
             let spawned = std::thread::Builder::new()
                 .name("folder-store-write".into())
-                .spawn(move || {
-                    while let Ok((path, seq, op)) = rx.recv() {
-                        let err = perform(&path, &op).err();
-                        let _ = done_tx.send((path, seq, err));
-                    }
-                });
+                .spawn(move || write_loop(&rx, &done_tx, locks));
             match spawned {
                 Ok(handle) => {
                     self.worker = Some(handle);
@@ -482,6 +492,171 @@ impl Drop for Writeback {
         }
     }
 }
+
+/// How often the writer tries again a write parked behind another
+/// program's lock, while nothing else arrives.
+#[cfg(not(target_arch = "wasm32"))]
+const PARKED_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The writer thread: runs each write in order, under its folder's lock.
+/// A write into a folder another program holds is parked with every later
+/// write for that folder behind it, so the order stays, and all of them
+/// are tried again whenever a write arrives, every [`PARKED_RETRY`], and
+/// once more when the queue closes at quit. None is dropped while the app
+/// runs (`docs/design/folder-lock.md`, rule 1).
+#[cfg(not(target_arch = "wasm32"))]
+fn write_loop(
+    rx: &std::sync::mpsc::Receiver<(PathBuf, u64, WriteOp)>,
+    done_tx: &Sender<Done>,
+    mut locks: super::locks::SaveLocks,
+) {
+    use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
+    let mut parked: std::collections::VecDeque<(PathBuf, u64, WriteOp)> =
+        std::collections::VecDeque::new();
+    loop {
+        let next = match rx.try_recv() {
+            Ok(next) => Some(next),
+            Err(TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) => {
+                // Idle: a left folder's lock goes now, so the other
+                // program can get in.
+                locks.release_except(None);
+                if parked.is_empty() {
+                    rx.recv().ok()
+                } else {
+                    match rx.recv_timeout(PARKED_RETRY) {
+                        Ok(next) => Some(next),
+                        Err(RecvTimeoutError::Timeout) => {
+                            retry_parked(&mut parked, &mut locks, done_tx);
+                            continue;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => None,
+                    }
+                }
+            }
+        };
+        let Some((path, seq, op)) = next else {
+            retry_parked(&mut parked, &mut locks, done_tx);
+            locks.release_except(None);
+            return;
+        };
+        retry_parked(&mut parked, &mut locks, done_tx);
+        let behind = op_key(&path, &op).is_some_and(|key| {
+            parked
+                .iter()
+                .any(|(p, _, o)| op_key(p, o).as_ref() == Some(&key))
+        });
+        if behind {
+            parked.push_back((path, seq, op));
+            continue;
+        }
+        match perform_locked(&mut locks, &path, &op) {
+            Saved::Done(result) => {
+                let _ = done_tx.send((path, seq, result.err()));
+            }
+            Saved::Parked => parked.push_back((path, seq, op)),
+        }
+    }
+}
+
+/// Try the parked writes again, in order; a folder still held keeps the
+/// rest of its writes parked behind the first.
+#[cfg(not(target_arch = "wasm32"))]
+fn retry_parked(
+    parked: &mut std::collections::VecDeque<(PathBuf, u64, WriteOp)>,
+    locks: &mut super::locks::SaveLocks,
+    done_tx: &Sender<Done>,
+) {
+    let mut still = std::collections::VecDeque::new();
+    let mut held: Vec<crate::sidecar::FolderKey> = Vec::new();
+    for (path, seq, op) in parked.drain(..) {
+        let key = op_key(&path, &op);
+        if key.as_ref().is_some_and(|k| held.contains(k)) {
+            still.push_back((path, seq, op));
+            continue;
+        }
+        match perform_locked(locks, &path, &op) {
+            Saved::Done(result) => {
+                let _ = done_tx.send((path, seq, result.err()));
+            }
+            Saved::Parked => {
+                held.extend(key);
+                still.push_back((path, seq, op));
+            }
+        }
+    }
+    *parked = still;
+}
+
+/// The photo folder `op` writes into: the photo's own, or, for a group
+/// file under `<folder>/.lightphotos/groups/`, the folder it groups.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn op_folder<'p>(path: &'p Path, op: &WriteOp) -> Option<&'p Path> {
+    match op {
+        WriteOp::Put(_) | WriteOp::Patch(_) | WriteOp::Delete => path.parent(),
+        WriteOp::PutGroup(_) | WriteOp::DeleteGroup => path.parent()?.parent()?.parent(),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn op_key(path: &Path, op: &WriteOp) -> Option<crate::sidecar::FolderKey> {
+    crate::sidecar::FolderKey::of(op_folder(path, op)?)
+}
+
+/// Run `op` under its folder's lock: see [`super::locks::SaveLocks`]. A
+/// delete where nothing was ever saved locks nothing, and makes no
+/// `.lightphotos/` to lock it; a folder that is gone isn't made again.
+#[cfg(not(target_arch = "wasm32"))]
+fn perform_locked(locks: &mut super::locks::SaveLocks, path: &Path, op: &WriteOp) -> Saved {
+    let Some(dir) = op_folder(path, op) else {
+        return Saved::Done(perform(path, op));
+    };
+    let deletes = matches!(op, WriteOp::Delete | WriteOp::DeleteGroup);
+    if deletes && !dir.join(crate::sidecar::SIDECAR_DIR).is_dir() {
+        return Saved::Done(perform(path, op));
+    }
+    let Some(key) = crate::sidecar::FolderKey::of(dir) else {
+        return Saved::Done(Err(format!(
+            "could not save {}: its folder is gone",
+            path.display()
+        )));
+    };
+    locks.write_in(&key, || perform(path, op))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Writeback {
+    /// Whether a write into the folder `key`, a photo's or one of its
+    /// groups', is still queued, running or parked.
+    pub(super) fn writes_pending_in(&self, key: &crate::sidecar::FolderKey) -> bool {
+        let mut seen: HashMap<&Path, bool> = HashMap::new();
+        self.pending.keys().any(|p| {
+            let Some(dir) = photo_folder(p) else {
+                return false;
+            };
+            *seen
+                .entry(dir)
+                .or_insert_with(|| crate::sidecar::FolderKey::of(dir).as_ref() == Some(key))
+        })
+    }
+}
+
+/// The photo folder a queued path writes into: a photo's parent, or for a
+/// group file the folder above its `.lightphotos/groups/`.
+#[cfg(not(target_arch = "wasm32"))]
+fn photo_folder(path: &Path) -> Option<&Path> {
+    let parent = path.parent()?;
+    let groups = parent.file_name() == Some(std::ffi::OsStr::new(super::group_file::GROUPS_DIR))
+        && parent.parent()?.file_name() == Some(std::ffi::OsStr::new(crate::sidecar::SIDECAR_DIR));
+    if groups {
+        parent.parent()?.parent()
+    } else {
+        Some(parent)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+use super::locks::Saved;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn perform(path: &Path, op: &WriteOp) -> Result<(), String> {
@@ -590,9 +765,13 @@ impl Writeback {
 mod tests {
     use super::*;
 
+    fn new_wb() -> Writeback {
+        Writeback::new(super::super::locks::SharedLocks::default())
+    }
+
     #[test]
     fn a_later_write_to_one_path_supersedes_an_earlier_one_in_the_overlay() {
-        let mut wb = Writeback::new();
+        let mut wb = new_wb();
         let mark = wb.begin_load();
         let path = PathBuf::from("/photos/a.jpg");
         wb.enqueue(
@@ -634,7 +813,7 @@ mod tests {
             exposure: 1.0,
             ..Default::default()
         };
-        let mut wb = Writeback::new();
+        let mut wb = new_wb();
         let mark = wb.begin_load();
         let queued = PathBuf::from("/photos/a.jpg");
         wb.enqueue(
@@ -676,7 +855,7 @@ mod tests {
 
     #[test]
     fn the_overlay_leaves_other_folders_alone() {
-        let mut wb = Writeback::new();
+        let mut wb = new_wb();
         let mark = wb.begin_load();
         wb.enqueue(
             Path::new("/photos/a/x.jpg"),
@@ -701,7 +880,7 @@ mod tests {
 
     #[test]
     fn a_queued_delete_removes_a_loaded_record_from_the_overlay() {
-        let mut wb = Writeback::new();
+        let mut wb = new_wb();
         let mark = wb.begin_load();
         wb.enqueue(Path::new("/photos/a.jpg"), WriteOp::Delete);
 
@@ -734,7 +913,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("lightphotos-writeback-test-{}", std::process::id()));
         let path = dir.join("a.jpg");
-        let mut wb = Writeback::new();
+        let mut wb = new_wb();
         // An unapplied load keeps the write history alive for both marks.
         let older = wb.begin_load();
         wb.enqueue(
@@ -784,7 +963,7 @@ mod tests {
     /// those edits are lost.
     #[test]
     fn a_flush_that_times_out_reports_the_unwritten_photos() {
-        let mut wb = Writeback::new();
+        let mut wb = new_wb();
         // A worker that never reads, so the write stays queued.
         let (tx, _parked) = channel();
         wb.tx = Some(tx);
@@ -800,8 +979,9 @@ mod tests {
     fn a_write_to_a_dead_worker_still_reaches_the_disk() {
         let dir =
             std::env::temp_dir().join(format!("lightphotos-writeback-dead-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a.jpg");
-        let mut wb = Writeback::new();
+        let mut wb = new_wb();
         let (tx, rx) = channel();
         drop(rx);
         wb.tx = Some(tx);
