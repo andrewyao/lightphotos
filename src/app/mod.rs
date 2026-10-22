@@ -743,8 +743,8 @@ pub(crate) struct App {
     /// The folder shown in the grid, and also the tree's keyboard cursor.
     /// Moving in the tree loads the folder in the same step.
     folder_sel: Option<PathBuf>,
-    /// What an agent may touch, and the folders the user opened.
-    agent: agent::AgentScope,
+    /// The folders the user chose, which bound what an agent may touch.
+    user_roots: agent::UserRoots,
     expanded: HashSet<PathBuf>,
     /// Immediate subdirectories, listed once per folder on demand.
     subdirs: HashMap<PathBuf, Vec<PathBuf>>,
@@ -1060,7 +1060,7 @@ impl App {
             launch_notice: launch.fallback,
             missing_roots,
             folder_sel: None,
-            agent: Default::default(),
+            user_roots: agent::UserRoots::load(),
             expanded: HashSet::new(),
             subdirs: HashMap::new(),
             focus: Region::Folders,
@@ -1151,7 +1151,6 @@ impl App {
                 let parent = parent.to_path_buf();
                 self.add_root(&parent);
                 self.reveal_folder(&parent);
-                self.note_opened_folder(&parent);
                 self.folder_sel = Some(parent);
             }
 
@@ -1189,7 +1188,7 @@ impl App {
         self.request_folder_pick();
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = crate::shell::dialog::pick_folder() {
-            self.open(path);
+            self.open_from_user(path);
         }
     }
 
@@ -1277,7 +1276,6 @@ impl App {
         self.reset_eyes_filter();
         self.recompute_visible();
         self.clear_selection();
-        self.note_opened_folder(&dir);
         self.folder_sel = Some(dir);
         self.update_window_title();
         // `redraw` syncs textures against `grid_range` before layout updates
@@ -1550,7 +1548,14 @@ impl App {
                 ui::UiAction::NewCatalog => self.new_catalog_dialog(),
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::OpenCatalog => self.open_catalog_dialog(),
-                ui::UiAction::SwitchCatalog(at) => self.open_catalog(at),
+                ui::UiAction::SwitchCatalog(at) => {
+                    let chosen = at.clone();
+                    self.open_catalog(at);
+                    // The user picked it; a failed switch leaves the old one.
+                    if self.catalog.at() == &chosen {
+                        self.adopt_catalog_folders();
+                    }
+                }
                 #[cfg(target_arch = "wasm32")]
                 ui::UiAction::SetCatalogNameText(text) => self.set_catalog_name_text(text),
                 #[cfg(target_arch = "wasm32")]

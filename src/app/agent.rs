@@ -1,93 +1,144 @@
 //! What an agent may do (control channel, MCP, WebMCP). It drives the app
 //! through the same [`Command`]s as the keyboard, but it reads photo names
 //! that anyone can write, so it can be talked into things. Every command it
-//! sends passes [`App::run_from_agent`], which lets it touch the disk only
-//! where the user already chose to: inside a folder the user opened this
-//! session, or the export form's own folder. It may open any folder, but a
-//! folder it opened is not one of the user's.
+//! sends passes [`App::run_from_agent`], which keeps it inside the user's
+//! roots: the folders the user chose at an explicit entry point (the folder
+//! picker, a path on the command line or a `--drive` run, a file Finder
+//! hands over, or a catalog the user opens or makes in the UI, whose
+//! folders count then). Nothing else adds a root: not a folder an agent
+//! opened, not a launch restore, not tree or keyboard navigation. The roots
+//! are saved, so a restore uses the saved set and not what a catalog lists.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use super::App;
-use crate::command::{Command, CommandError, Outcome};
+use super::{App, StatusKind};
+use crate::command::{Command, CommandError, ExportParams, Outcome};
 use crate::export::metadata::Keep;
 use crate::export::{ExportSettings, ExportTarget, FolderChoice};
 
-/// The folders this session's agent work is held to.
+/// `prefs` key holding the user's roots.
+const USER_ROOTS_PREF: &str = "agent_user_roots";
+/// The most roots kept; the oldest go first.
+const MAX_USER_ROOTS: usize = 256;
+
+pub(super) const EXPORT_REFUSED: &str = "an agent can export only into a folder the user \
+                                         opened, or the export form's own folder";
+
+/// The folders the user chose, newest last.
 #[derive(Default)]
-pub(super) struct AgentScope {
-    /// Folders the user opened this session: through the UI, the command
-    /// line or `--drive`, never through an agent.
-    user_folders: HashSet<PathBuf>,
-    /// An agent's command is running, so a folder it opens is not the user's.
-    running: bool,
-    /// While an agent's export starts: where its folder may be made.
-    export_roots: Option<Vec<PathBuf>>,
-    /// Why the export refused its folder once made, for the agent's reply.
-    export_refused: Option<String>,
-}
+pub(super) struct UserRoots(Vec<PathBuf>);
 
-const EXPORT_REFUSED: &str = "an agent can export only into a folder the user opened, \
-                              or the export form's own folder";
-
-impl AgentScope {
-    /// The export's folder, now that it exists, checked again: a link put
-    /// in its path since the first check is followed here. Always true for
-    /// an export the user started.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn export_folder_ok(&mut self, dir: &Path) -> bool {
-        let Some(roots) = &self.export_roots else {
-            return true;
-        };
-        let ok = within_any(dir, roots);
-        if !ok {
-            self.export_refused = Some(EXPORT_REFUSED.into());
+impl UserRoots {
+    /// The saved set, or none.
+    pub(super) fn load() -> UserRoots {
+        // A test must never read the developer's own settings.
+        if cfg!(test) {
+            return UserRoots::default();
         }
-        ok
+        let saved = crate::persist::prefs::load(USER_ROOTS_PREF)
+            .and_then(|s| serde_json::from_str::<Vec<PathBuf>>(&s).ok())
+            .unwrap_or_default();
+        UserRoots(saved)
+    }
+
+    fn add(&mut self, dir: &Path) {
+        if self.0.iter().any(|r| r == dir) {
+            return;
+        }
+        self.0.push(dir.to_path_buf());
+        let over = self.0.len().saturating_sub(MAX_USER_ROOTS);
+        self.0.drain(..over);
+        self.save();
+    }
+
+    fn save(&self) {
+        // A test must never write the developer's own settings.
+        if cfg!(test) {
+            return;
+        }
+        let saved = serde_json::to_string(&self.0)
+            .map_err(|e| e.to_string())
+            .and_then(|json| crate::persist::prefs::save(USER_ROOTS_PREF, &json));
+        if let Err(e) = saved {
+            eprintln!("[agent] could not save the user's folders: {e}");
+        }
+    }
+
+    pub(super) fn holds(&self, path: &Path) -> bool {
+        within_any(path, &self.0)
     }
 }
 
 impl App {
-    /// Notes that `dir` was opened, which makes it the user's unless an
-    /// agent's command opened it.
-    pub(super) fn note_opened_folder(&mut self, dir: &Path) {
-        if !self.agent.running {
-            self.agent.user_folders.insert(dir.to_path_buf());
+    /// The user opened `path` at an explicit entry point: open it, and make
+    /// it (a file's folder, or a catalog's folders) one of the user's roots.
+    pub(crate) fn open_from_user(&mut self, path: PathBuf) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let catalog = crate::persist::catalog::CatalogRef::parse(&path).ok();
+        #[cfg(not(target_arch = "wasm32"))]
+        let root = if path.is_dir() {
+            Some(path.clone())
+        } else {
+            path.parent().map(Path::to_path_buf)
+        };
+        self.open(path);
+        #[cfg(not(target_arch = "wasm32"))]
+        match catalog {
+            Some(at) if self.catalog.at() == &at => self.adopt_catalog_folders(),
+            Some(_) => {}
+            None => {
+                if let Some(root) = root {
+                    self.user_roots.add(&root);
+                }
+            }
         }
     }
 
-    /// Runs a command an agent sent, once its paths pass the checks above.
-    pub(crate) fn run_from_agent(&mut self, mut cmd: Command) -> Result<Outcome, CommandError> {
-        let refuse = |reason: String| CommandError::Failed { reason };
-        let roots = self.agent_roots();
-        match &mut cmd {
-            Command::Export(p) => {
-                let settings = confine_agent_export(
-                    p.settings.take(),
-                    self.export_settings(),
-                    self.folder_sel.as_deref(),
-                    &roots,
-                )
-                .map_err(refuse)?;
-                p.settings = Some(settings);
+    /// The user opened or made the open catalog in the UI: its folders are
+    /// the user's.
+    pub(super) fn adopt_catalog_folders(&mut self) {
+        for dir in self.catalog.folders().to_vec() {
+            self.user_roots.add(&dir);
+        }
+    }
+
+    /// Runs a command an agent sent, once its paths pass the checks here.
+    pub(crate) fn run_from_agent(&mut self, cmd: Command) -> Result<Outcome, CommandError> {
+        let refuse = |reason: &str| CommandError::Failed {
+            reason: reason.into(),
+        };
+        match &cmd {
+            Command::Export(p) => return self.agent_export(p.clone()),
+            Command::OpenCatalog(p) => {
+                self.check(&cmd)?;
+                self.agent_open_catalog(&p.path).map_err(|e| refuse(&e))?;
+                return Ok(Outcome::default());
             }
-            Command::NewCatalog(p) | Command::OpenCatalog(p) => {
-                self.agent_catalog_ok(&p.path, &roots).map_err(refuse)?;
+            Command::NewCatalog(p) => {
+                if !self
+                    .user_roots
+                    .holds(&agent_catalog_path(&p.path).map_err(|e| refuse(&e))?)
+                {
+                    return Err(refuse(CATALOG_REFUSED));
+                }
             }
-            Command::AddPresetFolder(p) => {
-                if !within_any(&p.path, &roots) {
+            Command::OpenFolder(p) => {
+                if !self.user_roots.holds(&p.path) {
                     return Err(refuse(
-                        "an agent can add a preset folder only inside a folder the user opened; \
-                         the user adds others with Add preset folder…"
-                            .into(),
+                        "an agent can open only a folder inside one the user opened",
                     ));
                 }
             }
-            // Any folder: what it opens does not become the user's.
-            Command::OpenFolder(_) => {}
-            // Name photos of the open folder, a catalog opened before, or
-            // nothing on disk at all.
+            Command::AddPresetFolder(p) => {
+                if !self.user_roots.holds(&p.path) {
+                    return Err(refuse(
+                        "an agent can add a preset folder only inside a folder the user \
+                         opened; the user adds others with Add preset folder…",
+                    ));
+                }
+            }
+            // These act on the open folder's photos (a folder the user or a
+            // check above chose) or on nothing on disk.
             Command::SwitchCatalog(_)
             | Command::View(_)
             | Command::Zoom(_)
@@ -114,68 +165,104 @@ impl App {
             | Command::SavePreset(_)
             | Command::Undo => {}
         }
-        let is_export = matches!(cmd, Command::Export(_));
-        if is_export {
-            self.agent.export_roots = Some(roots);
-        }
-        self.agent.running = true;
-        let out = self.run(cmd);
-        self.agent.running = false;
-        self.agent.export_roots = None;
-        match self.agent.export_refused.take() {
-            Some(reason) if is_export => Err(refuse(reason)),
-            _ => out,
-        }
+        self.run(cmd)
     }
 
-    /// Where an agent may write: the user's folders and the form's folder.
-    fn agent_roots(&self) -> Vec<PathBuf> {
+    /// An agent's export, held to the user's roots and the form's folder.
+    fn agent_export(&mut self, p: ExportParams) -> Result<Outcome, CommandError> {
+        let refuse = |reason: String| CommandError::Failed { reason };
+        self.check(&Command::Export(p.clone()))?;
         let form_folder = match &self.export_settings().target {
             #[cfg(not(target_arch = "wasm32"))]
             ExportTarget::Folder(FolderChoice::Custom(dir)) => Some(dir.clone()),
             _ => None,
         };
-        self.agent
-            .user_folders
+        let roots: Vec<PathBuf> = self
+            .user_roots
+            .0
             .iter()
             .cloned()
             .chain(form_folder)
-            .collect()
+            .collect();
+        let Ok(settings) = confine_agent_export(
+            p.settings,
+            self.export_settings(),
+            self.folder_sel.as_deref(),
+            &roots,
+        ) else {
+            return Err(refuse(self.refuse_agent_export()));
+        };
+        let paths = self.resolve(&p.photos)?;
+        let pending = self
+            .export_with(paths.clone(), Some(settings), Some(&roots))
+            .map_err(refuse)?;
+        self.request_redraw();
+        Ok(Outcome {
+            photos: paths.len(),
+            pending,
+        })
     }
 
-    /// A catalog an agent may make or open: in the app's catalog folder, in
-    /// one of the user's folders, or (to open) one the user opened before.
+    /// Says an agent's export was refused, to the user too, and returns why.
+    pub(super) fn refuse_agent_export(&mut self) -> String {
+        self.set_status(StatusKind::Error, EXPORT_REFUSED.into());
+        self.request_redraw();
+        EXPORT_REFUSED.into()
+    }
+
+    /// Opens a catalog inside the user's roots whose folders all are too, so
+    /// opening it (and any later launch restore of it) reaches no folder the
+    /// user never chose. It adds no roots.
     #[cfg(not(target_arch = "wasm32"))]
-    fn agent_catalog_ok(&self, path: &Path, roots: &[PathBuf]) -> Result<(), String> {
+    fn agent_open_catalog(&mut self, path: &Path) -> Result<(), String> {
         let at = super::catalog::catalog_ref_for(path)?;
-        let in_app_folder = crate::persist::catalog::native::default_dir()
-            .is_some_and(|dir| crate::paths::is_within(at.path(), &dir));
-        let known = self.recent_catalogs.iter().any(|r| r.path() == at.path());
-        if in_app_folder || known || within_any(at.path(), roots) {
-            return Ok(());
+        if !self.user_roots.holds(at.path()) {
+            return Err(CATALOG_REFUSED.into());
         }
-        Err(
-            "an agent can make or open a catalog only in the app's catalog folder or a \
-             folder the user opened"
-                .into(),
-        )
+        let catalog = crate::persist::catalog::Catalog::open(at).map_err(|e| e.to_string())?;
+        if let Some(dir) = catalog.folders().iter().find(|d| !self.user_roots.holds(d)) {
+            return Err(format!(
+                "an agent can open only a catalog whose folders the user opened, and \
+                 this one lists {}",
+                dir.display()
+            ));
+        }
+        self.switch_catalog(catalog);
+        Ok(())
     }
 
-    /// The browser keeps its catalogs in its own storage, not at a path.
+    /// The browser's catalogs live in its own storage; an agent switches
+    /// among them by name only.
     #[cfg(target_arch = "wasm32")]
-    fn agent_catalog_ok(&self, _path: &Path, _roots: &[PathBuf]) -> Result<(), String> {
-        Ok(())
+    fn agent_open_catalog(&mut self, _path: &Path) -> Result<(), String> {
+        Err(CATALOG_REFUSED.into())
     }
 }
 
+const CATALOG_REFUSED: &str = "an agent can make or open a catalog only inside a folder the \
+                               user opened";
+
+/// Where `catalog.new` would put the catalog at `path`.
 #[cfg(not(target_arch = "wasm32"))]
-fn within_any(dir: &Path, roots: &[PathBuf]) -> bool {
+fn agent_catalog_path(path: &Path) -> Result<PathBuf, String> {
+    super::catalog::catalog_ref_for(path).map(|at| at.path().to_path_buf())
+}
+
+/// The browser's catalogs live in its own storage, so no path is the
+/// user's there and `catalog.new` is refused.
+#[cfg(target_arch = "wasm32")]
+fn agent_catalog_path(_path: &Path) -> Result<PathBuf, String> {
+    Err(CATALOG_REFUSED.into())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn within_any(dir: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| crate::paths::is_within(dir, root))
 }
 
 /// The browser names no folder by path: it reaches only the picked one.
 #[cfg(target_arch = "wasm32")]
-fn within_any(_dir: &Path, _roots: &[PathBuf]) -> bool {
+pub(super) fn within_any(_dir: &Path, _roots: &[PathBuf]) -> bool {
     false
 }
 
@@ -261,20 +348,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&other);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn an_export_folder_made_outside_the_roots_is_refused_for_the_reply() {
-        let root = temp_folder("agent-recheck");
-        let outside = temp_folder("agent-recheck-out");
-        let mut scope = AgentScope::default();
-        assert!(
-            scope.export_folder_ok(&outside),
-            "a user's export is not held"
+    fn an_export_folder_through_a_link_out_is_refused_before_it_is_made() {
+        let root = temp_folder("agent-premake");
+        let outside = temp_folder("agent-premake-out");
+        let photo = root.join("a.jpg");
+        std::fs::write(&photo, []).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let mut app = App::new(None);
+        app.start_exporter();
+        let settings = ExportSettings {
+            target: ExportTarget::Folder(FolderChoice::Custom(root.join("link/new"))),
+            ..ExportSettings::default()
+        };
+        let started = app.export_with(
+            vec![photo],
+            Some(settings),
+            Some(std::slice::from_ref(&root)),
         );
-        scope.export_roots = Some(vec![root.clone()]);
-        assert!(scope.export_folder_ok(&root.join("Exports")));
-        std::os::unix::fs::symlink(&outside, root.join("Exports-link")).unwrap();
-        assert!(!scope.export_folder_ok(&root.join("Exports-link")));
-        assert_eq!(scope.export_refused.as_deref(), Some(EXPORT_REFUSED));
+        assert!(started.is_err(), "{started:?}");
+        assert!(!outside.join("new").exists(), "made outside the roots");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
     }

@@ -8,12 +8,16 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
+use super::agent::within_any;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::export::immich::{Account, Album, ImmichServer};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::export::{AlbumChoice, ExportDest, ExportJob, ExportTarget, FolderChoice};
 use crate::export::{ExportLanding, ExportOutcome, ExportSettings};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::paths;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 
 /// `prefs` key for the last Immich server connected to.
 #[cfg(not(target_arch = "wasm32"))]
@@ -299,26 +303,25 @@ impl App {
     }
 
     /// Exports `paths` now, with `settings` in place of the form's for this
-    /// one batch. Returns whether the batch is under way, or why it could
-    /// not start.
+    /// one batch. `confine`, for an agent's export, holds the folders a
+    /// folder export must land in. Returns whether the batch is under way,
+    /// or why it could not start.
     pub(super) fn export_with(
         &mut self,
         paths: Vec<PathBuf>,
         settings: Option<ExportSettings>,
+        confine: Option<&[PathBuf]>,
     ) -> Result<bool, String> {
         let saved = settings.map(|given| std::mem::replace(&mut self.exports.settings, given));
         let nothing_selected = crate::i18n::t().export_nothing_selected;
-        let blocked = self.export_blocker().filter(|&why| why != nothing_selected);
-        if blocked.is_none() {
-            self.start_export(paths);
-        }
+        let started = match self.export_blocker().filter(|&why| why != nothing_selected) {
+            Some(why) => Err(why.to_string()),
+            None => self.start_export(paths, confine),
+        };
         if let Some(saved) = saved {
             self.exports.settings = saved;
         }
-        match blocked {
-            Some(why) => Err(why.into()),
-            None => Ok(self.exports.progress.is_some()),
-        }
+        started.map(|()| self.exports.progress.is_some())
     }
 
     /// Export in the form: export the selection with the form's settings. The
@@ -333,7 +336,8 @@ impl App {
             self.request_redraw();
             return;
         }
-        self.start_export(self.action_paths());
+        // The form's own export lands where the user chose; nothing holds it.
+        let _ = self.start_export(self.action_paths(), None);
     }
 
     /// Where a folder export would land, for the form to show.
@@ -481,8 +485,20 @@ impl App {
     /// Web export. Runs `bake_export_from_shared_vec` on the loader's decode
     /// threads and writes each file through the File System Access API. Reading sources
     /// and listing `Exports/` are async, so the batch setup runs in `spawn_local`.
+    /// The browser writes only into the picked folder's own `Exports`, so
+    /// nothing holds an agent's export there.
     #[cfg(target_arch = "wasm32")]
-    pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
+    pub(super) fn start_export(
+        &mut self,
+        paths: Vec<PathBuf>,
+        _confine: Option<&[PathBuf]>,
+    ) -> Result<(), String> {
+        self.start_web_export(paths);
+        Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn start_web_export(&mut self, paths: Vec<PathBuf>) {
         use std::collections::HashSet;
 
         let folder = self.folder_sel.clone().unwrap_or_default();
@@ -636,9 +652,16 @@ impl App {
     /// Returns at once; `on_export_outcomes` reports progress. The caller has
     /// checked `export_blocker`.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
+    /// Starts the batch. With `confine` (an agent's export), a folder
+    /// export's folder must be inside it: checked before the folder is made,
+    /// on its deepest part that exists, and again once it is made.
+    pub(super) fn start_export(
+        &mut self,
+        paths: Vec<PathBuf>,
+        confine: Option<&[PathBuf]>,
+    ) -> Result<(), String> {
         let Some(exporter) = self.exports.exporter.as_ref() else {
-            return;
+            return Ok(());
         };
         let settings = &self.exports.settings;
         let output = settings.output();
@@ -662,18 +685,22 @@ impl App {
         match &settings.target {
             ExportTarget::Folder(_) => {
                 let Some(dir) = self.export_folder() else {
-                    return;
+                    return Ok(());
                 };
+                let outside = |dir: &Path| confine.is_some_and(|roots| !within_any(dir, roots));
+                if outside(&dir) {
+                    return Err(self.refuse_agent_export());
+                }
                 if let Err(e) = std::fs::create_dir_all(&dir) {
                     self.set_status(
                         StatusKind::Error,
                         (crate::i18n::t().export_no_folder)(&e.to_string()),
                     );
                     self.request_redraw();
-                    return;
+                    return Ok(());
                 }
-                if !self.agent.export_folder_ok(&dir) {
-                    return;
+                if outside(&dir) {
+                    return Err(self.refuse_agent_export());
                 }
                 // Pick destinations one at a time so `taken` keeps same-stem
                 // sources apart.
@@ -687,7 +714,7 @@ impl App {
             }
             ExportTarget::Immich => {
                 let ImmichLink::Connected { server, .. } = &self.exports.immich else {
-                    return;
+                    return Ok(());
                 };
                 for (seq, src) in paths.into_iter().enumerate() {
                     let stem = settings.naming.stem(&src, seq + 1, total);
@@ -723,6 +750,7 @@ impl App {
             Self::progress_text(uploading, 0, total),
         );
         self.request_redraw();
+        Ok(())
     }
 
     fn progress_text(uploading: bool, done: usize, total: usize) -> String {
