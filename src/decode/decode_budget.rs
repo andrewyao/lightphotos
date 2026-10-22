@@ -9,7 +9,9 @@
 //!
 //! A decode asks for its estimate before it allocates and waits while the
 //! other decodes hold too much. One decode bigger than the whole budget still
-//! runs, alone.
+//! runs, alone. Requests are served in order, so a stream of small thumbnail
+//! grants cannot keep a large Loupe decode waiting for an empty budget
+//! forever.
 //!
 //! Compiled on every target so the tests run natively. Only wasm32 calls it.
 
@@ -24,8 +26,16 @@ pub(crate) const BUDGET: usize = 1536 << 20;
 
 pub(crate) struct DecodeBudget {
     limit: usize,
-    used: Mutex<usize>,
+    state: Mutex<State>,
     freed: Condvar,
+}
+
+/// Bytes granted, and a ticket line: each request takes the next ticket and
+/// is admitted only when its ticket is `serving` and its bytes fit.
+struct State {
+    used: usize,
+    next_ticket: u64,
+    serving: u64,
 }
 
 thread_local! {
@@ -40,20 +50,34 @@ impl DecodeBudget {
     pub(crate) const fn new(limit: usize) -> Self {
         Self {
             limit,
-            used: Mutex::new(0),
+            state: Mutex::new(State {
+                used: 0,
+                next_ticket: 0,
+                serving: 0,
+            }),
             freed: Condvar::new(),
         }
     }
 
-    /// Blocks until `bytes` fits beside what the other decodes hold. A request
-    /// over the whole limit waits for the rest to finish, then runs alone.
+    /// Blocks until every earlier request has been granted and `bytes` fits
+    /// beside what the other decodes hold. A request over the whole limit
+    /// waits for the rest to finish, then runs alone, and the requests after
+    /// it wait behind it rather than slipping past.
     pub(crate) fn acquire(&'static self, bytes: usize) -> Grant {
         let bytes = bytes.min(self.limit);
-        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
-        while *used > 0 && *used + bytes > self.limit {
-            used = self.freed.wait(used).unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let ticket = state.next_ticket;
+        state.next_ticket = state.next_ticket.wrapping_add(1);
+        while state.serving != ticket
+            || (state.used > 0 && state.used.saturating_add(bytes) > self.limit)
+        {
+            state = self.freed.wait(state).unwrap_or_else(|e| e.into_inner());
         }
-        *used += bytes;
+        state.used += bytes;
+        state.serving = state.serving.wrapping_add(1);
+        drop(state);
+        // The next ticket may fit beside this one.
+        self.freed.notify_all();
         HELD.with(|held| held.set(held.get() + bytes));
         Grant {
             budget: self,
@@ -62,9 +86,9 @@ impl DecodeBudget {
     }
 
     fn release(&self, bytes: usize) {
-        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
-        *used = used.saturating_sub(bytes);
-        drop(used);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.used = state.used.saturating_sub(bytes);
+        drop(state);
         self.freed.notify_all();
     }
 }
@@ -88,15 +112,22 @@ impl Drop for Grant {
     }
 }
 
-/// Peak bytes a JPEG, PNG or TIFF decode holds, from its header: the
-/// decoder's own buffer (`native` bytes), its RGBA8 copy, a second RGBA8
-/// copy when EXIF orientation rotates it, and the resized output of
-/// `out_pixels`. The header is hostile, so this saturates rather than wraps.
-pub(crate) fn nonraw_estimate(native: u64, pixels: u64, out_pixels: u64) -> usize {
-    let rgba = pixels.saturating_mul(4);
-    let total = native
-        .saturating_add(rgba.saturating_mul(2))
-        .saturating_add(out_pixels.saturating_mul(4));
+/// Peak bytes a JPEG, PNG or TIFF decode of a `src` image to `out` holds,
+/// from its header: the decoder's own buffer (`native` bytes), its RGBA8
+/// copy, a second RGBA8 copy when EXIF orientation turns it, and when it
+/// resizes, Lanczos3's first pass (an `Rgba32F` image `src` wide and `out`
+/// tall, 16 bytes a pixel) and the output. The header is hostile, so this
+/// saturates rather than wraps.
+pub(crate) fn nonraw_estimate(native: u64, src: (u32, u32), out: (u32, u32)) -> usize {
+    let pixels = |(w, h): (u32, u32)| u64::from(w) * u64::from(h);
+    let rgba = pixels(src).saturating_mul(4);
+    let mut total = native.saturating_add(rgba.saturating_mul(2));
+    if out != src {
+        let scratch = pixels((src.0, out.1)).saturating_mul(16);
+        total = total
+            .saturating_add(scratch)
+            .saturating_add(pixels(out).saturating_mul(4));
+    }
     usize::try_from(total).unwrap_or(usize::MAX)
 }
 
@@ -119,7 +150,7 @@ pub fn release_held_by_this_thread() {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     #[test]
@@ -156,16 +187,53 @@ mod tests {
         static BUDGET: DecodeBudget = DecodeBudget::new(100);
         let _a = BUDGET.acquire(40);
         let _b = BUDGET.acquire(40);
-        assert_eq!(*BUDGET.used.lock().unwrap(), 80);
+        assert_eq!(BUDGET.state.lock().unwrap().used, 80);
     }
 
     #[test]
     fn a_nonraw_estimate_counts_every_copy_and_saturates() {
-        // A 24 MP RGB8 JPEG shown at 2048 x 1365.
-        let pixels = 6000 * 4000;
-        let estimate = nonraw_estimate(pixels * 3, pixels, 2048 * 1365);
-        assert_eq!(estimate, 72_000_000 + 192_000_000 + 11_182_080);
-        assert_eq!(nonraw_estimate(u64::MAX, u64::MAX, u64::MAX), usize::MAX);
+        // A 24 MP RGB8 JPEG shown at 2048 x 1365: decoder buffer, two RGBA8
+        // copies, Lanczos's 6000 x 1365 Rgba32F pass, the output.
+        let estimate = nonraw_estimate(72_000_000, (6000, 4000), (2048, 1365));
+        assert_eq!(
+            estimate,
+            72_000_000 + 192_000_000 + 131_040_000 + 11_182_080
+        );
+        // Not resized: no scratch, no second output.
+        let whole = nonraw_estimate(72_000_000, (6000, 4000), (6000, 4000));
+        assert_eq!(whole, 72_000_000 + 192_000_000);
+        let huge = (u32::MAX, u32::MAX);
+        assert_eq!(nonraw_estimate(u64::MAX, huge, (1, 1)), usize::MAX);
+    }
+
+    /// A request that is waiting for the whole budget holds back the ones
+    /// after it, even those that would fit now, so streaming small grants
+    /// cannot starve it.
+    #[test]
+    fn a_waiting_large_request_is_not_overtaken() {
+        static BUDGET: DecodeBudget = DecodeBudget::new(100);
+        let first = BUDGET.acquire(60);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let spawn = |name: &'static str, bytes: usize| {
+            let order = Arc::clone(&order);
+            std::thread::spawn(move || {
+                let grant = BUDGET.acquire(bytes);
+                order.lock().unwrap().push(name);
+                std::thread::sleep(Duration::from_millis(20));
+                drop(grant);
+            })
+        };
+        let large = spawn("large", 1_000);
+        while BUDGET.state.lock().unwrap().next_ticket < 2 {
+            std::thread::yield_now();
+        }
+        let small = spawn("small", 10);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(order.lock().unwrap().is_empty(), "small slipped past");
+        drop(first);
+        large.join().unwrap();
+        small.join().unwrap();
+        assert_eq!(*order.lock().unwrap(), ["large", "small"]);
     }
 
     #[test]
