@@ -1241,10 +1241,13 @@ impl App {
         self.request_folder_store_load(playlist.dir());
     }
 
-    /// Drops the Loupe tiers' decodes, which another folder never shows.
+    /// Drops the Loupe tiers' decodes and what they hold, which another
+    /// folder never shows. `sync_loupe_tiers` sets the hold again from the
+    /// new folder's photos.
     fn forget_loupe_decodes(&mut self) {
         if let Some(loader) = self.loader.as_mut() {
             loader.forget_loupe_decodes();
+            loader.set_hold(Default::default());
         }
     }
 

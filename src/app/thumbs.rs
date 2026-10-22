@@ -22,27 +22,64 @@ impl App {
         }
     }
 
-    /// Acts on leaving the Loupe, once: the loader frees its full decodes,
-    /// and a full on screen goes too, CPU and GPU copies both, so the
-    /// Grid's develop page (or the next Loupe visit) uploads the preview.
-    /// `pump` calls this every frame; it compares against the mode it last
-    /// saw, so every path that changes `mode` is covered.
+    /// Keeps the loader's Loupe tiers in step with what the app shows.
+    /// `pump` calls this every frame, so nothing that changes the mode, the
+    /// selection, the filters or Group Compare can leave them stale:
+    ///
+    /// - Entering the Loupe opens the full tier; leaving it frees the full
+    ///   decodes, and a full on screen goes too, CPU and GPU copies both,
+    ///   so the Grid's develop page (or the next visit) uploads the preview.
+    /// - The hold, what eviction keeps, is worked out afresh from the photo
+    ///   wanted, its neighbors and the Compare tiles waiting on a full.
     pub(crate) fn sync_loupe_tiers(&mut self) {
-        let left = self.tiers_mode == ViewMode::Loupe && self.mode != ViewMode::Loupe;
-        self.tiers_mode = self.mode;
-        if !left {
-            return;
-        }
+        let (was, now) = (self.tiers_mode, self.mode);
+        self.tiers_mode = now;
+        let hold = self.loupe_hold();
         if let Some(loader) = &mut self.loader {
-            loader.leave_loupe();
+            if was != now && now == ViewMode::Loupe {
+                loader.enter_loupe();
+            }
+            if was == ViewMode::Loupe && now != ViewMode::Loupe {
+                loader.leave_loupe();
+            }
+            loader.set_hold(hold);
         }
-        if matches!(self.shown, Shown::Full(_)) {
+        if was == ViewMode::Loupe && now != ViewMode::Loupe && matches!(self.shown, Shown::Full(_))
+        {
             self.shown = Shown::Nothing;
             if let Some(r) = &mut self.renderer {
                 r.clear_image();
             }
             self.try_show();
         }
+    }
+
+    /// What the Loupe tiers must not evict now; see `Loader::set_hold`.
+    /// Outside the Loupe only the wanted photo's preview, which the Grid's
+    /// develop page shows. The neighbors' fulls only off wasm32, the one
+    /// build that prefetches them; its full tier holds one.
+    fn loupe_hold(&self) -> crate::jobs::loader::Hold {
+        let Some(want) = self.want.clone() else {
+            return Default::default();
+        };
+        let px = self.preview_px();
+        if self.mode != ViewMode::Loupe {
+            return crate::jobs::loader::Hold {
+                previews: vec![(want, px)],
+                fulls: Vec::new(),
+            };
+        }
+        let neighbors = self.neighbor_paths();
+        let mut previews = vec![(want.clone(), px)];
+        previews.extend(neighbors.iter().map(|p| (p.clone(), px)));
+        #[cfg(not(target_arch = "wasm32"))]
+        let fulls = std::iter::once(want)
+            .chain(neighbors)
+            .chain(self.compare_fulls_waiting())
+            .collect();
+        #[cfg(target_arch = "wasm32")]
+        let fulls = vec![want];
+        crate::jobs::loader::Hold { previews, fulls }
     }
 
     /// Show `want` at the best tier available: full resolution, then the
