@@ -71,6 +71,12 @@ mod nonmac_decode;
 #[cfg(not(target_os = "macos"))]
 pub use nonmac_decode::*;
 
+/// Fit and orient for every non-mac JPEG, PNG and TIFF decode.
+#[cfg(not(target_os = "macos"))]
+mod fit;
+#[cfg(not(target_os = "macos"))]
+pub use fit::{decode_fit, fit_decoded};
+
 #[cfg(target_os = "macos")]
 mod raw_filter;
 

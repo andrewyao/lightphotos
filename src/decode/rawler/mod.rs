@@ -488,9 +488,7 @@ pub fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<Decoded
         }
 
         let dynamic = decoder.full_image(&source, &params).ok().flatten()?;
-        let img = dynamic.into_rgba8();
-        let (w, h) = (img.width(), img.height());
-        if w == 0 || h == 0 {
+        if dynamic.width() == 0 || dynamic.height() == 0 {
             return None;
         }
 
@@ -502,22 +500,15 @@ pub fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<Decoded
             .and_then(|meta| meta.exif.orientation)
             .map(|code| exif_code_from_rawler_orientation(rawler::Orientation::from_u16(code)))
             .unwrap_or(1);
-
-        let (nw, nh) = fit_within(w, h, max_px);
-        let rgba = if (nw, nh) == (w, h) {
-            img.into_raw()
-        } else {
-            image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
-        };
-        Some(apply_exif_orientation(
-            DecodedImage::new_tracked(DecodedImageFields {
-                width: nw,
-                height: nh,
-                rgba,
-                pixel_format: PixelFormat::Srgb8,
-            }),
-            orientation,
-        ))
+        let orientation = image::metadata::Orientation::from_exif(orientation)
+            .unwrap_or(image::metadata::Orientation::NoTransforms);
+        let img = crate::decode::image_decode::fit_decoded(dynamic, max_px, orientation).ok()?;
+        Some(DecodedImage::new_tracked(DecodedImageFields {
+            width: img.width(),
+            height: img.height(),
+            rgba: img.into_raw(),
+            pixel_format: PixelFormat::Srgb8,
+        }))
     });
     std::panic::catch_unwind(run).ok().flatten()
 }
