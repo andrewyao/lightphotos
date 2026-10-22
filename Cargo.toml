@@ -144,6 +144,9 @@ rfd = "0.15"
 ureq = "3"
 # The `--control` channel's access token (`shell/control.rs`).
 getrandom = "0.3"
+# HMAC-SHA256 for the `--control` sign-in (`control_auth.rs`). ureq's TLS
+# already builds it, so it adds no crate.
+ring = "0.17"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The Immich API key lives in the login Keychain (`persist/secret.rs`).

@@ -16,6 +16,7 @@ use lightphotos::sidecar::{self, Flag};
 use serde_json::{json, Value};
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+const NONCE: &str = "00112233445566778899aabbccddeeff";
 
 /// Runs the server with `args`, sends `lines`, closes stdin, and returns
 /// each reply keyed by its position, after checking the server exited
@@ -304,8 +305,8 @@ fn a_headless_toggle_settles_once_for_the_set() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A stand-in for `lightphotos --control`: answers each connection's one
-/// request as the app would, and keeps what it was sent.
+/// A stand-in for `lightphotos --control`: signs each connection in, answers
+/// its requests as the app would, and keeps every request after the sign-in.
 fn fake_app(png: Vec<u8>) -> (u16, Arc<Mutex<Vec<Value>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -314,34 +315,55 @@ fn fake_app(png: Vec<u8>) -> (u16, Arc<Mutex<Vec<Value>>>) {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
-            let mut line = String::new();
-            BufReader::new(&stream).read_line(&mut line).unwrap();
-            let req: Value = serde_json::from_str(&line).unwrap();
-            log.lock().unwrap().push(req.clone());
-            let reply = match (req["token"].as_str(), req["op"].as_str()) {
-                (Some(t), _) if t != TOKEN => {
-                    json!({ "ok": false, "error": { "error": "bad_token" }, "message": "wrong or missing `token`" })
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut signed_in = false;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
                 }
-                (_, Some("run")) if req["command"]["id"] == "photo.rate" => {
-                    json!({ "ok": true, "result": { "photos": 1, "pending": false } })
+                let req: Value = serde_json::from_str(&line).unwrap();
+                if signed_in {
+                    log.lock().unwrap().push(req.clone());
                 }
-                (_, Some("run")) => json!({
-                    "ok": false,
-                    "error": { "error": "unknown_command", "id": req["command"]["id"] },
-                    "message": "no command; list the commands to see every id",
-                }),
-                (_, Some("wait")) => json!({ "ok": true, "result": { "view": "grid" } }),
-                (_, Some("list")) => json!({
-                    "ok": true,
-                    "result": { "photos": [{ "name": "a.jpg", "rating": 3 }], "total": 1, "truncated": false },
-                }),
-                (_, Some("screenshot")) => json!({
-                    "ok": true,
-                    "result": { "png_base64": lightphotos::base64::encode(&png), "width": 2, "height": 1 },
-                }),
-                _ => json!({ "ok": false, "error": { "error": "unknown_op" }, "message": "no op" }),
-            };
-            writeln!(stream, "{reply}").unwrap();
+                let reply = match (signed_in, req["op"].as_str()) {
+                    (_, Some("hello")) => json!({ "ok": true, "result": { "nonce": NONCE } }),
+                    (_, Some("auth")) => {
+                        let mac = req["mac"].as_str().unwrap_or("");
+                        signed_in = lightphotos::control_auth::verify(TOKEN, NONCE, mac);
+                        match signed_in {
+                            true => json!({ "ok": true, "result": { "signed_in": true } }),
+                            false => {
+                                json!({ "ok": false, "error": { "error": "bad_token" }, "message": "wrong `mac`" })
+                            }
+                        }
+                    }
+                    (false, _) => {
+                        json!({ "ok": false, "error": { "error": "auth_required" }, "message": "not signed in" })
+                    }
+                    (_, Some("run")) if req["command"]["id"] == "photo.rate" => {
+                        json!({ "ok": true, "result": { "photos": 1, "pending": false } })
+                    }
+                    (_, Some("run")) => json!({
+                        "ok": false,
+                        "error": { "error": "unknown_command", "id": req["command"]["id"] },
+                        "message": "no command; list the commands to see every id",
+                    }),
+                    (_, Some("wait")) => json!({ "ok": true, "result": { "view": "grid" } }),
+                    (_, Some("list")) => json!({
+                        "ok": true,
+                        "result": { "photos": [{ "name": "a.jpg", "rating": 3 }], "total": 1, "truncated": false },
+                    }),
+                    (_, Some("screenshot")) => json!({
+                        "ok": true,
+                        "result": { "png_base64": lightphotos::base64::encode(&png), "width": 2, "height": 1 },
+                    }),
+                    _ => {
+                        json!({ "ok": false, "error": { "error": "unknown_op" }, "message": "no op" })
+                    }
+                };
+                writeln!(stream, "{reply}").unwrap();
+            }
         }
     });
     (port, seen)
@@ -421,7 +443,10 @@ fn an_attached_session_runs_commands_and_returns_screenshots_through_the_control
         ["run", "wait", "screenshot", "run", "list"],
         "the screenshot waits for the app first"
     );
-    assert!(seen.iter().all(|r| r["token"] == TOKEN));
+    assert!(
+        seen.iter().all(|r| r.get("token").is_none()),
+        "the token never crosses the socket"
+    );
     assert_eq!(
         seen[0]["command"],
         json!({ "id": "photo.rate", "params": { "stars": 4 } })

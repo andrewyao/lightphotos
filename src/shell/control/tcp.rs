@@ -4,16 +4,22 @@
 //! given, and bound to 127.0.0.1 only.
 //!
 //! Each TCP connection carries one JSON request per line and gets one JSON
-//! reply per line:
+//! reply per line. A connection signs in first, without sending the token
+//! (`lightphotos::control_auth`), so whatever holds the port can't learn it:
 //!
 //! ```text
-//! {"token": "…", "op": "run", "command": {"id": "photo.rate", "params": {"stars": 3}}}
-//! {"token": "…", "op": "commands" | "state" | "list" | "screenshot"}
-//! {"token": "…", "op": "wait", "timeout_ms": 10000}
+//! {"op": "hello"}                        → {"ok": true, "result": {"nonce": "…", …}}
+//! {"op": "auth", "mac": "<hex HMAC-SHA256 of lightphotos-control:<nonce>, keyed by the token>"}
+//! {"op": "run", "command": {"id": "photo.rate", "params": {"stars": 3}}}
+//! {"op": "commands" | "state" | "list" | "screenshot"}
+//! {"op": "wait", "timeout_ms": 10000}
 //!
 //! {"ok": true, "result": …}
-//! {"ok": false, "error": {"error": "bad_token", …}, "message": "…"}
+//! {"ok": false, "error": {"error": "auth_required", …}, "message": "…"}
 //! ```
+//!
+//! A request that carries a `token`, as clients before the sign-in sent,
+//! gets a `raw_token_refused` error that says to update the client.
 //!
 //! A connection thread parses and checks each line, then hands the request
 //! to the main thread through the event loop (`UserEvent::Control`) and waits
@@ -32,6 +38,7 @@ use winit::event_loop::EventLoopProxy;
 use super::{Answer, ChannelError, Failure, Op, Payload, Reply, Request, DEFAULT_WAIT};
 use crate::command::Command;
 use crate::shell::macos_delegate::UserEvent;
+use lightphotos::control_auth;
 
 /// The longest request line. A longer one ends the connection.
 const MAX_LINE: usize = 1 << 20;
@@ -112,9 +119,57 @@ fn new_token() -> Result<String, String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Compares in time that does not depend on where the tokens differ.
-fn same_token(given: &[u8], token: &[u8]) -> bool {
-    given.len() == token.len() && given.iter().zip(token).fold(0, |acc, (a, b)| acc | (a ^ b)) == 0
+/// 64 hex characters from the OS random source: one connection's nonce.
+fn new_nonce() -> Result<String, Failure> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| ChannelError::Failed {
+        reason: format!("can't make a sign-in nonce: {e}"),
+    })?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// One connection's sign-in: the nonce it was last sent, and whether it
+/// has answered one.
+struct Session {
+    token: Arc<str>,
+    nonce: Option<String>,
+    signed_in: bool,
+}
+
+impl Session {
+    fn new(token: Arc<str>) -> Session {
+        Session {
+            token,
+            nonce: None,
+            signed_in: false,
+        }
+    }
+
+    /// Answers one line: a sign-in step here, a request on the main thread.
+    fn answer(&mut self, line: &[u8], app: &impl Fn(Request, Reply) -> bool) -> Answer {
+        match parse_request(line)? {
+            Asked::Hello => {
+                let nonce = new_nonce()?;
+                self.nonce = Some(nonce.clone());
+                Ok(Payload::Json(json!({
+                    "nonce": nonce,
+                    "mac": "hmac-sha256",
+                    "prefix": control_auth::PREFIX,
+                })))
+            }
+            Asked::Auth(mac) => {
+                // A nonce answers once, right or wrong.
+                let nonce = self.nonce.take().ok_or(ChannelError::AuthRequired)?;
+                self.signed_in = control_auth::verify(&self.token, &nonce, &mac);
+                if !self.signed_in {
+                    return Err(ChannelError::BadToken.into());
+                }
+                Ok(Payload::Json(json!({ "signed_in": true })))
+            }
+            Asked::Op(op) if self.signed_in => ask(app, op),
+            Asked::Op(_) => Err(ChannelError::AuthRequired.into()),
+        }
+    }
 }
 
 /// Binds 127.0.0.1:`port` and serves each connection on a thread of its
@@ -174,7 +229,7 @@ fn accept<A>(
         .name("control-conn".into())
         .spawn(move || {
             let _slot = slot;
-            serve(reader, stream, &token, &app);
+            serve(reader, stream, &mut Session::new(token), &app);
         });
 }
 
@@ -201,7 +256,7 @@ impl Drop for Slot {
 fn serve(
     mut reader: impl BufRead,
     mut writer: impl Write,
-    token: &str,
+    session: &mut Session,
     app: &impl Fn(Request, Reply) -> bool,
 ) {
     loop {
@@ -221,7 +276,7 @@ fn serve(
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let answer = parse_request(&line, token).and_then(|op| ask(app, op));
+        let answer = session.answer(&line, app);
         if write_reply(&mut writer, answer).is_err() {
             return;
         }
@@ -249,8 +304,17 @@ fn read_line(reader: &mut impl BufRead) -> std::io::Result<Line> {
     })
 }
 
-/// Parses one request line and checks its token.
-fn parse_request(line: &[u8], token: &str) -> Result<Op, Failure> {
+/// What one line asks for.
+#[derive(Debug)]
+enum Asked {
+    Hello,
+    /// The client's MAC of the nonce, as hex.
+    Auth(String),
+    Op(Op),
+}
+
+/// Parses one request line.
+fn parse_request(line: &[u8]) -> Result<Asked, Failure> {
     let bad = |reason: &str| ChannelError::BadJson {
         reason: reason.into(),
     };
@@ -260,15 +324,25 @@ fn parse_request(line: &[u8], token: &str) -> Result<Op, Failure> {
     if !value.is_object() {
         return Err(bad("not an object").into());
     }
-    let given = value.get("token").and_then(Value::as_str).unwrap_or("");
-    if !same_token(given.as_bytes(), token.as_bytes()) {
-        return Err(ChannelError::BadToken.into());
+    if value.get("token").is_some() {
+        return Err(ChannelError::RawTokenRefused.into());
     }
     let op = value
         .get("op")
         .and_then(Value::as_str)
         .ok_or_else(|| bad("missing a string `op`"))?;
-    Ok(match op {
+    match op {
+        "hello" => return Ok(Asked::Hello),
+        "auth" => {
+            let mac = value
+                .get("mac")
+                .and_then(Value::as_str)
+                .ok_or_else(|| bad("`auth` takes the nonce's MAC as a hex string `mac`"))?;
+            return Ok(Asked::Auth(mac.into()));
+        }
+        _ => {}
+    }
+    Ok(Asked::Op(match op {
         "run" => {
             let command = value.get("command").unwrap_or(&Value::Null);
             Op::Run(Box::new(Command::from_json(command)?))
@@ -287,7 +361,7 @@ fn parse_request(line: &[u8], token: &str) -> Result<Op, Failure> {
             }
         }),
         _ => return Err(ChannelError::UnknownOp { op: op.into() }.into()),
-    })
+    }))
 }
 
 /// Hands `op` to the main thread and waits for its answer.
@@ -346,7 +420,35 @@ mod tests {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
     fn request(op: &str) -> String {
-        format!(r#"{{"token":"{TOKEN}","op":"{op}"}}"#)
+        format!(r#"{{"op":"{op}"}}"#)
+    }
+
+    fn token() -> Arc<str> {
+        TOKEN.into()
+    }
+
+    fn parse_op(line: &str) -> Result<Op, Failure> {
+        match parse_request(line.as_bytes())? {
+            Asked::Op(op) => Ok(op),
+            other => panic!("not an op: {other:?}"),
+        }
+    }
+
+    /// A connection that has already signed in.
+    fn signed_in() -> Session {
+        Session {
+            token: token(),
+            nonce: None,
+            signed_in: true,
+        }
+    }
+
+    fn json_answer(answer: Answer) -> Result<Value, String> {
+        match answer {
+            Ok(Payload::Json(v)) => Ok(v),
+            Ok(Payload::Frame(_)) => Err("a frame".into()),
+            Err(f) => Err(error_tag(&f).to_string()),
+        }
     }
 
     fn error_tag(failure: &Failure) -> &str {
@@ -361,24 +463,18 @@ mod tests {
 
     #[test]
     fn requests_parse_into_ops() {
-        let parse = |line: &str| parse_request(line.as_bytes(), TOKEN);
+        let parse = parse_op;
         assert!(matches!(parse(&request("state")), Ok(Op::State)));
         assert!(matches!(parse(&request("commands")), Ok(Op::Commands)));
         assert!(matches!(parse(&request("list")), Ok(Op::List)));
         assert!(matches!(parse(&request("screenshot")), Ok(Op::Screenshot)));
         assert!(matches!(parse(&request("wait")), Ok(Op::Wait(t)) if t == DEFAULT_WAIT));
-        let wait = |ms: &str| {
-            parse(&format!(
-                r#"{{"token":"{TOKEN}","op":"wait","timeout_ms":{ms}}}"#
-            ))
-        };
+        let wait = |ms: &str| parse(&format!(r#"{{"op":"wait","timeout_ms":{ms}}}"#));
         assert!(matches!(wait("250"), Ok(Op::Wait(t)) if t == Duration::from_millis(250)));
         assert!(matches!(wait("999999999"), Ok(Op::Wait(t)) if t == MAX_WAIT));
         assert_eq!(error_tag(&wait("-1").unwrap_err()), "bad_json");
 
-        let run = parse(&format!(
-            r#"{{"token":"{TOKEN}","op":"run","command":{{"id":"photo.rate","params":{{"stars":3}}}}}}"#
-        ));
+        let run = parse(r#"{"op":"run","command":{"id":"photo.rate","params":{"stars":3}}}"#);
         let Ok(Op::Run(cmd)) = run else {
             panic!("not a run: {run:?}");
         };
@@ -387,38 +483,74 @@ mod tests {
 
     #[test]
     fn bad_requests_get_the_matching_error() {
-        let tag =
-            |line: &str| error_tag(&parse_request(line.as_bytes(), TOKEN).unwrap_err()).to_string();
+        let tag = |line: &str| error_tag(&parse_op(line).unwrap_err()).to_string();
         assert_eq!(tag("{not json"), "bad_json");
         assert_eq!(tag("[1, 2]"), "bad_json");
-        assert_eq!(tag(&format!(r#"{{"token":"{TOKEN}"}}"#)), "bad_json");
+        assert_eq!(tag("{}"), "bad_json");
         assert_eq!(tag(&request("dance")), "unknown_op");
         assert_eq!(
-            tag(&format!(
-                r#"{{"token":"{TOKEN}","op":"run","command":{{"id":"photo.zap"}}}}"#
-            )),
+            tag(r#"{"op":"run","command":{"id":"photo.zap"}}"#),
             "unknown_command"
         );
         assert_eq!(
-            tag(&format!(
-                r#"{{"token":"{TOKEN}","op":"run","command":{{"id":"photo.rate","params":{{"stars":9}}}}}}"#
-            )),
+            tag(r#"{"op":"run","command":{"id":"photo.rate","params":{"stars":9}}}"#),
             "bad_params"
         );
     }
 
     #[test]
-    fn a_wrong_missing_or_partial_token_is_refused_before_the_op() {
+    fn a_request_with_a_raw_token_is_refused_with_a_way_forward() {
         for line in [
-            r#"{"op":"state"}"#.to_string(),
-            r#"{"token":42,"op":"state"}"#.to_string(),
-            format!(r#"{{"token":"{}","op":"state"}}"#, &TOKEN[..31]),
-            format!(r#"{{"token":"{TOKEN}0","op":"state"}}"#),
-            format!(r#"{{"token":"{}","op":"dance"}}"#, TOKEN.to_uppercase()),
+            format!(r#"{{"token":"{TOKEN}","op":"state"}}"#),
+            r#"{"token":42,"op":"dance"}"#.to_string(),
         ] {
-            let failure = parse_request(line.as_bytes(), TOKEN).unwrap_err();
-            assert_eq!(error_tag(&failure), "bad_token", "{line}");
+            let failure = parse_request(line.as_bytes()).unwrap_err();
+            assert_eq!(error_tag(&failure), "raw_token_refused", "{line}");
+            assert!(
+                failure.message.contains("Update lightphotos-mcp"),
+                "{}",
+                failure.message
+            );
         }
+    }
+
+    #[test]
+    fn a_connection_must_answer_its_nonce_before_any_request() {
+        let mut session = Session::new(token());
+        let mut say = |line: &str| json_answer(session.answer(line.as_bytes(), &fake_app));
+        let auth = |mac: &str| format!(r#"{{"op":"auth","mac":"{mac}"}}"#);
+        let nonce_of =
+            |reply: Result<Value, String>| reply.unwrap()["nonce"].as_str().unwrap().to_string();
+
+        assert_eq!(say(&request("state")), Err("auth_required".into()));
+        assert_eq!(
+            say(&auth("00")),
+            Err("auth_required".into()),
+            "no nonce yet"
+        );
+
+        let nonce = nonce_of(say(&request("hello")));
+        assert!(
+            control_auth::is_nonce(&nonce) && nonce.len() == 64,
+            "{nonce}"
+        );
+        let wrong = control_auth::mac_hex("not-the-token-at-all", &nonce);
+        assert_eq!(say(&auth(&wrong)), Err("bad_token".into()));
+        let right = control_auth::mac_hex(TOKEN, &nonce);
+        assert_eq!(
+            say(&auth(&right)),
+            Err("auth_required".into()),
+            "a nonce answers once"
+        );
+        assert_eq!(say(&request("state")), Err("auth_required".into()));
+
+        let fresh = nonce_of(say(&request("hello")));
+        assert_ne!(fresh, nonce);
+        assert_eq!(say(&auth(&right)), Err("bad_token".into()), "an old MAC");
+        let fresh = nonce_of(say(&request("hello")));
+        let mac = control_auth::mac_hex(TOKEN, &fresh);
+        assert_eq!(say(&auth(&mac)).unwrap()["signed_in"], true);
+        assert_eq!(say(&request("state")).unwrap()["mode"], "grid");
     }
 
     #[test]
@@ -490,7 +622,7 @@ mod tests {
         serve(
             Cursor::new(input.as_bytes().to_vec()),
             &mut out,
-            TOKEN,
+            &mut signed_in(),
             &fake_app,
         );
         String::from_utf8(out)
@@ -502,16 +634,12 @@ mod tests {
 
     #[test]
     fn a_bad_line_gets_an_error_and_the_next_line_still_works() {
-        let input = format!(
-            "{{oops\n\n{}\n{}\n",
-            r#"{"token":"nope-nope-nope-nope","op":"state"}"#,
-            request("state")
-        );
+        let input = format!("{{oops\n\n{}\n{}\n", r#"{"op":"dance"}"#, request("state"));
         let replies = replies(&input);
         assert_eq!(replies.len(), 3, "{replies:?}");
         assert_eq!(replies[0]["ok"], false);
         assert_eq!(replies[0]["error"]["error"], "bad_json");
-        assert_eq!(replies[1]["error"]["error"], "bad_token");
+        assert_eq!(replies[1]["error"]["error"], "unknown_op");
         assert_eq!(
             replies[2],
             json!({ "ok": true, "result": { "mode": "grid" } })
@@ -520,8 +648,7 @@ mod tests {
 
     #[test]
     fn a_command_error_comes_back_with_its_message() {
-        let line = format!(r#"{{"token":"{TOKEN}","op":"run","command":{{"id":"edit.undo"}}}}"#);
-        let reply = &replies(&line)[0];
+        let reply = &replies(r#"{"op":"run","command":{"id":"edit.undo"}}"#)[0];
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["error"]["error"], "failed");
         assert_eq!(reply["message"], "edit.undo refused");
@@ -542,11 +669,30 @@ mod tests {
         serve(
             Cursor::new(request("state").into_bytes()),
             &mut out,
-            TOKEN,
+            &mut signed_in(),
             &gone,
         );
         let reply: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(reply["error"]["error"], "app_closed");
+    }
+
+    /// Sends `line` and reads the reply line.
+    fn ask_line(stream: &mut TcpStream, line: &str) -> Value {
+        stream.write_all(format!("{line}\n").as_bytes()).unwrap();
+        let mut reply = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut reply)
+            .unwrap();
+        serde_json::from_str(&reply).unwrap()
+    }
+
+    /// Signs `stream` in as a client does: `hello`, then the nonce's MAC.
+    fn sign_in(stream: &mut TcpStream) {
+        let hello = ask_line(stream, &request("hello"));
+        let nonce = hello["result"]["nonce"].as_str().unwrap();
+        let mac = control_auth::mac_hex(TOKEN, nonce);
+        let auth = ask_line(stream, &format!(r#"{{"op":"auth","mac":"{mac}"}}"#));
+        assert_eq!(auth["ok"], true, "{auth}");
     }
 
     /// A slot frees just after its socket closes, so retry for a while.
@@ -555,7 +701,7 @@ mod tests {
         loop {
             // A refused connection may close before the request is written.
             let mut again = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-            let _ = again.write_all(format!("{}\n", request("state")).as_bytes());
+            let _ = again.write_all(format!("{}\n", request("hello")).as_bytes());
             let mut reply = String::new();
             let _ = BufReader::new(again).read_line(&mut reply);
             if reply.contains(r#""ok":true"#) {
@@ -595,16 +741,9 @@ mod tests {
     fn over_loopback_a_screenshot_decodes_and_extra_connections_are_refused() {
         let port = listen(0, TOKEN.into(), IDLE_TIMEOUT, fake_app).unwrap();
         let connect = || TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-        let ask_line = |stream: &mut TcpStream, line: &str| -> Value {
-            stream.write_all(format!("{line}\n").as_bytes()).unwrap();
-            let mut reply = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut reply)
-                .unwrap();
-            serde_json::from_str(&reply).unwrap()
-        };
 
         let mut first = connect();
+        sign_in(&mut first);
         let shot = ask_line(&mut first, &request("screenshot"));
         assert_eq!(shot["ok"], true, "{shot}");
         assert_eq!(
@@ -619,6 +758,7 @@ mod tests {
 
         let mut open: Vec<TcpStream> = (1..MAX_CONNECTIONS).map(|_| connect()).collect();
         for stream in &mut open {
+            sign_in(stream);
             assert_eq!(ask_line(stream, &request("state"))["ok"], true);
         }
         let mut extra = connect();
