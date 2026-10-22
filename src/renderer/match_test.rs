@@ -784,14 +784,43 @@ fn measure(r: &mut Renderer, fixture: &Fixture, case: &Case, probe: BaseProbe) -
     }
 }
 
+/// A renderer on the adapter wgpu picks, or `None` to skip on a machine
+/// with none.
 fn headless(w: u32, h: u32) -> Option<Renderer> {
     match Renderer::new_headless(w, h) {
         Ok(r) => Some(r),
-        Err(e) => {
-            eprintln!("match_test: skipped, no GPU adapter: {e}");
-            None
-        }
+        Err(e) => no_adapter(
+            &e,
+            cfg!(target_os = "macos") && std::env::var_os("CI").is_some(),
+        ),
     }
+}
+
+/// CI's macOS runner has a Metal device and is where these tests check
+/// parity, so there (`CI` set, as GitHub Actions does) a missing adapter
+/// fails the test rather than letting it pass without comparing anything.
+/// The Linux runner has no GPU. Mesa's lavapipe would give it one, but
+/// its shader math lands up to 11 levels from the CPU bake (85 pairs over
+/// tolerance, measured 2026-10-22 with llvmpipe from LLVM 20.1.2), so the
+/// Linux job skips rather than loosen the tolerances.
+fn no_adapter(e: &str, required: bool) -> Option<Renderer> {
+    assert!(
+        !required,
+        "match_test: no GPU adapter on CI, so the GPU/CPU parity check cannot run: {e}"
+    );
+    eprintln!("match_test: skipped, no GPU adapter: {e}");
+    None
+}
+
+#[test]
+#[should_panic(expected = "no GPU adapter on CI")]
+fn a_missing_adapter_fails_on_ci() {
+    no_adapter("none found", true);
+}
+
+#[test]
+fn a_missing_adapter_skips_off_ci() {
+    assert!(no_adapter("none found", false).is_none());
 }
 
 /// Print every pair, worst first, and fail on any over its tolerance.
