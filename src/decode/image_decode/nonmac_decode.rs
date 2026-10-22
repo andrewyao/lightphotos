@@ -69,12 +69,12 @@ pub fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedIma
     // returns; sized from the header before any pixel is allocated.
     #[cfg(target_arch = "wasm32")]
     let _grant = {
-        let (w, h) = decoder.dimensions();
-        let (out_w, out_h) = fit_within(w, h, max_dim);
+        let src = decoder.dimensions();
+        let out = fit_within(src.0, src.1, max_dim);
         crate::decode::decode_budget::acquire(crate::decode::decode_budget::nonraw_estimate(
             decoder.total_bytes(),
-            u64::from(w) * u64::from(h),
-            u64::from(out_w) * u64::from(out_h),
+            src,
+            out,
         ))
     };
 
