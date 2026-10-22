@@ -216,41 +216,47 @@ impl BaseLayer {
         // band edge may split is read twice, however dense the grid.
         let band_cells = (BAND_TEXEL_ROWS * gh64).div_ceil(h64).max(1);
         let mut sums = vec![[0f32; 3]; gw * gh];
-        super::parallel::for_each_chunk(&mut sums, gw * band_cells as usize, |band, cells| {
-            let j_first = band as u64 * band_cells;
-            let j_end = j_first + (cells.len() / gw) as u64;
-            let mut row = vec![[0f32; 3]; w as usize];
-            let mut row_sums = vec![[0f32; 3]; gw];
-            let y_first = cell_span(j_first, gh64, h64).0;
-            let y_end = cell_span(j_end - 1, gh64, h64).1;
-            for y64 in y_first..y_end {
-                let y = y64 as u32;
-                for (x, px) in row.iter_mut().enumerate() {
-                    *px = pre(x as u32, y);
-                }
-                for (column, rs) in columns.iter().zip(row_sums.iter_mut()) {
-                    *rs = [0.0; 3];
-                    for &(x, ox) in column {
-                        let p = row[x];
-                        for c in 0..3 {
-                            rs[c] += ox * p[c];
+        let threads = w as usize * h as usize >= super::parallel::THREADS_FROM_PX;
+        super::parallel::for_each_chunk(
+            threads,
+            &mut sums,
+            gw * band_cells as usize,
+            |band, cells| {
+                let j_first = band as u64 * band_cells;
+                let j_end = j_first + (cells.len() / gw) as u64;
+                let mut row = vec![[0f32; 3]; w as usize];
+                let mut row_sums = vec![[0f32; 3]; gw];
+                let y_first = cell_span(j_first, gh64, h64).0;
+                let y_end = cell_span(j_end - 1, gh64, h64).1;
+                for y64 in y_first..y_end {
+                    let y = y64 as u32;
+                    for (x, px) in row.iter_mut().enumerate() {
+                        *px = pre(x as u32, y);
+                    }
+                    for (column, rs) in columns.iter().zip(row_sums.iter_mut()) {
+                        *rs = [0.0; 3];
+                        for &(x, ox) in column {
+                            let p = row[x];
+                            for c in 0..3 {
+                                rs[c] += ox * p[c];
+                            }
+                        }
+                    }
+                    // The cell rows this texel row overlaps, within the band.
+                    let j0 = (y64 * gh64 / h64).max(j_first);
+                    let j1 = (((y64 + 1) * gh64 - 1) / h64).min(j_end - 1);
+                    for j in j0..=j1 {
+                        let oy = overlap(y64, j, gh64, h64) as f32;
+                        let at = (j - j_first) as usize * gw;
+                        for (cell, rs) in cells[at..at + gw].iter_mut().zip(&row_sums) {
+                            for c in 0..3 {
+                                cell[c] += oy * rs[c];
+                            }
                         }
                     }
                 }
-                // The cell rows this texel row overlaps, within the band.
-                let j0 = (y64 * gh64 / h64).max(j_first);
-                let j1 = (((y64 + 1) * gh64 - 1) / h64).min(j_end - 1);
-                for j in j0..=j1 {
-                    let oy = overlap(y64, j, gh64, h64) as f32;
-                    let at = (j - j_first) as usize * gw;
-                    for (cell, rs) in cells[at..at + gw].iter_mut().zip(&row_sums) {
-                        for c in 0..3 {
-                            cell[c] += oy * rs[c];
-                        }
-                    }
-                }
-            }
-        });
+            },
+        );
 
         let area = w as f32 * h as f32;
         let means = sums.iter().map(|s| s.map(|v| v / area));

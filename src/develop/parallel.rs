@@ -15,23 +15,53 @@ const BAND_ROWS: usize = 16;
 /// `y`. The calling thread works too, so every row runs even when no other
 /// thread can start.
 pub fn for_each_row<T: Send>(out: &mut [T], row_len: usize, row: impl Fn(usize, &mut [T]) + Sync) {
-    for_each_chunk(out, BAND_ROWS.saturating_mul(row_len), |band, chunk| {
-        for (i, out_row) in chunk.chunks_mut(row_len).enumerate() {
-            row(band * BAND_ROWS + i, out_row);
-        }
-    });
+    for_each_row_on(true, out, row_len, row);
+}
+
+/// Below this many pixels a pass that is cheap next to the bake around it,
+/// such as building a layer, stays on the calling thread. The thumbnail
+/// and scoring bakes (512 and 1024 px) run 2-4 at once on their own
+/// workers, so helpers there only add thread starts; an export's full-size
+/// bake is well past it.
+pub const THREADS_FROM_PX: usize = 2_000_000;
+
+/// [`for_each_row`], on helper threads only when `threads`; otherwise every
+/// row runs here, in order.
+pub fn for_each_row_on<T: Send>(
+    threads: bool,
+    out: &mut [T],
+    row_len: usize,
+    row: impl Fn(usize, &mut [T]) + Sync,
+) {
+    for_each_chunk(
+        threads,
+        out,
+        BAND_ROWS.saturating_mul(row_len),
+        |band, chunk| {
+            for (i, out_row) in chunk.chunks_mut(row_len).enumerate() {
+                row(band * BAND_ROWS + i, out_row);
+            }
+        },
+    );
 }
 
 /// Call `chunk(i, out_chunk)` for each `chunk_len`-element chunk of `out`,
 /// the last one possibly shorter, for a pass that sizes its own bands. The
 /// same rules as [`for_each_row`]: any order, any thread, and the calling
-/// thread works too.
+/// thread works too. Without `threads` every chunk runs here, in order.
 pub fn for_each_chunk<T: Send>(
+    threads: bool,
     out: &mut [T],
     chunk_len: usize,
     chunk: impl Fn(usize, &mut [T]) + Sync,
 ) {
     if chunk_len == 0 {
+        return;
+    }
+    if !threads {
+        for (i, out_chunk) in out.chunks_mut(chunk_len).enumerate() {
+            chunk(i, out_chunk);
+        }
         return;
     }
     let chunks = out.len().div_ceil(chunk_len);
@@ -134,7 +164,7 @@ mod tests {
     #[test]
     fn every_chunk_runs_once_with_its_own_index_and_the_last_is_short() {
         let mut out = vec![usize::MAX; 10];
-        for_each_chunk(&mut out, 4, |i, chunk| {
+        for_each_chunk(true, &mut out, 4, |i, chunk| {
             assert_eq!(chunk.len(), if i == 2 { 2 } else { 4 });
             for (k, v) in chunk.iter_mut().enumerate() {
                 assert_eq!(*v, usize::MAX, "chunk {i} written twice");
@@ -142,6 +172,19 @@ mod tests {
             }
         });
         assert!(out.iter().enumerate().all(|(i, &v)| i == v));
+    }
+
+    #[test]
+    fn without_threads_every_chunk_runs_here_in_order() {
+        let here = std::thread::current().id();
+        let seen = Mutex::new(Vec::new());
+        let mut out = vec![0u8; 100];
+        for_each_chunk(false, &mut out, 3, |i, _| {
+            assert_eq!(std::thread::current().id(), here);
+            seen.lock().unwrap_or_else(PoisonError::into_inner).push(i);
+        });
+        let seen = seen.into_inner().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(seen, (0..34).collect::<Vec<_>>());
     }
 
     #[test]

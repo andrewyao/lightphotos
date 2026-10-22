@@ -171,7 +171,8 @@ impl<'a> Source<'a> {
         }
         let linear = cache.then(|| {
             let mut buf = vec![[f16::ZERO; 3]; n];
-            develop::parallel::for_each_row(&mut buf, w, |y, row| {
+            let threads = n >= develop::parallel::THREADS_FROM_PX;
+            develop::parallel::for_each_row_on(threads, &mut buf, w, |y, row| {
                 for (x, px) in row.iter_mut().enumerate() {
                     *px = pixel_linear(img, x as u32, y as u32).map(f16::from_f32);
                 }
