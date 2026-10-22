@@ -20,7 +20,7 @@ use crate::sidecar::{SIDECAR_DIR, SIDECAR_EXT};
 
 pub(crate) mod group_file;
 mod writeback;
-pub(crate) use writeback::LoadMark;
+pub(crate) use writeback::{LoadMark, Patch};
 use writeback::{WriteOp, Writeback};
 
 /// Records for the active directory, backed by its sidecar files. `images`
@@ -329,27 +329,27 @@ impl FolderStore {
         self.cache_key(path).is_some() && self.groups.is_some()
     }
 
-    /// Set the adjustments of a photo whose record the cache does not hold,
-    /// such as one in a folder the user has left. The write reads the photo's
-    /// sidecar when it runs and changes only the adjustments, so its other
+    /// Change one part of a photo's record whose record the cache does not
+    /// hold, such as one in a folder the user has left. The write reads the
+    /// photo's sidecar when it runs and changes only that part, so its other
     /// fields survive and a same-named photo in the active directory is never
     /// touched.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn set_adjustments_uncached(&mut self, path: &Path, adj: &Adjustments) {
-        let op = WriteOp::Adjust(Box::new(*adj), crate::sidecar::unix_now());
-        self.writeback.enqueue(path, op);
+    pub(crate) fn patch_uncached(&mut self, path: &Path, patch: Patch) {
+        self.writeback
+            .enqueue(path, WriteOp::Patch(Box::new(patch)));
     }
 
     /// As on native, through the handle of the photo's own folder.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn set_adjustments_uncached(
+    pub(crate) fn patch_uncached(
         &mut self,
         path: &Path,
-        adj: &Adjustments,
+        patch: Patch,
         dir_handle: &web_sys::FileSystemDirectoryHandle,
     ) {
-        let op = WriteOp::Adjust(Box::new(*adj), crate::sidecar::unix_now());
-        self.writeback.enqueue(path, op, dir_handle.clone());
+        self.writeback
+            .enqueue(path, WriteOp::Patch(Box::new(patch)), dir_handle.clone());
     }
 
     pub fn touchups(&self, path: &Path) -> Vec<TouchUp> {

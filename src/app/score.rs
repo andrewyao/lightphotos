@@ -65,8 +65,14 @@ impl App {
             if !ours || !o.path.exists() {
                 continue;
             }
+            // The photo's folder need not be the one showing: see
+            // `save_patch`.
             if let Ok(score) = o.result {
-                self.folder_store.set_score(&o.path, score, o.edits);
+                let stored = crate::sidecar::StoredScore {
+                    score,
+                    edits: o.edits,
+                };
+                self.save_patch(&o.path, crate::persist::folder_store::Patch::Score(stored));
             }
         }
         if let Some(job) = self.score_job.as_mut() {
@@ -399,16 +405,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A run started in folder A finishes after the user opens folder B.
+    /// Each score lands in A's sidecar with the rest of its record, and B's
+    /// same-named photo is not scored.
     #[test]
-    fn leaving_the_folder_cancels_the_run() {
-        let (mut app, dir, _) = folder_app(4);
+    fn a_run_finishes_in_its_own_folder_after_a_folder_change() {
+        let (mut app, dir, paths) = folder_app(4);
+        app.folder_store.set(&paths[0], 3);
+        let (other, twins) =
+            crate::app::test_support::folder_of("score-test-other", &["p00.jpg".into()]);
+        {
+            let mut store = crate::persist::folder_store::FolderStore::with_dir(other.clone());
+            store.set(&twins[0], 4);
+        }
         app.score_pool = ScorePool::with_runner(2, slow_fixed);
         app.select_all();
         app.score_selection();
-        let other = crate::app::test_support::temp_folder("score-test-other");
-        app.load_playlist(Playlist::from_dir(&other), other.clone());
-        assert_eq!(app.score_progress(), None);
+        crate::app::test_support::load_folder(&mut app, &other);
+        assert_eq!(
+            app.score_progress(),
+            Some((0, 4)),
+            "a folder change must not stop the run"
+        );
         run_until_idle(&mut app);
+        assert_eq!(app.status_text(), Some("Scored 4 photo(s)"));
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(10));
+        for p in &paths {
+            let saved = crate::sidecar::read_record(p).unwrap();
+            assert_eq!(saved.score.map(|s| s.score.value), Some(61), "{p:?}");
+        }
+        assert_eq!(
+            crate::sidecar::read_record(&paths[0]).unwrap().rating,
+            Some(3),
+            "a score keeps the rest of its record"
+        );
+        let twin = crate::sidecar::read_record(&twins[0]).unwrap();
+        assert_eq!((twin.score, twin.rating), (None, Some(4)));
+        assert!(app.folder_store.score(&twins[0]).is_none());
+        assert_eq!(
+            app.folder_store.take_error(),
+            None,
+            "no sidecar write failed"
+        );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&other);
     }

@@ -1266,12 +1266,21 @@ impl App {
         }
     }
 
-    /// Finish the jobs that write to the folder showing, before the folder store
-    /// they write to is replaced or closed.
+    /// Settle the jobs that write to the folder showing, before the folder
+    /// store they write to is replaced or closed.
+    ///
+    /// The rule: a job that writes a sidecar finishes across a folder change.
+    /// Auto Tone, Remove Chromatic Aberration, scoring and bulk delete keep
+    /// running, and each result lands in its own photo's sidecar, found by
+    /// the photo's full path (`save_patch`, `FolderStore::patch_uncached`).
+    /// The folder store's cache is keyed by file name, so no such job may
+    /// write through it for a photo it does not hold. What a job cannot
+    /// carry over is its undo step, since the folder change clears the
+    /// history, so each job here only lets go of that. A new job of this kind
+    /// must follow the same rule.
     fn finish_folder_jobs(&mut self) {
         self.autotone.leave_folder();
-        self.cancel_remove_ca();
-        self.cancel_scoring();
+        self.optics.leave_folder();
         self.save_edit();
     }
 

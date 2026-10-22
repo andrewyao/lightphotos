@@ -444,9 +444,7 @@ impl App {
     /// saturation and denoise. Thumbnails rebuild on their own because their
     /// cache key includes the edits.
     ///
-    /// The photo's folder need not be the one showing. The folder store keys
-    /// its cache by file name, so a photo it does not hold is saved straight
-    /// to its own sidecar, never to a same-named record here.
+    /// The photo's folder need not be the one showing: see `save_patch`.
     fn tone_one(&mut self, path: &Path, auto: &crate::develop::Adjustments) {
         let base = self.edits.get(path).copied().unwrap_or_default();
         let merged = autotone::merge(&base, auto);
@@ -455,21 +453,13 @@ impl App {
         } else {
             self.store_edit(path, merged);
         }
-        if self.folder_store.holds(path) {
-            self.folder_store.set_adjustments(path, &merged);
-        } else {
-            #[cfg(not(target_arch = "wasm32"))]
-            self.folder_store.set_adjustments_uncached(path, &merged);
-            #[cfg(target_arch = "wasm32")]
-            match path.parent().and_then(|dir| self.web.dir_handle(dir)) {
-                Some(handle) => self
-                    .folder_store
-                    .set_adjustments_uncached(path, &merged, &handle),
-                None => self
-                    .folder_store
-                    .note_persist_error(format!("no folder handle for {}", path.display())),
-            }
-        }
+        self.save_patch(
+            path,
+            crate::persist::folder_store::Patch::Adjustments(
+                Box::new(merged),
+                crate::sidecar::unix_now(),
+            ),
+        );
         #[cfg(target_arch = "wasm32")]
         if merged != base {
             crate::web::analytics::property("develop_edit_applied", "edit_kind", "auto_tone");
