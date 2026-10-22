@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::develop::copy::{self, CopyItem, CopyItems};
 use crate::develop::Adjustments;
 use crate::navigation::{Cmp, FlagFilter};
-use crate::persist::folder_store::GroupWriteRefused;
+use crate::persist::folder_store::{GroupWriteRefused, Patch};
 use crate::persist::groups::{Group, GroupWrite};
 use crate::sidecar::Flag;
 use crate::ui;
@@ -931,6 +931,32 @@ impl App {
         }
         self.request_redraw();
         paths.len()
+    }
+
+    /// Save one part of `path`'s record from a job that may have outlived
+    /// its folder: Auto Tone, Remove Chromatic Aberration or scoring.
+    ///
+    /// The folder store keys its cache by file name, so a photo it does not
+    /// hold, such as one in a folder the user has left, goes straight to its
+    /// own sidecar and never to a same-named record here. On the web that
+    /// write runs through the handle of the photo's own folder.
+    pub(super) fn save_patch(&mut self, path: &Path, patch: Patch) {
+        if self.folder_store.holds(path) {
+            match patch {
+                Patch::Adjustments(adj, _) => self.folder_store.set_adjustments(path, &adj),
+                Patch::Score(s) => self.folder_store.set_score(path, s.score, s.edits),
+            }
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.folder_store.patch_uncached(path, patch);
+        #[cfg(target_arch = "wasm32")]
+        match path.parent().and_then(|dir| self.web.dir_handle(dir)) {
+            Some(handle) => self.folder_store.patch_uncached(path, patch, &handle),
+            None => self
+                .folder_store
+                .note_persist_error(format!("no folder handle for {}", path.display())),
+        }
     }
 
     /// File name the copied settings came from, if any.

@@ -15,7 +15,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::develop::Adjustments;
 use crate::persist::groups::{Group, GroupId, GroupWrite, Groups};
-use crate::sidecar::ImageRecord;
+use crate::sidecar::{ImageRecord, StoredScore};
 
 /// One queued sidecar mutation.
 ///
@@ -26,22 +26,41 @@ use crate::sidecar::ImageRecord;
 /// with a single value and lets wasm admit one task per path without losing a
 /// field.
 ///
-/// `Adjust` is the one delta. It sets a photo's adjustments, edited at the
-/// given Unix time, in whatever its sidecar holds when the write runs. It is
-/// for a photo whose record the cache does not hold, such as one in a folder
-/// the user has left. [`Writeback::accept`] folds it into an earlier `Put` or
-/// `Delete` for the same path, so the newest entry still answers alone.
+/// `Patch` is the one delta. It changes one part of whatever the photo's
+/// sidecar holds when the write runs. It is for a photo whose record the
+/// cache does not hold, such as one in a folder the user has left.
+/// [`Writeback::accept`] folds it into an earlier `Put` or `Delete` for the
+/// same path, so the newest entry still answers alone.
 ///
-/// `Put`, `Adjust` and `Delete` are queued under the photo's own path and
+/// `Put`, `Patch` and `Delete` are queued under the photo's own path and
 /// derive its sidecar from it. `PutGroup` and `DeleteGroup` are queued under
 /// the group sidecar's path, since a group has no photo of its own.
 #[derive(Clone)]
 pub(super) enum WriteOp {
     Put(Box<ImageRecord>),
-    Adjust(Box<Adjustments>, u64),
+    Patch(Box<Patch>),
     Delete,
     PutGroup(Group),
     DeleteGroup,
+}
+
+/// The part of a record a [`WriteOp::Patch`] changes. Everything else in
+/// the sidecar stays as the write finds it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Patch {
+    /// The adjustments, edited at the given Unix time.
+    Adjustments(Box<Adjustments>, u64),
+    /// The quality score.
+    Score(StoredScore),
+}
+
+impl Patch {
+    fn apply(&self, rec: &mut ImageRecord) {
+        match self {
+            Patch::Adjustments(adj, at) => rec.edit(*at, |rec| rec.adjustments = **adj),
+            Patch::Score(score) => rec.score = Some(score.clone()),
+        }
+    }
 }
 
 /// Where a background sidecar load sits in the write order.
@@ -207,16 +226,16 @@ impl Writeback {
                 continue;
             }
             match &authored.op {
-                WriteOp::Put(_) | WriteOp::Adjust(..) | WriteOp::Delete
+                WriteOp::Put(_) | WriteOp::Patch(_) | WriteOp::Delete
                     if path.parent() != Some(dir) => {}
                 WriteOp::Put(rec) => {
                     if let Some(name) = path.file_name() {
                         images.insert(name.to_os_string(), (**rec).clone());
                     }
                 }
-                WriteOp::Adjust(adj, at) => {
+                WriteOp::Patch(patch) => {
                     if let Some(name) = path.file_name() {
-                        adjust(images.entry(name.to_os_string()).or_default(), adj, *at);
+                        patch.apply(images.entry(name.to_os_string()).or_default());
                     }
                 }
                 WriteOp::Delete => {
@@ -244,8 +263,8 @@ impl Writeback {
         }
     }
 
-    /// Take the next sequence number and record the op against `path`. An
-    /// `Adjust` after a `Put` or `Delete` is recorded as the whole record the
+    /// Take the next sequence number and record the op against `path`. A
+    /// `Patch` after a `Put` or `Delete` is recorded as the whole record the
     /// two leave on disk.
     fn accept(&mut self, path: &Path, op: &WriteOp) -> u64 {
         self.writes += 1;
@@ -253,14 +272,14 @@ impl Writeback {
         self.outstanding.insert(seq);
         *self.pending.entry(path.to_path_buf()).or_insert(0) += 1;
         let op = match (op, self.authored.get(path).map(|a| &a.op)) {
-            (WriteOp::Adjust(adj, at), Some(WriteOp::Put(rec))) => {
+            (WriteOp::Patch(patch), Some(WriteOp::Put(rec))) => {
                 let mut rec = rec.clone();
-                adjust(&mut rec, adj, *at);
+                patch.apply(&mut rec);
                 WriteOp::Put(rec)
             }
-            (WriteOp::Adjust(adj, at), Some(WriteOp::Delete)) => {
+            (WriteOp::Patch(patch), Some(WriteOp::Delete)) => {
                 let mut rec = Box::default();
-                adjust(&mut rec, adj, *at);
+                patch.apply(&mut rec);
                 WriteOp::Put(rec)
             }
             (op, _) => op.clone(),
@@ -405,19 +424,14 @@ impl Drop for Writeback {
     }
 }
 
-/// What [`WriteOp::Adjust`] does to a record.
-fn adjust(rec: &mut ImageRecord, adj: &Adjustments, at: u64) {
-    rec.edit(at, |rec| rec.adjustments = *adj);
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 fn perform(path: &Path, op: &WriteOp) -> Result<(), String> {
     use crate::paths::{remove_if_present, write_atomic_in_dir};
     match op {
         WriteOp::Put(rec) => crate::sidecar::write_record(path, rec),
-        WriteOp::Adjust(adj, at) => {
+        WriteOp::Patch(patch) => {
             let mut rec = crate::sidecar::read_record(path)?;
-            adjust(&mut rec, adj, *at);
+            patch.apply(&mut rec);
             crate::sidecar::write_record(path, &rec)
         }
         WriteOp::Delete => crate::sidecar::delete_record(path),
@@ -481,7 +495,7 @@ impl Writeback {
                     .map(Some)
                     .map_err(|e| e.to_string()),
                 WriteOp::PutGroup(group) => super::group_file::to_bytes(group).map(Some),
-                WriteOp::Adjust(..) | WriteOp::Delete | WriteOp::DeleteGroup => Ok(None),
+                WriteOp::Patch(_) | WriteOp::Delete | WriteOp::DeleteGroup => Ok(None),
             };
             let body = match body {
                 Ok(body) => body,
@@ -495,8 +509,8 @@ impl Writeback {
             wasm_bindgen_futures::spawn_local(async move {
                 use crate::web::web_folder_store_fs as fs;
                 let result = match (&op, is_group, body) {
-                    (WriteOp::Adjust(adj, at), _, _) => {
-                        fs::update_sidecar(&dir_handle, &name, |rec| adjust(rec, adj, *at)).await
+                    (WriteOp::Patch(patch), _, _) => {
+                        fs::update_sidecar(&dir_handle, &name, |rec| patch.apply(rec)).await
                     }
                     (_, false, Some(bytes)) => fs::write_sidecar(&dir_handle, &name, &bytes).await,
                     (_, false, None) => fs::delete_sidecar(&dir_handle, &name).await,
@@ -553,7 +567,7 @@ mod tests {
         );
     }
 
-    /// An `Adjust` changes only the adjustments, whether it lands on a
+    /// A `Patch` changes only the adjustments, whether it lands on a
     /// queued `Put` or on the record the load read.
     #[test]
     fn an_adjust_in_the_overlay_keeps_the_rest_of_the_record() {
@@ -571,11 +585,9 @@ mod tests {
                 ..Default::default()
             })),
         );
-        wb.enqueue(&queued, WriteOp::Adjust(Box::new(exposed), 7));
-        wb.enqueue(
-            Path::new("/photos/b.jpg"),
-            WriteOp::Adjust(Box::new(exposed), 7),
-        );
+        let patch = || WriteOp::Patch(Box::new(Patch::Adjustments(Box::new(exposed), 7)));
+        wb.enqueue(&queued, patch());
+        wb.enqueue(Path::new("/photos/b.jpg"), patch());
 
         let mut images = HashMap::from([(
             OsString::from("b.jpg"),

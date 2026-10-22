@@ -428,7 +428,7 @@ impl App {
         if !self.egui_ctx.input(|i| i.pointer.any_down()) {
             self.save_edit();
             self.history
-                .hold(self.autotone.holds_undo_step() || self.remove_ca_pending());
+                .hold(self.autotone.holds_undo_step() || self.optics.holds_undo_step());
             self.history.seal();
         }
     }

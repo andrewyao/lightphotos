@@ -27,6 +27,10 @@ pub(super) struct Optics {
     queue: VecDeque<PathBuf>,
     /// Photos measured in this run, for the "n of m" status.
     done: usize,
+    /// Whether the run's results join the open undo step, so an undo takes
+    /// them back and stops the run. Cleared on a folder change, which clears
+    /// the history; a run that outlives one lands without undo.
+    undoable: bool,
     tx: Sender<Outcome>,
     rx: Receiver<Outcome>,
 }
@@ -38,6 +42,7 @@ impl Optics {
             pending: None,
             queue: VecDeque::new(),
             done: 0,
+            undoable: false,
             tx,
             rx,
         }
@@ -45,6 +50,23 @@ impl Optics {
 
     fn waiting(&self, path: &Path) -> bool {
         self.pending.as_deref() == Some(path) || self.queue.iter().any(|q| q == path)
+    }
+
+    fn is_running(&self) -> bool {
+        self.pending.is_some() || !self.queue.is_empty()
+    }
+
+    /// Whether a running run keeps the open undo step open, so the whole
+    /// run undoes as one step.
+    pub(super) fn holds_undo_step(&self) -> bool {
+        self.undoable && self.is_running()
+    }
+
+    /// The folder showing is about to change. A running run carries on,
+    /// because each result goes to its photo's own sidecar. Its undo step
+    /// goes with the old folder's history.
+    pub(super) fn leave_folder(&mut self) {
+        self.undoable = false;
     }
 }
 
@@ -71,7 +93,7 @@ impl App {
     }
 
     pub(crate) fn remove_ca_pending(&self) -> bool {
-        self.optics.pending.is_some() || !self.optics.queue.is_empty()
+        self.optics.is_running()
     }
 
     /// Turn Remove Chromatic Aberration on or off for every photo the panel
@@ -106,6 +128,7 @@ impl App {
         if !self.remove_ca_pending() {
             self.optics.done = 0;
         }
+        self.optics.undoable = true;
         for path in paths.iter().cloned() {
             let has = self
                 .edits
@@ -118,9 +141,14 @@ impl App {
         self.start_next_measure();
     }
 
-    /// Drops the waiting and running measurements. A result still on its
-    /// way is dropped when it lands.
+    /// Drops the waiting and running measurements, for an undo that takes
+    /// back the run's step. A result still on its way is dropped when it
+    /// lands. A run that outlived a folder change has no step to take back,
+    /// so it keeps running.
     pub(super) fn cancel_remove_ca(&mut self) {
+        if !self.optics.undoable {
+            return;
+        }
         self.optics.queue.clear();
         self.optics.pending = None;
     }
@@ -213,8 +241,37 @@ impl App {
         Ok(())
     }
 
+    fn store_measure(&mut self, path: &Path, scale: CaScale) {
+        let base = self.edits.get(path).copied().unwrap_or_default();
+        let merged = Adjustments {
+            chromatic_aberration: Some(scale),
+            ..base
+        };
+        if self.optics.undoable {
+            self.put_edit(path, merged);
+        } else {
+            self.store_edit(path, merged);
+        }
+        self.save_patch(
+            path,
+            crate::persist::folder_store::Patch::Adjustments(
+                Box::new(merged),
+                crate::sidecar::unix_now(),
+            ),
+        );
+        #[cfg(target_arch = "wasm32")]
+        if merged != base {
+            crate::web::analytics::property("develop_edit_applied", "edit_kind", "adjustment");
+        }
+        if self.shown.path() == Some(path) {
+            self.push_adjustments();
+            self.hist.invalidate();
+        }
+    }
+
     /// Store a finished measurement on its photo and start the next. A
-    /// result for a photo whose box was cleared meanwhile is dropped.
+    /// result for a photo whose box was cleared meanwhile is dropped. The
+    /// photo's folder need not be the one showing: see `save_patch`.
     pub(crate) fn poll_remove_ca(&mut self) {
         #[cfg(target_arch = "wasm32")]
         if let Some(loader) = self.loader.as_mut() {
@@ -230,10 +287,7 @@ impl App {
             self.optics.done += 1;
             match scale {
                 Ok(scale) => {
-                    self.edit_each(std::slice::from_ref(&path), |adj| Adjustments {
-                        chromatic_aberration: Some(scale),
-                        ..adj
-                    });
+                    self.store_measure(&path, scale);
                     if self.optics.queue.is_empty() {
                         self.set_status(
                             StatusKind::Success,
@@ -311,23 +365,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A run started in folder A finishes after the user opens folder B.
+    /// The result lands in A's sidecar with the rest of its record, and B's
+    /// same-named photo is not touched. An undo in B neither takes it back
+    /// nor stops it.
     #[test]
-    fn opening_a_folder_stops_measuring_the_last_one() {
-        let (mut app, dir, _) = crate::app::test_support::folder_app("ca-folder", 2);
+    fn a_run_finishes_in_its_own_folder_after_a_folder_change() {
+        use crate::app::test_support::{folder_of, load_folder};
+        let (dir_a, a) = folder_of("ca-switch-a", &["a.jpg".into(), "b.jpg".into()]);
+        for path in &a {
+            crate::decode::image_encode::encode_jpeg(
+                path,
+                64,
+                48,
+                &vec![128u8; 64 * 48 * 4],
+                crate::decode::image_encode::JpegQuality::Export,
+            )
+            .unwrap();
+        }
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir_a);
+        app.folder_store.set(&a[0], 3);
+        let (dir_b, twins) = folder_of("ca-switch-b", &["a.jpg".into()]);
+        let twin = twins[0].clone();
+        {
+            let mut store_b = crate::persist::folder_store::FolderStore::with_dir(dir_b.clone());
+            store_b.set(&twin, 4);
+        }
         app.selected = (0..2).collect();
         app.sel = Some(0);
         app.set_remove_ca(true);
         assert!(app.remove_ca_pending());
-        let other = crate::app::test_support::temp_folder("ca-folder-next");
+
         app.run(crate::command::Command::OpenFolder(
             crate::command::OpenFolderParams {
-                path: other.clone(),
+                path: dir_b.clone(),
             },
         ))
         .unwrap();
-        assert!(!app.remove_ca_pending());
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&other);
+        crate::app::test_support::wait_for_folder_store(&mut app);
+        assert!(
+            app.remove_ca_pending(),
+            "a folder change must not stop the run"
+        );
+        assert_eq!(app.undo_edit(), 0, "B's history holds none of A's run");
+        assert!(app.remove_ca_pending(), "and an undo in B does not stop it");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.remove_ca_pending() {
+            assert!(std::time::Instant::now() < deadline, "measuring timed out");
+            app.poll_remove_ca();
+            app.save_edit_unless_dragging();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(10));
+        for path in &a {
+            let saved = crate::sidecar::read_record(path).unwrap();
+            assert!(
+                saved.adjustments.chromatic_aberration.is_some(),
+                "{path:?} is corrected in its own sidecar"
+            );
+        }
+        assert_eq!(
+            crate::sidecar::read_record(&a[0]).unwrap().rating,
+            Some(3),
+            "and keeps the rest of its record"
+        );
+        let saved_twin = crate::sidecar::read_record(&twin).unwrap();
+        assert!(
+            saved_twin.adjustments.is_identity(),
+            "B's same-named photo is not corrected"
+        );
+        assert_eq!(saved_twin.rating, Some(4));
+        assert!(app.folder_store.adjustments(&twin).is_identity());
+        assert_eq!(
+            app.folder_store.take_error(),
+            None,
+            "no sidecar write failed"
+        );
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 
     #[test]
