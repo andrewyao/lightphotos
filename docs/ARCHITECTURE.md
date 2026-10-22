@@ -148,7 +148,8 @@ flowchart TD
   (`request_neighbors`, `app/nav.rs`). The web build does not, because its
   full cache holds one image.
 - When the photo changes, `Loader::retain_full` drops the queued full decodes
-  of other photos, and pins the current photo against eviction.
+  of other photos. The hold set (`Loader::set_hold`, from
+  `App::sync_loupe_tiers`) keeps the current photo from eviction.
 - At fit on a normal window, browsing never triggers a full decode.
 
 **Neighbor previews:**
@@ -197,7 +198,7 @@ flowchart TD
 
     sync --> bake{"has this photo\nbeen edited?"}
     bake -- "no" --> rawtex["upload the raw thumbnail\nstraight to an egui texture"]
-    bake -- "yes" --> baked["image_ops::bake_edited\n(crop -> tone -> rotate)\n-> egui texture"]
+    bake -- "yes" --> baked["Loader::request_bake -> Job::Bake\nimage_ops::bake_edited on a decode worker\n(crop -> tone -> rotate)\n-> egui texture"]
     rawtex --> grid["drawn by ui/grid.rs's Grid / filmstrip"]
     baked --> grid
 ```
@@ -224,8 +225,8 @@ flowchart TD
 thumbnail:**
 - The loader/disk thumbnail cache key is the photo's size and mtime, not its
   edits, so a develop-panel tweak doesn't invalidate the expensive decode.
-- Only the cheap `image_ops::bake_edited` re-runs, and only for the texture
-  that's actually on screen.
+- Only the cheap `image_ops::bake_edited` re-runs, on a decode worker
+  (`Job::Bake`), and only for the cells on screen.
 
 ---
 
@@ -238,10 +239,10 @@ flowchart TD
     exportbtn["User exports one or more photos"]
     exportbtn --> submit["app/export.rs submits one ExportJob per photo\n(native; wasm32 has its own start_export that bakes on the\nloader's threads and writes via File System Access)"]
     submit --> pool["Exporter, export/mod.rs\nruns on the generic worker_pool.rs pool"]
-    pool --> decode["image_decode::decode(src, u32::MAX)\nfull-resolution decode\nImageIO (CIRAWFilter for RAW) on macOS, image crate or\ndecode/rawler/ on Linux/Windows"]
-    decode --> bake["image_ops::bake_edited\ncrop -> develop::apply_linear (tone) -> rotate"]
-    bake --> encode["image_encode::encode_jpeg\nImageIO on macOS, mozjpeg-rs elsewhere"]
-    encode --> write["write to a .jpg.tmp sibling,\nthen atomically rename to the destination"]
+    pool --> decode["export::export_file\nimage_decode::decode_for_export(src, decode_px)\ndecodes only as large as the output size needs\nImageIO (CIRAWFilter for RAW) on macOS, image crate or\ndecode/rawler/ on Linux/Windows"]
+    decode --> bake["export::render -> image_ops::bake_edited_as\n(8-bit, or 16-bit for TIFF)\ncrop -> develop::apply_linear (tone) -> rotate"]
+    bake --> encode["image_encode\nJPEG, PNG, 16-bit TIFF, WebP or AVIF\n(JPEG: ImageIO on macOS, mozjpeg-rs elsewhere)"]
+    encode --> write["paths::write_atomic: write <dest>.<pid>-<n>.tmp\n(create_new, so it never follows a planted link),\nthen rename it onto the destination"]
     write --> outcome["ExportOutcome, drained once per frame\nby the UI thread (app/export.rs)"]
 ```
 
@@ -251,11 +252,11 @@ flowchart TD
 - So export always does its own full decode, on a worker so it doesn't
   freeze the confirmation modal.
 
-**Where `image_ops::bake_edited` is shared:**
-- Export (full resolution) and Grid thumbnails (thumbnail size) are the only
-  two callers — nothing else bakes edits into pixels.
-- That's deliberate: it's what guarantees an exported JPEG matches what the
-  user saw on screen.
+**Where the CPU bake is shared:**
+- Three callers bake edits into pixels: export (`bake_edited_as`, at the
+  output size), Grid thumbnails (`Job::Bake`) and scoring (`jobs/score.rs`).
+- All three run `image_ops::bake_samples`. That is what guarantees an exported
+  file matches what the user saw on screen.
 
 ---
 
@@ -400,7 +401,7 @@ flowchart TD
     frame["Every frame\nrequest_face_quality (app/thumbs.rs)\nno candidates until photos can be grouped"]
     sel["User opens Show Selection in the Loupe\nrequest_selection_mask (app/loupe.rs)"]
     det["User adds a Subject mask, or pastes one\nCoverageStore::ensure_detected (app/coverage.rs)"]
-    score["User asks to score photos\nscore_selected / score_all (app/score.rs)"]
+    score["User asks to score photos\nscore_selection / score_all (app/score.rs)"]
     frame --> fpool["FacePool: 1-2 workers"]
     sel --> sthread["segmentation: one thread per request"]
     det --> dpool["detect worker: one thread\nscoring/detect.rs, in an autoreleasepool"]
@@ -412,7 +413,7 @@ flowchart TD
     vfile --> fl["VNDetectFaceLandmarksRequest\nscoring/facequality.rs"]
     vfile --> sg["VNGeneratePersonSegmentationRequest, then\nVNGenerateForegroundInstanceMaskRequest\nscoring/segmentation.rs"]
     vimg --> jq["VNDetectFaceLandmarksRequest +\nVNCalculateImageAestheticsScoresRequest (macOS 15+)"]
-    fl --> blink["eye-openness geometry -> EyeState\nfeeds the eyes-closed filter and burst::combined_score"]
+    fl --> blink["eye-openness geometry -> EyeState\nfeeds the eyes-closed filter\n(App::eyes_closed, app/nav.rs)"]
     sg --> mask["Mask -> the Loupe's selection overlay"]
     sg --> cov["Coverage -> .lightphotos/masks/, a Subject mask's shape"]
     jq --> qs["QualityScore: technical score\nwith face and aesthetics penalties"]
@@ -564,7 +565,10 @@ already keeps handles for.
 
 | File | Pipeline stage | Platform |
 |---|---|---|
-| `jobs/loader.rs` | Job queue + LRU caches for both the Loupe and Grid tiers | native (macOS + Linux/Windows); wasm32 shares its caches via `insert_*_external` but bypasses its queue |
+| `jobs/loader.rs` | Job queue + LRU caches for both the Loupe and Grid tiers | all; wasm32 queues `Job::Web` through `WebDecoder` and files the results through `insert_*_external` |
+| `jobs/tier.rs` | One Loupe cache tier: LRU order and a running byte total | all |
+| `jobs/cache_limits.rs` | Count and byte caps per tier, and the decode thread cap, one set per target | all |
+| `decode/decode_budget.rs` | Caps the bytes the decode threads hold at once | wasm32 (builds everywhere for its tests) |
 | `decode/image_decode/mod.rs` | Full decode + metadata read, mac arm | macOS |
 | `decode/image_decode/nonmac_decode.rs` | Full decode + metadata read, non-mac arm (`image` crate + `kamadak-exif`; RAW goes to `decode/rawler/`) | Linux/Windows; RAW/JPEG-decode functions also reused by wasm32 |
 | `decode/rawler/mod.rs` | Every rawler call: full RAW decode (`RawDevelop`), RAW metadata, CR3/RAF embedded preview. `probe/` holds `decode_probe` | Linux, Windows, wasm32; never built on macOS |
@@ -574,11 +578,14 @@ already keeps handles for.
 | `decode/image_encode.rs` | JPEG write for export | macOS (ImageIO) / Linux/Windows (`mozjpeg-rs`) |
 | `decode/coregraphics.rs` | Shared CFURL/bitmap-context setup for `decode/image_decode/mod.rs`/`decode/image_encode.rs` | macOS |
 | `renderer/mod.rs` | GPU upload + draw of the currently-shown image | all (wgpu → Metal / Vulkan-GL / WebGPU) |
+| `shaders/base.wgsl` | Builds the base layer (Clarity, Dehaze, Texture) on the GPU; `develop/base.rs` is its CPU twin | all |
+| `shaders/mipgen.wgsl` | Builds the Loupe texture's mip chain | all |
 | `develop/mod.rs` | The tone pipeline (`apply_linear`), shared by the GPU shader and the CPU histogram/bake path | all |
 | `develop/image_ops.rs` | Pure pixel math (crop/rotate/bake) shared by export and thumbnail baking | all |
-| `export/mod.rs` | `Exporter`: decodes, bakes, and encodes an export (JPEG, PNG, 16-bit TIFF, WebP or AVIF) on a `worker_pool.rs` pool; `bake_export` and the `ExportFs` seam are shared | native pool is native-only, wasm32 runs the same bake on the loader's threads |
+| `export/mod.rs` | `Exporter`: decodes, bakes, and encodes an export (JPEG, PNG, 16-bit TIFF, WebP or AVIF) on a `worker_pool.rs` pool. `export_file` (native) and `bake_export_from_shared_vec` (off macOS, for wasm32's bytes) share `render` | native pool is native-only, wasm32 runs the same bake on the loader's threads |
 | `worker_pool.rs` | Generic thread pool behind `Exporter` and `ScorePool` | builds everywhere; no thread starts on wasm32, so the pools run native only |
 | `web/web_decode.rs` | Decode and export jobs over a file's bytes, run on the loader's threads | wasm32 |
+| `web/web_export_fs.rs` | Export file access through File System Access: source reads, atomic writes | wasm32 |
 | `web/web_exports.rs` | Main-thread side of a batch export: each JPEG's destination folder handle, by job id | wasm32 |
 | `web/web_canvas.rs` | Attaches winit's canvas into the DOM at the right backing-store resolution | wasm32 |
 | `web/web_fs.rs` | File System Access folder picking/listing/byte reads | wasm32 |
@@ -596,3 +603,5 @@ already keeps handles for.
 | `scoring/judge.rs` | Quality score: technical measures plus Vision face and aesthetics signals | all; Vision part macOS only, technical-only elsewhere |
 | `jobs/score.rs` | `ScorePool`: scores chosen photos on 2-4 low-priority workers | builds everywhere; `ScorePool::new` returns `None` off macOS, where a technical-only score would mislead |
 | `persist/signalcache.rs` | Persists capture time and face quality to `.lightphotos/signals.json` | all |
+| `control_auth.rs` | HMAC sign-in of the `--control` channel, shared by the app and `lightphotos-mcp` | native |
+| `bin/*_probe.rs` | Probes that run one lib stage on real photos: `face_probe`, `score_probe`, `seg_probe`, `sky_probe` (writes `scoring/sky.rs`'s coverage as images) | native |

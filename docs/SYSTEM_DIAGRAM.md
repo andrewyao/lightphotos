@@ -18,10 +18,11 @@ does not use egui, winit or wgpu. Each folder under `src/` is one module, in one
 | `persist/` | app | Persistence |
 | `decode/`, `develop/`, `export/`, `scoring/` | lib | Lib |
 | `bin/lightphotos_mcp/` | MCP server | Platform shell |
-| other `bin/`, `decode/rawler/probe/` | probes | not shown |
+| `bin/{face,score,seg,sky}_probe.rs`, `decode/rawler/probe/` | probes | not shown |
 
-`navigation.rs`, `autotone.rs` and `i18n.rs` are in the app root. `hash.rs`, `paths.rs`
-and `worker_pool.rs` are in the lib root. In the diagram, a path starts at `src/`.
+`navigation.rs`, `autotone.rs` and `i18n.rs` are in the app root. `base64.rs`, `command.rs`,
+`control_auth.rs`, `hash.rs`, `paths.rs`, `sidecar.rs` and `worker_pool.rs` are in the lib
+root. In the diagram, a path starts at `src/`.
 
 A dashed border shows code that builds on one platform only:
 
@@ -52,8 +53,8 @@ flowchart LR
 
     subgraph uig["Drawing (ui/, renderer/, shaders/)"]
         ui["ui/*<br/>egui chrome: grid, filmstrip,<br/>toolbar, panels, form.rs"]
-        renderer["renderer/mod.rs + shaders/shader.wgsl<br/>wgpu loupe image"]
-        rawrender["renderer/raw_render.rs<br/>linear RAW tonemap (browser Loupe)"]
+        renderer["renderer/mod.rs + shaders/shader.wgsl<br/>wgpu loupe image<br/>base.wgsl (base layer), mipgen.wgsl (mips)"]
+        rawrender["renderer/raw_render.rs<br/>half-float pipeline (LinearF16)"]
     end
 
     subgraph bg["Background work (jobs/)"]
@@ -61,12 +62,13 @@ flowchart LR
         thumbs["jobs/thumbnail.rs<br/>ThumbCache on disk"]
         wpool["worker_pool.rs (lib)<br/>export jobs"]
         spool["jobs/score.rs<br/>ScorePool, 2-4 workers"]
-        fpool["scoring/facequality.rs (lib)<br/>FacePool, 2 workers"]
+        fpool["scoring/facequality.rs (lib)<br/>FacePool, 1-2 workers"]
         seg["scoring/segmentation.rs (lib)<br/>one thread per request"]
     end
 
     subgraph lib["Lib (lib.rs)"]
-        decode["decode/<br/>image_decode, image_encode,<br/>coregraphics"]
+        decode["decode/<br/>image_decode, image_encode,<br/>coregraphics, decode_budget (wasm32)"]
+        auth["control_auth.rs<br/>HMAC sign-in"]
         nonmac["decode/image_decode/nonmac_decode.rs<br/>non-RAW decode (image crate), EXIF"]
         rawlerdir["decode/rawler/<br/>every rawler call: RAW decode,<br/>RAW metadata, CR3/RAF preview,<br/>raw_preview (Fast / Quality)"]
         develop["develop/mod.rs<br/>Adjustments → GpuAdjust<br/>apply_linear (CPU mirror)"]
@@ -106,6 +108,8 @@ flowchart LR
     drive -- "synthetic events" --> app
     control -- "UserEvent::Control" --> main
     mcp -- "--attach: one request per connection" --> control
+    control --- auth
+    mcp --- auth
     webmcp -- "UserEvent::Control" --> main
     mcp -- "--folder: render" --> export
     mcp -- "--folder: run_command" --> sidecars
@@ -161,7 +165,7 @@ flowchart LR
     classDef web stroke:#16a34a,stroke-width:2px,stroke-dasharray:5 3
     class delegate,menu,vision,spool,imageio,applevision,keychain mac
     class nonmac,rawlerdir,crates,rawlercrate nonmac
-    class webshell,webmcp,fsa,rawrender web
+    class webshell,webmcp,fsa web
 ```
 
 `shell/control/tcp.rs` runs only with `--control <port>`, and not in the browser.
@@ -182,8 +186,8 @@ scoring runs on macOS only. The diagram marks it as macOS code.
 `decode/rawler/` is the only code that calls rawler. It does not build on macOS, so the
 macOS app never links rawler (LGPL-2.1).
 
-`renderer/raw_render.rs` builds on all platforms. But only the browser Loupe RAW path gives
-it linear-light images. All other paths apply the tonemap on the CPU.
+`renderer/raw_render.rs` builds on all platforms. It draws every `LinearF16` image: rawler's
+RAW decodes on Linux, Windows and the browser, and a macOS RAW with the Apple tone curve off.
 
 ## Opening a photo
 
@@ -235,5 +239,5 @@ sequenceDiagram
     M->>A: key_input
     A->>C: set(path, 3 stars)
     C->>Q: enqueue WriteOp
-    Note over C,Q: background thread writes<br/>.lightphotos/<photo>.xmp<br/>(temp file + rename)
+    Note over C,Q: background thread writes<br/>.lightphotos/<photo>.xmp<br/>(<photo>.xmp.<pid>-<n>.tmp, then rename)
 ```
