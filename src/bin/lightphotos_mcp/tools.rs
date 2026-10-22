@@ -216,7 +216,9 @@ impl Mode {
             Mode::Headless(folder) => format!(
                 "{common} You work headless on the folder {}: get_state lists its photos, \
                  commands marked headless run on the photos you name in params.photos, and \
-                 render shows a photo with its edits.",
+                 render shows a photo with its edits. Do not change photos here while the \
+                 LightPhotos app has this folder open: the two overwrite each other's edits. \
+                 Ask the user to attach lightphotos-mcp to the app (--attach) instead.",
                 folder.root().display()
             ),
         }
