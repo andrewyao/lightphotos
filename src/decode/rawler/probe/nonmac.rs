@@ -721,6 +721,33 @@ fn write_bayer_dng_with_cfa(
     height: u32,
     cfa_pattern: [u8; 4],
 ) -> std::io::Result<()> {
+    write_bayer_dng_with(path, width, height, cfa_pattern, |x, y| {
+        100 + ((x * 53 + y * 197) % 800) as u16
+    })
+}
+
+/// An RGGB [`write_bayer_dng`] of a smooth scene, `400 + 2x + y`, where
+/// neighboring samples agree as they do in a photo. The default fixture is
+/// chroma noise: each sample is unrelated to the next, so a 2x2 bin pairs
+/// unrelated red, green and blue into strongly colored pixels, which the
+/// color step's gamut clip (rawler's `clip_euclidean_norm_avg`) bends
+/// differently from PPG's interpolated ones.
+#[cfg(test)]
+fn write_smooth_bayer_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()> {
+    write_bayer_dng_with(path, width, height, [0, 1, 1, 2], |x, y| {
+        400 + (2 * x + y) as u16
+    })
+}
+
+/// The Bayer DNG writer, with the sample at `(x, y)` from `sample`.
+#[cfg(test)]
+fn write_bayer_dng_with(
+    path: &Path,
+    width: u32,
+    height: u32,
+    cfa_pattern: [u8; 4],
+    sample: impl Fn(u32, u32) -> u16,
+) -> std::io::Result<()> {
     use std::io::Write;
 
     const T_BYTE: u16 = 1;
@@ -858,8 +885,7 @@ fn write_bayer_dng_with_cfa(
     // Pixel data: deterministic non-uniform single-channel mosaic.
     for y in 0..height {
         for x in 0..width {
-            let v = 100u16 + (((x * 53 + y * 197) % 800) as u16);
-            buf.extend_from_slice(&v.to_le_bytes());
+            buf.extend_from_slice(&sample(x, y).to_le_bytes());
         }
     }
     debug_assert_eq!(
@@ -1023,14 +1049,15 @@ mod tests {
 
     /// At half the sensor size or less, the develop bins 2x2 instead of
     /// running PPG. It must land the same size and the same color as the
-    /// full-size develop shrunk to it.
+    /// full-size develop shrunk to it, on a smooth scene: on chroma noise
+    /// the two differ by design (see `write_smooth_bayer_dng`).
     #[test]
     fn a_half_res_develop_matches_the_full_one_in_size_and_color() {
         let path = std::env::temp_dir().join(format!(
             "lightphotos_raw_half_res_{}.dng",
             std::process::id()
         ));
-        write_bayer_dng(&path, 64, 48).expect("write_bayer_dng failed");
+        write_smooth_bayer_dng(&path, 64, 48).expect("write_smooth_bayer_dng failed");
         let bytes = std::fs::read(&path).expect("read fixture");
         let _ = std::fs::remove_file(&path);
 
