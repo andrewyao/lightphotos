@@ -92,7 +92,30 @@ impl PhotoList {
     /// Keeps one reply to a few hundred KB.
     const MAX: usize = 5000;
 
+    #[cfg(test)]
     pub(crate) fn of(app: &App) -> PhotoList {
+        PhotoList::showing(app, |_| false)
+    }
+
+    /// What an agent sees (`agent.rs`): nothing when the open folder is
+    /// outside its anchor, and only the name of a photo that links out.
+    pub(crate) fn for_agent(
+        app: &App,
+        folder_held: bool,
+        hidden: impl Fn(&std::path::Path) -> bool,
+    ) -> PhotoList {
+        match folder_held {
+            true => PhotoList::showing(app, hidden),
+            false => PhotoList {
+                photos: Vec::new(),
+                total: 0,
+                truncated: false,
+            },
+        }
+    }
+
+    /// The list, with only the names of the photos `hidden` picks.
+    fn showing(app: &App, hidden: impl Fn(&std::path::Path) -> bool) -> PhotoList {
         let total = app.visible.len();
         let photos = match app.playlist.as_ref() {
             None => Vec::new(),
@@ -103,6 +126,19 @@ impl PhotoList {
                 .enumerate()
                 .filter_map(|(pos, &idx)| {
                     let path = pl.entry(idx)?;
+                    if hidden(path) {
+                        return Some(Photo {
+                            name: path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                            rating: 0,
+                            flag: None,
+                            label: None,
+                            score: None,
+                            edited: false,
+                        });
+                    }
                     Some(Photo {
                         name: path
                             .file_name()
@@ -136,6 +172,32 @@ struct Score {
 }
 
 impl State {
+    /// What an agent sees (`agent.rs`): the catalog folders in its reach,
+    /// no folder or photo when the open folder is outside its anchor, and
+    /// none of the shown photo's marks, score or masks when it links out.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn for_agent(
+        mut self,
+        roots: Vec<std::path::PathBuf>,
+        folder_held: bool,
+        photo_held: bool,
+    ) -> State {
+        self.folder_roots = roots;
+        if !folder_held {
+            self.folder = None;
+            self.photo = None;
+        }
+        if !(folder_held && photo_held) {
+            self.rating = None;
+            self.flag = None;
+            self.label = None;
+            self.score = None;
+            self.masks.clear();
+            self.selected_mask = None;
+        }
+        self
+    }
+
     pub(crate) fn of(app: &App) -> State {
         let mode = app.mode();
         let path = app.selected_path();

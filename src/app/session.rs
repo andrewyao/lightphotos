@@ -35,8 +35,34 @@ pub(crate) struct Session {
     pub(crate) view: SessionView,
     /// The folder the user had open (`agent.rs`), which a restore puts back
     /// rather than make the restored folder the anchor.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) anchor: Option<super::agent::Anchor>,
+    #[serde(skip_serializing_if = "SessionAnchor::is_legacy")]
+    pub(crate) anchor: SessionAnchor,
+}
+
+/// A session's anchor. `Saved(None)` is written as `null`, so a cleared
+/// anchor stays cleared; only a session with no `anchor` field at all is
+/// `Legacy`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SessionAnchor {
+    /// No anchor was ever saved: a session from a build before anchors, or
+    /// a catalog's first folder. Its restore anchors the folder it reopens.
+    Legacy,
+    Saved(Option<super::agent::Anchor>),
+}
+
+impl SessionAnchor {
+    fn is_legacy(&self) -> bool {
+        *self == SessionAnchor::Legacy
+    }
+}
+
+impl Serialize for SessionAnchor {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            SessionAnchor::Saved(anchor) => anchor.serialize(s),
+            SessionAnchor::Legacy => s.serialize_none(),
+        }
+    }
 }
 
 /// A session as saved by this build, by the build before catalogs, which
@@ -54,8 +80,19 @@ struct StoredSession {
     photo: Option<PathBuf>,
     #[serde(default)]
     view: SessionView,
-    #[serde(default)]
-    anchor: Option<super::agent::Anchor>,
+    /// Absent (`None`) in a session saved before anchors; `Some(None)` when
+    /// this build saved one with no anchor.
+    #[serde(default, deserialize_with = "present")]
+    anchor: Option<Option<super::agent::Anchor>>,
+}
+
+/// A field that is there, even as `null`.
+fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
 }
 
 impl StoredSession {
@@ -75,7 +112,9 @@ impl StoredSession {
             dir,
             photo: self.photo,
             view: self.view,
-            anchor: self.anchor,
+            anchor: self
+                .anchor
+                .map_or(SessionAnchor::Legacy, SessionAnchor::Saved),
         }
     }
 }
@@ -138,7 +177,7 @@ fn to_restore(
         dir: Some(root.clone()),
         photo: None,
         view: SessionView::Grid,
-        anchor: None,
+        anchor: SessionAnchor::Legacy,
     })
 }
 
@@ -163,7 +202,7 @@ impl App {
             dir: Some(dir),
             photo: self.selected_path(),
             view,
-            anchor: self.folder_anchor.clone(),
+            anchor: SessionAnchor::Saved(self.folder_anchor.clone()),
         })
     }
 
@@ -224,8 +263,10 @@ impl App {
         }
         // A session saved without an anchor (by an older build, or a
         // catalog's first folder) keeps the folder it reopened as the anchor.
-        if let Some(saved) = session.anchor.as_ref() {
-            self.folder_anchor = self.restored_anchor(saved, &root);
+        if let SessionAnchor::Saved(saved) = &session.anchor {
+            self.folder_anchor = saved
+                .as_ref()
+                .and_then(|saved| self.restored_anchor(saved, &root));
         }
         self.restore_session_view(session);
     }
@@ -277,7 +318,7 @@ mod tests {
         });
         Session {
             legacy_folders: Vec::new(),
-            anchor: super::super::agent::Anchor::new(&dir, true),
+            anchor: SessionAnchor::Saved(super::super::agent::Anchor::new(&dir, true)),
             dir: Some(dir),
             photo: photo.map(|p| root.join(p)),
             view,
@@ -364,7 +405,7 @@ mod tests {
         // The saved anchor was the subfolder; the restore shows the folder
         // above it, so no anchor: an agent gets nothing the user didn't have.
         let shown = Session {
-            anchor: None,
+            anchor: SessionAnchor::Saved(None),
             ..session(&root, None, SessionView::Grid)
         };
         assert_eq!(app.current_session(), Some(shown));
@@ -531,7 +572,7 @@ mod tests {
             dir: Some(PathBuf::from("/photos/2024/june")),
             photo: None,
             view: SessionView::Grid,
-            anchor: None,
+            anchor: SessionAnchor::Saved(None),
         };
         let roots = vec![PathBuf::from("/photos")];
         assert_eq!(
@@ -664,7 +705,7 @@ mod tests {
         use crate::command::{Command, OpenFolderParams};
         let root = tree("anchor-unsaved");
         let saved = Session {
-            anchor: None,
+            anchor: SessionAnchor::Legacy,
             ..session(&root, None, SessionView::Grid)
         };
         let mut app = app_listing(&[&root]);
@@ -682,6 +723,32 @@ mod tests {
             rx.try_recv().unwrap().is_ok(),
             "the restored folder is the anchor"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cleared_anchor_stays_cleared_across_launches() {
+        use crate::command::{Command, OpenFolderParams};
+        let root = tree("anchor-cleared");
+        let mut first = app_listing(&[&root]);
+        first.open(root.clone());
+        first.folder_anchor = None;
+        let saved = first.current_session().unwrap();
+        // Saved and read back, as the next launch does.
+        let json = serde_json::to_string(&saved).unwrap();
+        let read = parse(&json).unwrap();
+        let mut next = app_listing(&[&root]);
+        next.restore_session(&read);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let open = Command::OpenFolder(OpenFolderParams {
+            path: root.join("sub"),
+        });
+        let request = crate::shell::control::Request {
+            op: crate::shell::control::Op::Run(Box::new(open)),
+            expires: web_time::Instant::now() + std::time::Duration::from_secs(60),
+        };
+        next.answer_control(request, tx);
+        assert!(rx.try_recv().unwrap().is_err(), "still no anchor: {json}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
