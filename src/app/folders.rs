@@ -116,6 +116,10 @@ impl App {
         self.teardown_loupe_state();
         self.finish_folder_jobs();
         self.forget_folder_decodes();
+        // A closed folder is free for a headless MCP to write, once its
+        // queued writes land.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.folder_store.leave_dir();
         self.burst_scan = None;
         self.expanded_stacks.clear();
         self.playlist = None;
@@ -142,6 +146,166 @@ mod tests {
         std::fs::write(dir.join("a.jpg"), b"").unwrap();
         std::fs::write(dir.join("sub/b.jpg"), b"").unwrap();
         dir
+    }
+
+    fn lock_free(dir: &Path) -> bool {
+        use crate::sidecar::{FolderLock, Writer};
+        FolderLock::try_acquire(dir, Writer::Mcp).is_ok()
+    }
+
+    /// A folder holding one empty photo.
+    fn one_photo(tag: &str) -> (PathBuf, PathBuf) {
+        let dir = temp_folder(tag);
+        let photo = dir.join("a.jpg");
+        std::fs::write(&photo, b"").unwrap();
+        (dir, photo)
+    }
+
+    /// Design rows 4 and 15: the app holds the open folder's lock. Leaving
+    /// keeps it until the writes queued for the folder land; closing lets
+    /// go the same way. A folder without photos takes no lock.
+    #[test]
+    fn the_open_folder_is_locked_until_its_writes_land_after_the_app_moves_on() {
+        use crate::app::test_support::load_folder;
+        let ((a, photo), (b, _)) = (one_photo("lock-a"), one_photo("lock-b"));
+        let empty = temp_folder("lock-empty");
+        let mut app = App::new(None);
+        load_folder(&mut app, &a);
+        let held_open = !lock_free(&a);
+        app.set_rating_of(photo.clone(), 3);
+        load_folder(&mut app, &b);
+        let held_draining = !lock_free(&a);
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(10));
+        app.folder_store.pump();
+        let (a_free, b_held) = (lock_free(&a), !lock_free(&b));
+        app.close_folder();
+        app.folder_store.pump();
+        let b_free = lock_free(&b);
+        load_folder(&mut app, &empty);
+        let empty_untouched = !empty.join(crate::sidecar::SIDECAR_DIR).exists();
+        let rated = crate::sidecar::read_record(&photo).unwrap().rating;
+        for d in [&a, &b, &empty] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        assert!(held_open, "the open folder is locked");
+        assert!(held_draining, "A stays locked while its write is queued");
+        assert!(a_free, "and lets go once it lands");
+        assert_eq!(rated, Some(3));
+        assert!(b_held && b_free, "B is held while open, free once closed");
+        assert!(empty_untouched, "a folder without photos gets nothing");
+    }
+
+    /// Design row 8: two spellings of one folder are one folder. Opening it
+    /// again as `dir/.` keeps the visit writable on its own lock.
+    #[test]
+    fn two_spellings_of_one_folder_open_writable() {
+        use crate::app::test_support::load_folder;
+        let (dir, photo) = one_photo("lock-spelling");
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir);
+        load_folder(&mut app, &dir.join("."));
+        let read_only = app.folder_store.read_only();
+        app.folder_store.set(&dir.join(".").join("a.jpg"), 4);
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(10));
+        let rated = crate::sidecar::read_record(&photo).unwrap().rating;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(read_only, None);
+        assert_eq!(rated, Some(4));
+    }
+
+    /// Design rows 30 and 18 (store side): a second instance on a folder
+    /// another LightPhotos holds opens read-only, names it, and refuses an
+    /// edit before the cache changes. Reopening once free makes it writable.
+    #[test]
+    fn a_second_instance_opens_read_only_and_refuses_edits_before_the_cache() {
+        use crate::app::test_support::load_folder;
+        use crate::sidecar::{FolderLock, Writer};
+        let (dir, photo) = one_photo("lock-second");
+        let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir);
+        let by = app.folder_store.read_only();
+        let text = app.folder_read_only_text().unwrap_or_default();
+        app.folder_store.set(&photo, 4);
+        let cache = app.folder_store.get(&photo);
+        let refused = app.folder_store.take_refused();
+        drop(other);
+        app.folder_store.set(&photo, 5);
+        let still = app.folder_store.get(&photo);
+        load_folder(&mut app, &dir);
+        let reopened = app.folder_store.read_only();
+        let _ = std::fs::remove_dir_all(&dir);
+        let me = std::process::id();
+        assert_eq!(by, Some(crate::persist::folder_store::HeldBy::Mcp(me)));
+        assert!(text.contains(&me.to_string()), "{text}");
+        assert_eq!(cache, None, "refused before the cache changed");
+        assert_eq!(refused, std::slice::from_ref(&photo));
+        assert_eq!(still, None, "read-only for the whole visit");
+        assert_eq!(reopened, None, "reopening once free makes it writable");
+    }
+
+    /// Design rows 7 and 26: a lock busy for a moment with no holder named,
+    /// as a get_state probe holds it, doesn't make the folder read-only.
+    #[test]
+    fn a_probe_at_the_moment_of_open_does_not_make_it_read_only() {
+        use crate::app::test_support::load_folder;
+        use crate::sidecar::{FolderLock, Writer};
+        let (dir, _) = one_photo("lock-probe");
+        let probe = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
+        let who = dir
+            .join(crate::sidecar::SIDECAR_DIR)
+            .join(crate::sidecar::WHO_FILE);
+        std::fs::remove_file(&who).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            drop(probe);
+        });
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir);
+        let _ = release.join();
+        let read_only = app.folder_store.read_only();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(read_only, None);
+    }
+
+    /// Design row 10: a relaunch while the old app still quits waits for it
+    /// (its line says `app-quitting`) instead of opening read-only.
+    #[test]
+    fn a_relaunch_waits_for_a_quitting_app() {
+        use crate::app::test_support::load_folder;
+        use crate::sidecar::{FolderLock, Writer};
+        let (dir, _) = one_photo("lock-relaunch");
+        let mut old = FolderLock::try_acquire(&dir, Writer::App).unwrap();
+        old.mark_quitting();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(old);
+        });
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir);
+        let _ = release.join();
+        let read_only = app.folder_store.read_only();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(read_only, None);
+    }
+
+    /// Design row 17: a folder whose lock can't be made (here
+    /// `.lightphotos` is a file) opens read-only with that reason.
+    #[test]
+    fn a_folder_whose_lock_cant_be_made_opens_read_only() {
+        use crate::app::test_support::load_folder;
+        use crate::persist::folder_store::HeldBy;
+        let (dir, _) = one_photo("lock-unavailable");
+        std::fs::write(dir.join(crate::sidecar::SIDECAR_DIR), b"not a folder").unwrap();
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir);
+        let by = app.folder_store.read_only();
+        let text = app.folder_read_only_text().unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(by, Some(HeldBy::Unlockable));
+        assert!(text.contains("can't be locked"), "{text}");
     }
 
     #[test]

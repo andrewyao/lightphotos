@@ -375,6 +375,9 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.save_edit();
         self.save_export_edits();
+        // A relaunch on a folder this app holds waits for it a moment.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.folder_store.begin_quit();
         // AppKit delivers this from `applicationWillTerminate:` and then calls
         // `exit()` itself, so `main`'s return is never reached on Cmd+Q and
         // this is the last chance to get queued sidecars onto the disk. The
@@ -477,6 +480,7 @@ impl App {
         // Outside the loader block below, because a queued sidecar write has
         // no loader to wait on and can outlive the folder it came from.
         self.folder_store.pump();
+        self.revert_refused_edits();
         self.sync_marks();
         self.catalog.pump();
         self.keep_status_alive();

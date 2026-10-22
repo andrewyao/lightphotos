@@ -836,6 +836,18 @@ pub struct Strings {
     )]
     pub list_folder_failed: fn(&str, &str) -> String,
     pub edits_save_failed: fn(&str) -> String,
+    /// Who holds a folder that opened read-only: another LightPhotos.
+    pub held_by_app: fn(u32) -> String,
+    /// ... a headless lightphotos-mcp.
+    pub held_by_mcp: fn(u32) -> String,
+    /// ... a holder the lock file doesn't name.
+    pub held_by_other: &'static str,
+    /// The read-only folder's line and every refusal, with who holds it.
+    pub folder_read_only: fn(&str) -> String,
+    /// A folder whose lock couldn't be made, so it opened read-only.
+    pub folder_cant_lock: &'static str,
+    /// A folder on a volume without file locks.
+    pub folder_lockless: &'static str,
     pub presets_load_failed: fn(&str) -> String,
     pub presets_locked: &'static str,
     pub presets_save_failed: fn(&str) -> String,
@@ -1876,6 +1888,14 @@ pub static EN: Strings = Strings {
     folder_handle_missing: |dir| format!("Couldn't open {dir} \u{2014} folder handle missing"),
     list_folder_failed: |dir, e| format!("Couldn't list {dir}: {e}"),
     edits_save_failed: |e| format!("Failed to save ratings and edits: {e}"),
+    held_by_app: |pid| format!("another LightPhotos window (pid {pid})"),
+    held_by_mcp: |pid| format!("lightphotos-mcp (pid {pid})"),
+    held_by_other: "another program",
+    folder_read_only: |who| {
+        format!("Read-only: {who} has this folder open. Changes here are not saved. Close it there, then open this folder again.")
+    },
+    folder_cant_lock: "Read-only: this folder can't be locked for saving, so changes here are not saved. It may be read-only or need permission. Open it again to try again.",
+    folder_lockless: "This folder can't be locked, so don't let a headless lightphotos-mcp change it while it is open here.",
     presets_load_failed: |e| format!("Could not read your presets: {e}"),
     presets_locked:
         "Presets are locked because the saved file could not be read. Move or fix it, then restart.",
@@ -2746,6 +2766,14 @@ pub static ZH: Strings = Strings {
     folder_handle_missing: |dir| format!("无法打开 {dir} \u{2014} 缺少文件夹句柄"),
     list_folder_failed: |dir, e| format!("无法列出 {dir}：{e}"),
     edits_save_failed: |e| format!("无法保存评分和编辑：{e}"),
+    held_by_app: |pid| format!("其他 LightPhotos 窗口（进程 {pid}）"),
+    held_by_mcp: |pid| format!("lightphotos-mcp（进程 {pid}）"),
+    held_by_other: "其他程序",
+    folder_read_only: |who| {
+        format!("只读：{who} 已打开此文件夹，在此的更改不会保存。请在那里关闭它，然后重新打开此文件夹。")
+    },
+    folder_cant_lock: "只读：无法锁定此文件夹，因此在此的更改不会保存。请重新打开此文件夹。",
+    folder_lockless: "无法锁定此文件夹。在此打开期间，请不要用 lightphotos-mcp 修改它。",
     presets_load_failed: |e| format!("无法读取预设：{e}"),
     presets_locked: "预设已锁定，因为无法读取已保存的文件。请将其移走或修复，然后重新启动。",
     presets_save_failed: |e| format!("无法保存预设：{e}"),

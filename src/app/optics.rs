@@ -131,7 +131,7 @@ impl App {
     /// Turn the correction on or off for `paths`. Turning it off also drops
     /// their queued measurements, so none lands later and turns it back on.
     pub(super) fn set_ca_for(&mut self, paths: &[PathBuf], on: bool) {
-        if paths.is_empty() {
+        if paths.is_empty() || self.refuse_if_read_only() {
             return;
         }
         if !on {

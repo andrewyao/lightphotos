@@ -183,6 +183,9 @@ impl App {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return;
         };
+        if self.refuse_if_read_only() {
+            return;
+        }
         if self.folder_store_loading() {
             self.auto_tone_batch(vec![path], DeferredAutoToneMode::Append);
             return;
@@ -240,7 +243,7 @@ impl App {
     /// Start a batch over `paths`, or defer it while the folder store loads. When
     /// deferred, `Append` adds to the waiting list and `Replace` swaps it out.
     pub(super) fn auto_tone_batch(&mut self, paths: Vec<PathBuf>, mode: DeferredAutoToneMode) {
-        if paths.is_empty() {
+        if paths.is_empty() || self.refuse_if_read_only() {
             return;
         }
         if self.folder_store_loading() {

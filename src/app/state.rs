@@ -54,6 +54,10 @@ pub(crate) struct State {
     zoom: Option<f32>,
     /// The status toast, while it shows.
     status: Option<String>,
+    /// Why the open folder is read-only, naming who holds it; absent while
+    /// it is writable. An agent's edits there are refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    read_only: Option<String>,
     /// Visible thumbnails whose decode failed for good.
     failed_thumbs: usize,
     /// The open catalog's name.
@@ -240,6 +244,7 @@ impl State {
             slideshow: app.slideshow_playing(),
             zoom: (mode == ViewMode::Loupe).then(|| app.zoom_rel()),
             status: app.status().map(|(_, text)| text.to_string()),
+            read_only: app.folder_read_only_text(),
             failed_thumbs: (0..app.visible_len())
                 .filter(|&pos| app.thumb_failed_at(pos))
                 .count(),
