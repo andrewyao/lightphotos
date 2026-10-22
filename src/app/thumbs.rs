@@ -29,23 +29,29 @@ impl App {
     /// - Entering the Loupe opens the full tier; leaving it frees the full
     ///   decodes, and a full on screen goes too, CPU and GPU copies both,
     ///   so the Grid's develop page (or the next visit) uploads the preview.
+    ///   Compare tiles waiting on a dropped full ask again on the next visit.
     /// - The hold, what eviction keeps, is worked out afresh from the photo
-    ///   wanted, its neighbors and the Compare tiles waiting on a full.
+    ///   wanted, its neighbors and the Compare tiles still waiting on a
+    ///   preview or a full.
     pub(crate) fn sync_loupe_tiers(&mut self) {
         let (was, now) = (self.tiers_mode, self.mode);
         self.tiers_mode = now;
+        let left = was == ViewMode::Loupe && now != ViewMode::Loupe;
+        if left {
+            // The loader drops the fulls they wait on.
+            self.forget_compare_fulls_waiting();
+        }
         let hold = self.loupe_hold();
         if let Some(loader) = &mut self.loader {
             if was != now && now == ViewMode::Loupe {
                 loader.enter_loupe();
             }
-            if was == ViewMode::Loupe && now != ViewMode::Loupe {
+            if left {
                 loader.leave_loupe();
             }
             loader.set_hold(hold);
         }
-        if was == ViewMode::Loupe && now != ViewMode::Loupe && matches!(self.shown, Shown::Full(_))
-        {
+        if left && matches!(self.shown, Shown::Full(_)) {
             self.shown = Shown::Nothing;
             if let Some(r) = &mut self.renderer {
                 r.clear_image();
@@ -72,6 +78,7 @@ impl App {
         let neighbors = self.neighbor_paths();
         let mut previews = vec![(want.clone(), px)];
         previews.extend(neighbors.iter().map(|p| (p.clone(), px)));
+        previews.extend(self.compare_previews_waiting());
         #[cfg(not(target_arch = "wasm32"))]
         let fulls = std::iter::once(want)
             .chain(neighbors)
