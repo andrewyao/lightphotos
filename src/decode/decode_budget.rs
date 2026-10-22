@@ -36,6 +36,9 @@ struct State {
     used: usize,
     next_ticket: u64,
     serving: u64,
+    /// A held grant is waiting to grow (see `Grant::grow`). New requests
+    /// wait behind it, since it already holds memory and is mid-decode.
+    growing: bool,
 }
 
 thread_local! {
@@ -54,6 +57,7 @@ impl DecodeBudget {
                 used: 0,
                 next_ticket: 0,
                 serving: 0,
+                growing: false,
             }),
             freed: Condvar::new(),
         }
@@ -69,6 +73,7 @@ impl DecodeBudget {
         let ticket = state.next_ticket;
         state.next_ticket = state.next_ticket.wrapping_add(1);
         while state.serving != ticket
+            || state.growing
             || (state.used > 0 && state.used.saturating_add(bytes) > self.limit)
         {
             state = self.freed.wait(state).unwrap_or_else(|e| e.into_inner());
@@ -83,6 +88,36 @@ impl DecodeBudget {
             budget: self,
             bytes,
         }
+    }
+
+    /// `grant` grown to `bytes` (at most the limit). It keeps what it
+    /// holds and waits only for the difference, ahead of every new request,
+    /// until it fits or it is all that is held. One grant grows at a time:
+    /// two that each waited for the other's memory would never wake, so a
+    /// second gives its bytes back and queues for the whole amount instead.
+    fn grow(&'static self, mut grant: Grant, bytes: usize) -> Grant {
+        let target = bytes.min(self.limit);
+        if target <= grant.bytes {
+            return grant;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.growing {
+            drop(state);
+            drop(grant);
+            return self.acquire(target);
+        }
+        state.growing = true;
+        let more = target - grant.bytes;
+        while state.used > grant.bytes && state.used.saturating_add(more) > self.limit {
+            state = self.freed.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        state.used += more;
+        state.growing = false;
+        drop(state);
+        self.freed.notify_all();
+        HELD.with(|held| held.set(held.get() + more));
+        grant.bytes = target;
+        grant
     }
 
     fn release(&self, bytes: usize) {
@@ -100,8 +135,16 @@ pub(crate) struct Grant {
 }
 
 impl Grant {
+    #[cfg(test)]
     pub(crate) fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// This grant grown to `bytes`, keeping what it holds; see
+    /// `DecodeBudget::grow`.
+    pub(crate) fn grow(self, bytes: usize) -> Grant {
+        let budget = self.budget;
+        budget.grow(self, bytes)
     }
 }
 
@@ -234,6 +277,58 @@ mod tests {
         large.join().unwrap();
         small.join().unwrap();
         assert_eq!(*order.lock().unwrap(), ["large", "small"]);
+    }
+
+    /// A decode that learns it needs more grows its grant ahead of a
+    /// request queued after it, instead of giving its bytes back and
+    /// queueing at the back of the line.
+    #[test]
+    fn a_held_grant_grows_ahead_of_new_requests() {
+        static BUDGET: DecodeBudget = DecodeBudget::new(100);
+        let other = BUDGET.acquire(50);
+        let first = BUDGET.acquire(30);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let queued = {
+            let order = Arc::clone(&order);
+            std::thread::spawn(move || {
+                let _g = BUDGET.acquire(40);
+                order.lock().unwrap().push("queued");
+            })
+        };
+        while BUDGET.state.lock().unwrap().next_ticket < 3 {
+            std::thread::yield_now();
+        }
+        let grower = {
+            let order = Arc::clone(&order);
+            std::thread::spawn(move || {
+                let grown = first.grow(60);
+                order.lock().unwrap().push("grown");
+                assert_eq!(grown.bytes(), 60);
+                std::thread::sleep(Duration::from_millis(20));
+            })
+        };
+        std::thread::sleep(Duration::from_millis(30));
+        drop(other);
+        grower.join().unwrap();
+        queued.join().unwrap();
+        assert_eq!(*order.lock().unwrap(), ["grown", "queued"]);
+    }
+
+    /// Two grants growing at once, each needing memory the other holds:
+    /// the second gives its bytes back, so neither waits forever.
+    #[test]
+    fn two_growing_grants_do_not_wait_on_each_other() {
+        static BUDGET: DecodeBudget = DecodeBudget::new(100);
+        let a = BUDGET.acquire(60);
+        let b = BUDGET.acquire(30);
+        let ta = std::thread::spawn(move || drop(a.grow(80)));
+        while !BUDGET.state.lock().unwrap().growing {
+            std::thread::yield_now();
+        }
+        let tb = std::thread::spawn(move || drop(b.grow(80)));
+        ta.join().unwrap();
+        tb.join().unwrap();
+        assert_eq!(BUDGET.state.lock().unwrap().used, 0);
     }
 
     #[test]
