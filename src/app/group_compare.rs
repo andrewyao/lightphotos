@@ -349,6 +349,38 @@ impl App {
             .collect()
     }
 
+    /// The Compare tiles whose preview has not been uploaded yet, at the
+    /// size they ask for. Held like `compare_fulls_waiting`, so previews
+    /// landing in one drain do not evict one another before
+    /// `sync_compare_tiles` uploads them, and are not asked for again.
+    pub(super) fn compare_previews_waiting(&self) -> Vec<(PathBuf, u32)> {
+        let Some(tiles) = &self.group_compare.tiles else {
+            return Vec::new();
+        };
+        let px = tiles.key.1;
+        tiles
+            .members
+            .iter()
+            .zip(tiles.page_paths())
+            .filter(|(slot, _)| slot.is_none())
+            .map(|(_, path)| (path.clone(), px))
+            .collect()
+    }
+
+    /// For leaving the Loupe, which drops the full decodes the Compare tiles
+    /// wait on: they ask again when the Loupe opens, rather than staying
+    /// soft as failures.
+    pub(super) fn forget_compare_fulls_waiting(&mut self) {
+        let Some(tiles) = &mut self.group_compare.tiles else {
+            return;
+        };
+        for tile in tiles.members.iter_mut().flatten() {
+            if matches!(tile.full, Full::Waiting) {
+                tile.full = Full::None;
+            }
+        }
+    }
+
     pub(super) fn sync_compare_tiles(&mut self) {
         if self.mode != ViewMode::Loupe {
             return;
@@ -994,6 +1026,64 @@ mod tests {
     use super::*;
     use crate::app::nav::tests::{cells, group_photos};
     use crate::app::test_support::folder_app;
+
+    /// A Compare pane of `paths` with one tile uploaded and waiting on its
+    /// full decode, and the rest still waiting on their previews.
+    fn waiting_tiles(app: &App, paths: &[PathBuf], px: u32) -> CompareTiles {
+        let mut first = Tile::new(paths[0].clone(), egui::TextureId::Managed(1), 4, 3);
+        first.full = Full::Waiting;
+        let mut members: Vec<Option<Tile>> = paths.iter().map(|_| None).collect();
+        members[0] = Some(first);
+        CompareTiles {
+            key: (paths.to_vec(), px),
+            order: paths.to_vec(),
+            shown: paths[0].clone(),
+            page: 0,
+            members,
+            loaded_page: 0,
+            sizes: HashMap::new(),
+            square: app.compare_square(),
+            square_moved: Instant::now(),
+            wake_at: None,
+            opened: Instant::now(),
+            bytes: 0,
+            upload_ms: 0.0,
+            reported: false,
+        }
+    }
+
+    /// The Compare tiles' waiting previews are held, so they cannot evict
+    /// one another before they upload; and leaving the Loupe, which drops
+    /// the fulls the tiles wait on, has them ask again on the way back
+    /// instead of staying soft as failures.
+    #[test]
+    fn compare_tiles_hold_their_previews_and_ask_again_after_a_round_trip() {
+        let (mut app, dir, paths) = folder_app("compare-hold", 3);
+        app.loader = Some(crate::jobs::loader::Loader::queue_only_for_test());
+        app.sel = Some(0);
+        app.want = Some(paths[0].clone());
+        app.mode = ViewMode::Loupe;
+        app.group_compare.tiles = Some(waiting_tiles(&app, &paths, 1500));
+        app.pump();
+        let held = app.loader.as_ref().unwrap().held().previews.clone();
+        for p in &paths[1..] {
+            assert!(
+                held.contains(&(p.clone(), 1500)),
+                "{} not held",
+                p.display()
+            );
+        }
+        assert!(!held.contains(&(paths[0].clone(), 1500)), "uploaded");
+
+        app.mode = ViewMode::Grid;
+        app.pump();
+        app.mode = ViewMode::Loupe;
+        app.pump();
+        let tiles = app.group_compare.tiles.as_ref().unwrap();
+        let first = tiles.members[0].as_ref().unwrap();
+        assert!(matches!(first.full, Full::None), "asks again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use crate::ui::UiAction;
     use std::time::{Duration, Instant};
 
