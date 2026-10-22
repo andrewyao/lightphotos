@@ -27,7 +27,25 @@ pub use crate::develop::apply_raw_preview_boost;
 #[hotpath::measure]
 pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     if is_raw_extension(path) {
-        return crate::decode::rawler::decode_raw_nonmac(path, max_dim);
+        return crate::decode::rawler::decode_raw_nonmac(
+            path,
+            max_dim,
+            crate::decode::rawler::RawIntent::Display,
+        );
+    }
+    decode_nonraw_from_bytes(&read_photo(path)?, max_dim)
+}
+
+/// [`decode`] for an export: a RAW shrunk at least 2x keeps PPG and a
+/// downscale rather than the display decode's 2x2 bins (see `RawIntent`).
+#[cfg(not(target_os = "macos"))]
+pub fn decode_for_export(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
+    if is_raw_extension(path) {
+        return crate::decode::rawler::decode_raw_nonmac(
+            path,
+            max_dim,
+            crate::decode::rawler::RawIntent::Export,
+        );
     }
     decode_nonraw_from_bytes(&read_photo(path)?, max_dim)
 }

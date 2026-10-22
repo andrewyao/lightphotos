@@ -6,7 +6,9 @@
 # the image is clamped to it. apply_scaling returns an error for
 # black-is-zero data instead of todo!(), and correct_blacklevel_cfa scales an
 # odd sensor's last row and column, which kept raw sample values and showed
-# as a bright edge. Regenerate the full vendored copy via
+# as a bright edge. Rect's Debug saturates, since a rect from file tags can
+# run past usize and is formatted in errors and debug logs. Regenerate the
+# full vendored copy via
 # ./scripts/setup-vendor-rawler.sh.
 --- a/rawler-upstream/src/imgop/develop.rs
 +++ b/rawler-0.8.0/src/imgop/develop.rs
@@ -19,24 +21,25 @@
    raw::{map_3ch_to_rgb, map_4ch_to_rgb},
    sensor::bayer::{bilinear::Bilinear4Channel, ppg::PPGDemosaic},
    xyz::Illuminant,
-@@ -142,6 +142,16 @@
+@@ -142,6 +142,17 @@
    }
  }
  
 +/// `rect` cut down to the part inside `bounds`, possibly empty, at `bounds`'s
-+/// origin when it starts before it (patched locally).
-+fn clamp_rect(rect: Rect, bounds: &Rect) -> Rect {
++/// origin when it starts before it, or `None` when `bounds` runs past
++/// `usize` (patched locally; both come from file tags).
++fn clamp_rect(rect: Rect, bounds: &Rect) -> Option<Rect> {
 +  let x0 = rect.p.x.max(bounds.p.x);
 +  let y0 = rect.p.y.max(bounds.p.y);
-+  let x1 = rect.p.x.saturating_add(rect.d.w).min(bounds.p.x + bounds.d.w).max(x0);
-+  let y1 = rect.p.y.saturating_add(rect.d.h).min(bounds.p.y + bounds.d.h).max(y0);
-+  Rect::new(Point::new(x0, y0), Dim2::new(x1 - x0, y1 - y0))
++  let x1 = rect.p.x.saturating_add(rect.d.w).min(bounds.p.x.checked_add(bounds.d.w)?).max(x0);
++  let y1 = rect.p.y.saturating_add(rect.d.h).min(bounds.p.y.checked_add(bounds.d.h)?).max(y0);
++  Some(Rect::new(Point::new(x0, y0), Dim2::new(x1 - x0, y1 - y0)))
 +}
 +
  impl RawDevelop {
    pub fn new_with(steps: &[ProcessingStep]) -> Self {
      Self { steps: Vec::from(steps) }
-@@ -165,24 +175,40 @@
+@@ -165,24 +176,40 @@
    /// If demosaic is disabled or camera raw is monochrome, the TIFF
    /// has only one color channel.
    pub fn develop_intermediate(&self, rawimage: &RawImage) -> crate::Result<Intermediate> {
@@ -81,7 +84,7 @@
      };
  
      if self.steps.contains(&ProcessingStep::Demosaic) {
-@@ -191,13 +217,19 @@
+@@ -191,13 +218,19 @@
            if let Intermediate::Monochrome(pixels) = intermediate {
              let roi = if self.steps.contains(&ProcessingStep::CropActiveArea) {
                if rawimage.active_area.is_some() && rawimage.fuji_rotation_width.is_some() {
@@ -103,7 +106,7 @@
                let ppg = PPGDemosaic::new();
                let mut rgb = ppg.demosaic(&pixels, &config.cfa, &config.colors, roi);
  
-@@ -210,14 +242,14 @@
+@@ -210,14 +243,14 @@
                  log::debug!("dimension after rotate {:?}", rgb.dim());
                }
                Intermediate::ThreeColor(rgb)
@@ -121,7 +124,7 @@
              }
            } else {
              intermediate
-@@ -251,14 +283,17 @@
+@@ -251,14 +284,17 @@
        } else {
          log::warn!("Image has no D65 illuminant matrix, alternative for Bradford adaption: {:?}", illu);
          d65_matrix = match matrix.len() {
@@ -144,7 +147,7 @@
        let components = d65_matrix.len() / 3;
        for i in 0..components {
          for j in 0..3 {
-@@ -292,8 +327,11 @@
+@@ -292,8 +328,11 @@
        if let Some(mut crop) = rawimage.crop_area.or(rawimage.active_area) {
          if self.steps.contains(&ProcessingStep::Demosaic) && self.steps.contains(&ProcessingStep::CropActiveArea) {
            // If active area crop was already applied during demosaic, we need to
@@ -153,24 +156,39 @@
 +          // reaching outside the active area is clamped to it rather than
 +          // asserting in `Rect::adapt`.
            if let Some(active_area) = &rawimage.active_area {
-+            crop = clamp_rect(crop, active_area);
++            crop = clamp_rect(crop, active_area).ok_or_else(|| unsupported(format!("active area {active_area:?}")))?;
              crop = crop.adapt(active_area);
              log::debug!("Adapt crop to active_area: {:?}", crop);
            }
-@@ -303,8 +341,12 @@
+@@ -303,8 +342,12 @@
            crop.scale(0.5);
            log::debug!("Scale crop to 0.5: {:?}", crop);
          }
 +        // Patched locally: a crop reaching past the image is clamped to it,
 +        // and one with nothing left is skipped, rather than panicking.
 +        let dim = intermediate.dim();
-+        crop = clamp_rect(crop, &Rect::new(Point::new(0, 0), dim));
++        crop = clamp_rect(crop, &Rect::new(Point::new(0, 0), dim)).ok_or_else(|| unsupported(format!("crop {crop:?}")))?;
          // Only apply crop if dimensions differ.
 -        if crop.d != intermediate.dim() {
 +        if crop.d != dim && crop.d.w > 0 && crop.d.h > 0 {
            log::debug!("crop: {:?}, intermediate dim: {:?}, rawimage: {:?}", crop, intermediate.dim(), rawimage.dim());
            intermediate = match intermediate {
              Intermediate::Monochrome(pixels) => Intermediate::Monochrome(pixels.crop(crop)),
+--- a/rawler-upstream/src/imgop/mod.rs
++++ b/rawler-0.8.0/src/imgop/mod.rs
+@@ -114,8 +114,10 @@
+       self.d.h,
+       self.p.x,
+       self.p.y,
+-      self.p.x + self.d.w,
+-      self.p.y + self.d.h
++      // Patched locally: saturating, since a rect from file tags can run
++      // past `usize` and is formatted in errors and debug logs.
++      self.p.x.saturating_add(self.d.w),
++      self.p.y.saturating_add(self.d.h)
+     ))
+   }
+ }
 --- a/rawler-upstream/src/imgop/raw.rs
 +++ b/rawler-0.8.0/src/imgop/raw.rs
 @@ -162,7 +162,7 @@
