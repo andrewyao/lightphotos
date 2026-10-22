@@ -485,6 +485,16 @@ impl App {
         n
     }
 
+    /// The page or window went out of sight: save an edit a held slider
+    /// is still making, and any export-form typing, now. In the browser
+    /// this is the last sure chance: closing a tab mid-drag never delivers
+    /// the release, and a sidecar write started after `pagehide` may not
+    /// finish. The undo step stays open for the drag to go on.
+    pub(crate) fn page_hidden(&mut self) {
+        self.save_edit();
+        self.save_export_edits();
+    }
+
     pub(crate) fn save_edit(&mut self) {
         for path in std::mem::take(&mut self.unsaved_synced) {
             let adj = self.edits.get(&path).copied().unwrap_or_default();
@@ -850,6 +860,24 @@ mod tests {
             .flush_blocking(std::time::Duration::from_secs(10));
         assert!(sidecar.exists(), "the release writes the edit");
         assert_eq!(app.folder_store.adjustments(&photo).exposure, 0.5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hiding_the_page_mid_drag_writes_the_edit() {
+        let (mut app, dir, photo) = one_photo("hidden");
+        let sidecar = dir.join(".lightphotos").join("a.jpg.xmp");
+        press(&app, true);
+        app.apply_adjustments(Adjustments {
+            exposure: 0.4,
+            ..Default::default()
+        });
+        app.save_edit_unless_dragging();
+        app.page_hidden();
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(10));
+        assert!(sidecar.exists(), "written with the mouse still held");
+        assert_eq!(app.folder_store.adjustments(&photo).exposure, 0.4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

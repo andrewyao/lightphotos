@@ -287,6 +287,12 @@ impl ApplicationHandler<UserEvent> for App {
 
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
+                // In the browser this is `visibilitychange`: a tab switch,
+                // or the first sign of a close, before `pagehide`.
+                #[cfg(target_arch = "wasm32")]
+                if occluded {
+                    self.page_hidden();
+                }
                 // Frames are skipped while occluded, so redraw when visible again.
                 if !occluded {
                     self.request_redraw();
@@ -354,6 +360,12 @@ impl ApplicationHandler<UserEvent> for App {
 
             _ => {}
         }
+    }
+
+    /// In the browser, `pagehide` into the back-forward cache. A page
+    /// that unloads instead gets `exiting`.
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.page_hidden();
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
