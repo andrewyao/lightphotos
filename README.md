@@ -116,7 +116,7 @@ A reply is `{"ok": true, "result": …}` or `{"ok": false, "error": {"error": "<
 
 `lightphotos-mcp` is an MCP server on stdio, so an agent such as Claude Code can cull, edit and look at photos. Build it with `cargo build --release --bin lightphotos-mcp`. Its tools are `list_commands`, `run_command`, `get_state`, `list_photos`, and `screenshot` or `render`. Call `list_commands` first: it gives every command id with an example of its params.
 
-Headless, it works on one folder with no app open. Commands marked `headless` (rate, flag, label, rotate, develop, crop) write the photos' sidecars, and `render` returns a photo with its saved edits as a JPEG:
+Headless, it works on one folder with no app open. Commands marked `headless` (rate, flag, label, rotate, develop, crop) write the photos' sidecars, and `render` returns a photo with its saved edits as a JPEG. Do not run it headless on a folder the app has open: the two overwrite each other's edits. Use `--attach` (below) instead, until the folder-lock work lands:
 
 ```sh
 claude mcp add lightphotos -- /path/to/lightphotos-mcp --folder ~/Pictures/shoot
