@@ -121,6 +121,7 @@ impl App {
         self.recompute_visible();
         self.clear_selection();
         self.folder_sel = None;
+        self.folder_anchor = None;
         self.mode = ViewMode::Grid;
         self.update_window_title();
         self.normalize_focus();

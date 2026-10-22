@@ -115,7 +115,7 @@ impl Session {
 /// The session to reopen: `session` when its folder is among `roots` and
 /// `exists`, else the first of `roots` that `exists`, at its top in the
 /// Grid. `None` leaves the landing page.
-pub(super) fn to_restore(
+fn to_restore(
     session: Option<&Session>,
     roots: &[PathBuf],
     exists: impl Fn(&Path) -> bool,

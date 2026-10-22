@@ -152,7 +152,7 @@ fn launch(last: Option<&Path>, default_dir: Option<&Path>, legacy: &[PathBuf]) -
 /// `path` as a catalog location. A bare name means that catalog in the
 /// app's catalog folder; a path without the extension gets it.
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn catalog_ref_for(path: &Path) -> Result<CatalogRef, String> {
+fn catalog_ref_for(path: &Path) -> Result<CatalogRef, String> {
     let bare = path.components().count() == 1 && !path.has_root();
     let path = if bare {
         default_dir()
@@ -252,7 +252,7 @@ impl App {
         }
     }
 
-    pub(super) fn open_catalog_ref(&mut self, at: CatalogRef) -> Result<(), String> {
+    fn open_catalog_ref(&mut self, at: CatalogRef) -> Result<(), String> {
         let catalog = Catalog::open(at).map_err(|e| e.to_string())?;
         self.switch_catalog(catalog);
         Ok(())
@@ -277,12 +277,6 @@ impl App {
         if name == self.catalog.name() {
             return Ok(());
         }
-        let at = self.catalog_named(name)?;
-        self.open_catalog_ref(at)
-    }
-
-    /// The catalog `name` means: one opened before, or the default one.
-    pub(super) fn catalog_named(&self, name: &str) -> Result<CatalogRef, String> {
         let known = self
             .recent_catalogs
             .iter()
@@ -293,9 +287,10 @@ impl App {
                 .then(|| CatalogRef::in_dir(&default_dir()?, DEFAULT_NAME).ok())
                 .flatten()
         };
-        known.or_else(default).ok_or_else(|| {
+        let at = known.or_else(default).ok_or_else(|| {
             format!("no catalog named {name} has been opened; give its path to catalog.open")
-        })
+        })?;
+        self.open_catalog_ref(at)
     }
 
     /// New Catalog…: a save dialog in the catalog folder, then a switch.
@@ -303,15 +298,12 @@ impl App {
         let Some(path) = crate::shell::dialog::save_catalog(default_dir()) else {
             return;
         };
-        match self.create_catalog_at(&path) {
-            Ok(()) => self.adopt_catalog_folders(),
-            Err(e) => {
-                self.set_status(
-                    StatusKind::Error,
-                    (crate::i18n::t().catalog_create_failed)(&e),
-                );
-                self.request_redraw();
-            }
+        if let Err(e) = self.create_catalog_at(&path) {
+            self.set_status(
+                StatusKind::Error,
+                (crate::i18n::t().catalog_create_failed)(&e),
+            );
+            self.request_redraw();
         }
     }
 
@@ -320,15 +312,12 @@ impl App {
         let Some(path) = crate::shell::dialog::pick_catalog() else {
             return;
         };
-        match self.open_catalog_at(&path) {
-            Ok(()) => self.adopt_catalog_folders(),
-            Err(e) => {
-                self.set_status(
-                    StatusKind::Error,
-                    (crate::i18n::t().catalog_open_failed)(&e),
-                );
-                self.request_redraw();
-            }
+        if let Err(e) = self.open_catalog_at(&path) {
+            self.set_status(
+                StatusKind::Error,
+                (crate::i18n::t().catalog_open_failed)(&e),
+            );
+            self.request_redraw();
         }
     }
 

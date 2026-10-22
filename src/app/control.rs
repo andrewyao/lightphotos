@@ -205,38 +205,22 @@ mod tests {
         assert!(!frame_work(true), "an occluded window draws none");
     }
 
-    #[test]
+    /// A folder holding one empty photo, `a.jpg`, and an empty `sub/`.
     #[cfg(not(target_arch = "wasm32"))]
-    fn an_agent_export_outside_the_open_folder_is_refused() {
-        use crate::command::{Command, ExportParams, Photos};
-        use crate::export::{ExportSettings, ExportTarget, FolderChoice};
-        let (mut app, _, photo) = user_opened("control-export");
-        let photos = vec![photo];
-        let outside = crate::app::test_support::temp_folder("control-export-out");
-        let export = Command::Export(ExportParams {
-            photos: Photos::Named(photos),
-            settings: Some(ExportSettings {
-                target: ExportTarget::Folder(FolderChoice::Custom(outside.clone())),
-                ..ExportSettings::default()
-            }),
-        });
-        let (tx, rx) = mpsc::channel();
-        app.answer_control(live(Op::Run(Box::new(export))), tx);
-        let refused = json_of(rx.try_recv().unwrap()).unwrap_err();
-        assert!(refused.contains("an agent can export only"), "{refused}");
-        assert!(!app.export_running(), "no batch started");
-        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    fn folder(tag: &str) -> std::path::PathBuf {
+        let dir = crate::app::test_support::temp_folder(tag);
+        std::fs::write(dir.join("a.jpg"), []).unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/b.jpg"), []).unwrap();
+        dir
     }
 
-    /// An App where the user (not an agent) opened a folder of one photo.
+    /// An App where the user opened `dir`, which makes it the anchor.
     #[cfg(not(target_arch = "wasm32"))]
-    fn user_opened(tag: &str) -> (App, std::path::PathBuf, std::path::PathBuf) {
-        let dir = crate::app::test_support::temp_folder(tag);
-        let photo = dir.join("a.jpg");
-        std::fs::write(&photo, []).unwrap();
+    fn user_opened(dir: &std::path::Path) -> App {
         let mut app = App::new(None);
-        app.open_from_user(dir.clone());
-        (app, dir, photo)
+        app.open(dir.to_path_buf());
+        app
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -249,225 +233,167 @@ mod tests {
         json_of(rx.try_recv().unwrap())
     }
 
-    #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn a_folder_the_user_never_chose_is_no_export_root() {
-        use crate::command::{Command, ExportParams, OpenFolderParams, Photos};
-        let (mut app, user_dir, _) = user_opened("agent-root-user");
-        let elsewhere = crate::app::test_support::temp_folder("agent-root-elsewhere");
-        std::fs::write(elsewhere.join("b.jpg"), []).unwrap();
-        // Loaded, but not at an entry point: as the tree or a restore does.
-        app.load_folder(elsewhere.clone());
-        let export = |name: &str| {
-            Command::Export(ExportParams {
-                photos: Photos::Named(vec![name.into()]),
-                settings: None,
-            })
-        };
-        let refused = agent_runs(&mut app, export("b.jpg")).unwrap_err();
-        assert!(refused.contains("an agent can export only"), "{refused}");
-        assert!(!elsewhere.join("Exports").exists());
-
-        // Back in the folder the user opened, the same export is allowed.
-        agent_runs(
-            &mut app,
-            Command::OpenFolder(OpenFolderParams {
-                path: user_dir.clone(),
-            }),
-        )
-        .unwrap();
-        let allowed = agent_runs(&mut app, export("a.jpg"));
-        assert!(
-            !format!("{allowed:?}").contains("an agent can export only"),
-            "{allowed:?}"
-        );
-    }
-
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn an_agent_cannot_place_a_catalog_or_preset_folder_outside_the_users_folders() {
-        use crate::command::{CatalogPathParams, Command, PresetFolderParams};
-        let (mut app, _, _) = user_opened("agent-paths-user");
-        let outside = crate::app::test_support::temp_folder("agent-paths-out");
-        let catalog = outside.join("Evil.lightphotos");
-        let made = agent_runs(
-            &mut app,
-            Command::NewCatalog(CatalogPathParams {
-                path: catalog.clone(),
-            }),
-        );
-        assert!(made.is_err(), "{made:?}");
-        assert!(!catalog.exists(), "nothing written outside");
-        let opened = agent_runs(
-            &mut app,
-            Command::OpenCatalog(CatalogPathParams {
-                path: catalog.clone(),
-            }),
-        );
-        assert!(
-            opened.as_ref().is_err_and(|e| e.contains("an agent")),
-            "{opened:?}"
-        );
-        let presets = agent_runs(
-            &mut app,
-            Command::AddPresetFolder(PresetFolderParams {
-                path: outside.clone(),
-            }),
-        );
-        assert!(
-            presets.as_ref().is_err_and(|e| e.contains("an agent")),
-            "{presets:?}"
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn export_here(name: &str) -> crate::command::Command {
-        crate::command::Command::Export(crate::command::ExportParams {
-            photos: crate::command::Photos::Named(vec![name.into()]),
-            settings: None,
+    fn open_folder(path: &std::path::Path) -> crate::command::Command {
+        crate::command::Command::OpenFolder(crate::command::OpenFolderParams {
+            path: path.to_path_buf(),
         })
     }
 
-    /// `dir` with one empty photo, `b.jpg`, in it.
     #[cfg(not(target_arch = "wasm32"))]
-    fn photo_folder(tag: &str) -> std::path::PathBuf {
-        let dir = crate::app::test_support::temp_folder(tag);
-        std::fs::write(dir.join("b.jpg"), []).unwrap();
-        dir
+    fn refused(out: &Result<serde_json::Value, String>) -> bool {
+        out.as_ref().is_err_and(|e| e.contains("an agent"))
     }
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn an_agent_cannot_open_a_folder_outside_the_users() {
-        use crate::command::{Command, OpenFolderParams};
-        let (mut app, _, _) = user_opened("agent-open-user");
-        let outside = photo_folder("agent-open-out");
-        let opened = agent_runs(
-            &mut app,
-            Command::OpenFolder(OpenFolderParams {
-                path: outside.clone(),
+    fn an_agent_opens_folders_only_inside_the_users_open_folder() {
+        let parent = crate::app::test_support::temp_folder("anchor-parent");
+        let anchor = parent.join("anchor");
+        let sibling = parent.join("sibling");
+        for dir in [&anchor, &sibling] {
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+        }
+        let mut app = user_opened(&anchor);
+        assert!(agent_runs(&mut app, open_folder(&anchor.join("sub"))).is_ok());
+        for outside in [&parent, &sibling, &anchor.join("sub/../..")] {
+            let out = agent_runs(&mut app, open_folder(outside));
+            assert!(refused(&out), "{}: {out:?}", outside.display());
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&sibling, anchor.join("link")).unwrap();
+            let out = agent_runs(&mut app, open_folder(&anchor.join("link")));
+            assert!(refused(&out), "a link out: {out:?}");
+        }
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn after_moving_down_an_agent_can_go_back_to_the_anchor_but_not_above() {
+        let dir = folder("anchor-updown");
+        let mut app = user_opened(&dir);
+        agent_runs(&mut app, open_folder(&dir.join("sub"))).unwrap();
+        assert_eq!(app.folder_sel.as_deref(), Some(dir.join("sub").as_path()));
+        assert!(agent_runs(&mut app, open_folder(&dir)).is_ok(), "back up");
+        let above = dir.parent().unwrap().to_path_buf();
+        assert!(refused(&agent_runs(&mut app, open_folder(&above))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn the_users_tree_navigation_moves_the_anchor() {
+        let first = folder("anchor-nav-first");
+        let second = folder("anchor-nav-second");
+        let mut app = user_opened(&first);
+        // As a click or arrow key in the folder tree loads a folder.
+        app.load_folder(second.clone());
+        assert!(agent_runs(&mut app, open_folder(&second.join("sub"))).is_ok());
+        assert!(refused(&agent_runs(&mut app, open_folder(&first))));
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_agent_runs_no_catalog_or_preset_folder_command() {
+        use crate::command::{CatalogNameParams, CatalogPathParams, Command, PresetFolderParams};
+        let dir = folder("anchor-catalogs");
+        let mut app = user_opened(&dir);
+        let inside = dir.join("Trip.lightphotos");
+        for cmd in [
+            Command::NewCatalog(CatalogPathParams {
+                path: inside.clone(),
             }),
-        );
-        assert!(
-            opened.as_ref().is_err_and(|e| e.contains("an agent")),
-            "{opened:?}"
-        );
-        assert_ne!(app.folder_sel.as_deref(), Some(outside.as_path()));
-        assert!(!outside.join(".lightphotos").exists(), "no sidecars there");
-    }
-
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn a_keystroke_after_an_agent_moved_the_cursor_adds_no_root() {
-        use crate::command::{Command, OpenFolderParams};
-        let (mut app, _, _) = user_opened("agent-key-user");
-        let outside = photo_folder("agent-key-out");
-        let child = outside.join("child");
-        std::fs::create_dir_all(&child).unwrap();
-        let _ = agent_runs(
-            &mut app,
-            Command::OpenFolder(OpenFolderParams { path: child }),
-        );
-        // Left in the tree: up to the parent, which the agent's folder named.
-        app.folder_collapse();
-        let in_outside = app
-            .folder_sel
-            .as_deref()
-            .is_some_and(|f| f.starts_with(&outside));
-        let export = agent_runs(&mut app, export_here("b.jpg"));
-        assert!(!(in_outside && export.is_ok()), "{export:?}");
-    }
-
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn a_crafted_catalog_an_agent_opened_adds_no_roots_on_restore() {
-        use crate::command::{CatalogPathParams, Command};
-        use crate::persist::catalog::{Catalog, CatalogRef};
-        let (mut app, user_dir, _) = user_opened("agent-cat-user");
-        let outside = photo_folder("agent-cat-out");
-        let at = CatalogRef::parse(&user_dir.join("Crafted.lightphotos")).unwrap();
-        drop(Catalog::create_at(at.clone(), vec![outside.clone()]).unwrap());
-        let _ = agent_runs(
-            &mut app,
             Command::OpenCatalog(CatalogPathParams {
-                path: at.path().to_path_buf(),
+                path: inside.clone(),
             }),
-        );
-        // What the next launch does with the remembered catalog.
-        app.restore_last_session();
-        let in_outside = app
-            .folder_sel
-            .as_deref()
-            .is_some_and(|f| f.starts_with(&outside));
-        let export = agent_runs(&mut app, export_here("b.jpg"));
-        assert!(!(in_outside && export.is_ok()), "{export:?}");
-    }
-
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn an_agent_cannot_switch_to_a_catalog_that_lists_other_folders() {
-        use crate::command::{CatalogNameParams, Command};
-        use crate::persist::catalog::{Catalog, CatalogRef};
-        let (mut app, _, _) = user_opened("agent-switch-user");
-        let outside = photo_folder("agent-switch-out");
-        let at = CatalogRef::parse(&outside.join("Elsewhere.lightphotos")).unwrap();
-        drop(Catalog::create_at(at.clone(), vec![outside.clone()]).unwrap());
-        app.recent_catalogs.push(at.clone());
-        let switched = agent_runs(
-            &mut app,
             Command::SwitchCatalog(CatalogNameParams {
-                name: at.name().to_string(),
+                name: "default".into(),
             }),
-        );
-        assert!(
-            switched.as_ref().is_err_and(|e| e.contains("an agent")),
-            "{switched:?}"
-        );
-        assert!(!app
-            .folder_sel
-            .as_deref()
-            .is_some_and(|f| f.starts_with(&outside)));
+            Command::AddPresetFolder(PresetFolderParams { path: dir.clone() }),
+        ] {
+            let out = agent_runs(&mut app, cmd.clone());
+            assert!(
+                out.as_ref().is_err_and(|e| e.contains("in the app")),
+                "{}: {out:?}",
+                cmd.id()
+            );
+        }
+        assert!(!inside.exists(), "no catalog made");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn opening_one_photo_makes_only_its_folder_a_root() {
-        use crate::command::{Command, OpenFolderParams};
-        let dir = photo_folder("agent-file-open");
-        let sub = dir.join("sub");
-        std::fs::create_dir_all(&sub).unwrap();
-        let mut app = App::new(None);
-        app.open_from_user(dir.join("b.jpg"));
-        let deeper = agent_runs(
-            &mut app,
-            Command::OpenFolder(OpenFolderParams { path: sub }),
-        );
-        assert!(
-            deeper.as_ref().is_err_and(|e| e.contains("an agent")),
-            "{deeper:?}"
-        );
-        let same = agent_runs(
-            &mut app,
-            Command::OpenFolder(OpenFolderParams { path: dir.clone() }),
-        );
-        assert!(same.is_ok(), "{same:?}");
+    fn an_agent_exports_only_inside_the_anchor_or_to_the_forms_folder() {
+        use crate::command::{Command, ExportParams, Photos};
+        use crate::export::{ExportSettings, ExportTarget, FolderChoice};
+        let dir = folder("anchor-export");
+        let outside = crate::app::test_support::temp_folder("anchor-export-out");
+        let mut app = user_opened(&dir);
+        let to = |target: std::path::PathBuf| {
+            Command::Export(ExportParams {
+                photos: Photos::Named(vec!["a.jpg".into()]),
+                settings: Some(ExportSettings {
+                    target: ExportTarget::Folder(FolderChoice::Custom(target)),
+                    ..ExportSettings::default()
+                }),
+            })
+        };
+        let out = agent_runs(&mut app, to(outside.clone()));
+        assert!(refused(&out), "{out:?}");
+        let out = agent_runs(&mut app, to(dir.join("Exports/web")));
+        assert!(!refused(&out), "{out:?}");
+        // Once the agent moved down, the anchor still bounds it.
+        agent_runs(&mut app, open_folder(&dir.join("sub"))).unwrap();
+        let back = Command::Export(ExportParams {
+            photos: Photos::Named(vec!["b.jpg".into()]),
+            settings: Some(ExportSettings {
+                target: ExportTarget::Folder(FolderChoice::Custom(dir.join("Exports"))),
+                ..ExportSettings::default()
+            }),
+        });
+        assert!(!refused(&agent_runs(&mut app, back)));
+        // The form's own folder is the user's choice, wherever it is.
+        app.set_export_settings(ExportSettings {
+            target: ExportTarget::Folder(FolderChoice::Custom(outside.clone())),
+            ..ExportSettings::default()
+        });
+        let form = Command::Export(ExportParams {
+            photos: Photos::Named(vec!["b.jpg".into()]),
+            settings: None,
+        });
+        assert!(!refused(&agent_runs(&mut app, form)));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn a_relative_path_the_user_opens_is_kept_absolute() {
-        let dir = photo_folder("agent-relative");
+    fn a_relative_path_the_user_opens_is_made_absolute_without_dot_dot() {
+        let dir = folder("anchor-relative");
         let cwd = std::env::current_dir().unwrap();
-        let ups = cwd.components().count().saturating_sub(1);
         let mut rel = std::path::PathBuf::new();
-        for _ in 0..ups {
+        for _ in 1..cwd.components().count() {
             rel.push("..");
         }
         rel.push(dir.strip_prefix("/").unwrap());
+        rel.push("sub/..");
         let mut app = App::new(None);
         app.open_from_user(rel);
         let shown = app.folder_sel.clone().unwrap();
         assert!(shown.is_absolute(), "{}", shown.display());
-        assert!(app.catalog.folders().iter().all(|f| f.is_absolute()));
+        assert!(
+            !shown
+                .components()
+                .any(|c| c == std::path::Component::ParentDir),
+            "{}",
+            shown.display()
+        );
+        assert_eq!(shown, dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
