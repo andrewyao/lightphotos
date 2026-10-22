@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Caps how much memory the wasm32 RAW decodes use at once. Every decode
+//! Caps how much memory the wasm32 decodes use at once. Every decode
 //! thread shares one heap of at most 4 GB that never shrinks, and a 45 MP
 //! RAW needs most of a gigabyte of scratch at sensor size. Six threads each
 //! decoding a big RAW ran the heap out, and an allocation failure aborts its
@@ -88,6 +88,18 @@ impl Drop for Grant {
     }
 }
 
+/// Peak bytes a JPEG, PNG or TIFF decode holds, from its header: the
+/// decoder's own buffer (`native` bytes), its RGBA8 copy, a second RGBA8
+/// copy when EXIF orientation rotates it, and the resized output of
+/// `out_pixels`. The header is hostile, so this saturates rather than wraps.
+pub(crate) fn nonraw_estimate(native: u64, pixels: u64, out_pixels: u64) -> usize {
+    let rgba = pixels.saturating_mul(4);
+    let total = native
+        .saturating_add(rgba.saturating_mul(2))
+        .saturating_add(out_pixels.saturating_mul(4));
+    usize::try_from(total).unwrap_or(usize::MAX)
+}
+
 /// Waits for `bytes` of the process-wide budget.
 pub(crate) fn acquire(bytes: usize) -> Grant {
     GLOBAL.acquire(bytes)
@@ -145,6 +157,15 @@ mod tests {
         let _a = BUDGET.acquire(40);
         let _b = BUDGET.acquire(40);
         assert_eq!(*BUDGET.used.lock().unwrap(), 80);
+    }
+
+    #[test]
+    fn a_nonraw_estimate_counts_every_copy_and_saturates() {
+        // A 24 MP RGB8 JPEG shown at 2048 x 1365.
+        let pixels = 6000 * 4000;
+        let estimate = nonraw_estimate(pixels * 3, pixels, 2048 * 1365);
+        assert_eq!(estimate, 72_000_000 + 192_000_000 + 11_182_080);
+        assert_eq!(nonraw_estimate(u64::MAX, u64::MAX, u64::MAX), usize::MAX);
     }
 
     #[test]
