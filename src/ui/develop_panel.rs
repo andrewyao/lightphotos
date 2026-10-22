@@ -534,7 +534,7 @@ fn draw_optics(ui: &mut egui::Ui, app: &App, scope: DevelopScope, out: &mut Fram
         app.remove_ca_state()
     };
     let clicked = ui
-        .add_enabled_ui(!app.remove_ca_pending(), |ui| {
+        .add_enabled_ui(!app.remove_ca_pending_here(), |ui| {
             tri_state_checkbox(ui, state, t.remove_ca)
         })
         .inner

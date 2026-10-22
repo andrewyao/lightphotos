@@ -19,18 +19,25 @@ const MEASURE_PX: u32 = 2560;
 
 type Outcome = (PathBuf, Result<CaScale, String>);
 
+/// One photo waiting for its measurement.
+#[derive(Debug, PartialEq)]
+struct Measure {
+    path: PathBuf,
+    /// Asked for in the folder showing, so its result joins that folder's
+    /// undo step and an undo there drops it. Cleared on a folder change,
+    /// which clears the history; a photo carried over lands without undo,
+    /// and nothing in the new folder stops it.
+    here: bool,
+}
+
 pub(super) struct Optics {
     /// The photo being measured, so its checkbox shows on while it runs.
-    pending: Option<PathBuf>,
+    pending: Option<Measure>,
     /// Photos waiting their turn. One is measured at a time, since each
     /// decode can take a large share of memory.
-    queue: VecDeque<PathBuf>,
+    queue: VecDeque<Measure>,
     /// Photos measured in this run, for the "n of m" status.
     done: usize,
-    /// Whether the run's results join the open undo step, so an undo takes
-    /// them back and stops the run. Cleared on a folder change, which clears
-    /// the history; a run that outlives one lands without undo.
-    undoable: bool,
     tx: Sender<Outcome>,
     rx: Receiver<Outcome>,
 }
@@ -42,31 +49,41 @@ impl Optics {
             pending: None,
             queue: VecDeque::new(),
             done: 0,
-            undoable: false,
             tx,
             rx,
         }
     }
 
+    fn all(&self) -> impl Iterator<Item = &Measure> {
+        self.pending.iter().chain(&self.queue)
+    }
+
     fn waiting(&self, path: &Path) -> bool {
-        self.pending.as_deref() == Some(path) || self.queue.iter().any(|q| q == path)
+        self.all().any(|m| m.path == path)
     }
 
     fn is_running(&self) -> bool {
         self.pending.is_some() || !self.queue.is_empty()
     }
 
-    /// Whether a running run keeps the open undo step open, so the whole
-    /// run undoes as one step.
-    pub(super) fn holds_undo_step(&self) -> bool {
-        self.undoable && self.is_running()
+    /// Whether photos asked for in the folder showing are still waiting.
+    fn running_here(&self) -> bool {
+        self.all().any(|m| m.here)
     }
 
-    /// The folder showing is about to change. A running run carries on,
-    /// because each result goes to its photo's own sidecar. Its undo step
+    /// Whether the folder showing's run keeps the open undo step open, so
+    /// the whole run undoes as one step.
+    pub(super) fn holds_undo_step(&self) -> bool {
+        self.running_here()
+    }
+
+    /// The folder showing is about to change. Waiting photos carry on,
+    /// because each result goes to its photo's own sidecar. Their undo step
     /// goes with the old folder's history.
     pub(super) fn leave_folder(&mut self) {
-        self.undoable = false;
+        for m in self.pending.iter_mut().chain(self.queue.iter_mut()) {
+            m.here = false;
+        }
     }
 }
 
@@ -92,8 +109,17 @@ impl App {
         }
     }
 
+    /// Whether any measurement is still going, this folder's or one
+    /// carried over from another, so the frame loop keeps polling.
     pub(crate) fn remove_ca_pending(&self) -> bool {
         self.optics.is_running()
+    }
+
+    /// Whether this folder's photos are still being measured, which holds
+    /// the Remove Chromatic Aberration control. A run carried over from
+    /// another folder does not.
+    pub(crate) fn remove_ca_pending_here(&self) -> bool {
+        self.optics.running_here()
     }
 
     /// Turn Remove Chromatic Aberration on or off for every photo the panel
@@ -109,12 +135,12 @@ impl App {
             return;
         }
         if !on {
-            self.optics.queue.retain(|p| !paths.contains(p));
+            self.optics.queue.retain(|m| !paths.contains(&m.path));
             if self
                 .optics
                 .pending
                 .as_ref()
-                .is_some_and(|p| paths.contains(p))
+                .is_some_and(|m| paths.contains(&m.path))
             {
                 self.optics.pending = None;
             }
@@ -128,41 +154,40 @@ impl App {
         if !self.remove_ca_pending() {
             self.optics.done = 0;
         }
-        self.optics.undoable = true;
         for path in paths.iter().cloned() {
             let has = self
                 .edits
                 .get(&path)
                 .is_some_and(|a| a.chromatic_aberration.is_some());
             if !has && !self.optics.waiting(&path) {
-                self.optics.queue.push_back(path);
+                self.optics.queue.push_back(Measure { path, here: true });
             }
         }
         self.start_next_measure();
     }
 
-    /// Drops the waiting and running measurements, for an undo that takes
-    /// back the run's step. A result still on its way is dropped when it
-    /// lands. A run that outlived a folder change has no step to take back,
-    /// so it keeps running.
+    /// Drops the folder showing's waiting and running measurements, for an
+    /// undo that takes back their step. A result still on its way is
+    /// dropped when it lands. Photos carried over from another folder have
+    /// no step here to take back, so they keep going.
     pub(super) fn cancel_remove_ca(&mut self) {
-        if !self.optics.undoable {
-            return;
+        self.optics.queue.retain(|m| !m.here);
+        if self.optics.pending.as_ref().is_some_and(|m| m.here) {
+            self.optics.pending = None;
         }
-        self.optics.queue.clear();
-        self.optics.pending = None;
+        self.start_next_measure();
     }
 
     /// Start measuring the next queued photo unless one is under way. A photo
     /// that cannot start is reported and skipped.
     fn start_next_measure(&mut self) {
         while self.optics.pending.is_none() {
-            let Some(path) = self.optics.queue.pop_front() else {
+            let Some(next) = self.optics.queue.pop_front() else {
                 return;
             };
-            match self.start_measure(path.clone()) {
+            match self.start_measure(next.path.clone()) {
                 Ok(()) => {
-                    self.optics.pending = Some(path);
+                    self.optics.pending = Some(next);
                     self.show_measure_progress();
                 }
                 Err(e) => self.set_status(
@@ -241,13 +266,13 @@ impl App {
         Ok(())
     }
 
-    fn store_measure(&mut self, path: &Path, scale: CaScale) {
+    fn store_measure(&mut self, path: &Path, scale: CaScale, here: bool) {
         let base = self.edits.get(path).copied().unwrap_or_default();
         let merged = Adjustments {
             chromatic_aberration: Some(scale),
             ..base
         };
-        if self.optics.undoable {
+        if here {
             self.put_edit(path, merged);
         } else {
             self.store_edit(path, merged);
@@ -280,14 +305,13 @@ impl App {
             }
         }
         while let Ok((path, scale)) = self.optics.rx.try_recv() {
-            if self.optics.pending.as_ref() != Some(&path) {
+            let Some(done) = self.optics.pending.take_if(|m| m.path == path) else {
                 continue;
-            }
-            self.optics.pending = None;
+            };
             self.optics.done += 1;
             match scale {
                 Ok(scale) => {
-                    self.store_measure(&path, scale);
+                    self.store_measure(&path, scale, done.here);
                     if self.optics.queue.is_empty() {
                         self.set_status(
                             StatusKind::Success,
@@ -408,8 +432,19 @@ mod tests {
             app.remove_ca_pending(),
             "a folder change must not stop the run"
         );
+        assert!(
+            !app.remove_ca_pending_here(),
+            "A's run does not hold B's Remove CA control"
+        );
+        // A run started in B queues behind A's. An undo in B takes back
+        // B's and leaves A's going.
+        app.selected = std::collections::BTreeSet::from([0]);
+        app.sel = Some(0);
+        app.set_remove_ca(true);
+        assert!(app.remove_ca_pending_here());
         assert_eq!(app.undo_edit(), 0, "B's history holds none of A's run");
         assert!(app.remove_ca_pending(), "and an undo in B does not stop it");
+        assert!(!app.optics.waiting(&twin), "but it drops B's own");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while app.remove_ca_pending() {
@@ -482,8 +517,12 @@ mod tests {
             CaState::On,
             "waiting photos count as on"
         );
-        assert_eq!(app.optics.pending.as_ref(), Some(&paths[0]));
-        assert_eq!(app.optics.queue, [paths[2].clone()], "one at a time");
+        let here = |path: &PathBuf| Measure {
+            path: path.clone(),
+            here: true,
+        };
+        assert_eq!(app.optics.pending, Some(here(&paths[0])));
+        assert_eq!(app.optics.queue, [here(&paths[2])], "one at a time");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while app.remove_ca_pending() {
