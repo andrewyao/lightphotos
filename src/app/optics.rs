@@ -159,7 +159,17 @@ impl App {
                 .edits
                 .get(&path)
                 .is_some_and(|a| a.chromatic_aberration.is_some());
-            if !has && !self.optics.waiting(&path) {
+            // A photo still waiting from a run carried over from another
+            // folder becomes this folder's again, so its result joins the
+            // undo step and an undo here stops it.
+            let waiting = self
+                .optics
+                .pending
+                .iter_mut()
+                .chain(self.optics.queue.iter_mut());
+            if let Some(m) = waiting.into_iter().find(|m| m.path == path) {
+                m.here = true;
+            } else if !has {
                 self.optics.queue.push_back(Measure { path, here: true });
             }
         }
@@ -479,6 +489,34 @@ mod tests {
             None,
             "no sidecar write failed"
         );
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    /// Back in folder A while A's run still goes, asking for its photos
+    /// again makes them this folder's: their results join the undo step,
+    /// and an undo stops them.
+    #[test]
+    fn asking_again_in_its_own_folder_makes_a_carried_over_photo_undoable() {
+        use crate::app::test_support::{folder_of, load_folder, temp_folder};
+        let (dir_a, a) = folder_of("ca-again-a", &["a.jpg".into(), "b.jpg".into()]);
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir_a);
+        app.selected = (0..2).collect();
+        app.sel = Some(0);
+        app.set_remove_ca(true);
+        let dir_b = temp_folder("ca-again-b");
+        load_folder(&mut app, &dir_b);
+        load_folder(&mut app, &dir_a);
+        assert!(app.optics.waiting(&a[1]), "A's run is still going");
+        assert!(!app.remove_ca_pending_here());
+
+        app.selected = (0..2).collect();
+        app.sel = Some(0);
+        app.set_remove_ca(true);
+        assert!(app.remove_ca_pending_here(), "A's photos are A's again");
+        app.undo_edit();
+        assert!(!app.remove_ca_pending(), "and an undo stops them");
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
     }
