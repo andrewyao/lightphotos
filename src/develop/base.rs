@@ -170,7 +170,7 @@ impl BaseLayer {
         w: u32,
         h: u32,
         fields: Fields,
-        pre: impl Fn(u32, u32) -> [f32; 3],
+        pre: impl Fn(u32, u32) -> [f32; 3] + Sync,
     ) -> Option<BaseLayer> {
         Self::build_on(Grid::for_image(w, h)?, w, h, fields, pre)
     }
@@ -178,7 +178,11 @@ impl BaseLayer {
     /// The fine layer: the same build on the [`Grid::fine`] grid, `mid`
     /// only, since only Texture reads it. The GPU fills all three fields
     /// there; the probe compares `mid`.
-    pub fn build_fine(w: u32, h: u32, pre: impl Fn(u32, u32) -> [f32; 3]) -> Option<BaseLayer> {
+    pub fn build_fine(
+        w: u32,
+        h: u32,
+        pre: impl Fn(u32, u32) -> [f32; 3] + Sync,
+    ) -> Option<BaseLayer> {
         Self::build_on(Grid::fine(w, h)?, w, h, Fields::Mid, pre)
     }
 
@@ -187,7 +191,7 @@ impl BaseLayer {
         w: u32,
         h: u32,
         fields: Fields,
-        pre: impl Fn(u32, u32) -> [f32; 3],
+        pre: impl Fn(u32, u32) -> [f32; 3] + Sync,
     ) -> Option<BaseLayer> {
         let (gw, gh) = (grid.w as usize, grid.h as usize);
         let (w64, h64, gw64, gh64) = (w as u64, h as u64, grid.w as u64, grid.h as u64);
@@ -202,34 +206,37 @@ impl BaseLayer {
             })
             .collect();
 
+        // A row of cells at a time, on any thread: each sums its own texel
+        // rows top to bottom, the order base.wgsl adds them in. A texel row
+        // that straddles two cell rows is read by both.
         let mut sums = vec![[0f32; 3]; gw * gh];
-        let mut row = vec![[0f32; 3]; w as usize];
-        let mut row_sums = vec![[0f32; 3]; gw];
-        for y in 0..h {
-            for (x, px) in row.iter_mut().enumerate() {
-                *px = pre(x as u32, y);
-            }
-            for (column, rs) in columns.iter().zip(row_sums.iter_mut()) {
-                *rs = [0.0; 3];
-                for &(x, ox) in column {
-                    let p = row[x];
-                    for c in 0..3 {
-                        rs[c] += ox * p[c];
+        super::parallel::for_each_row(&mut sums, gw, |j, cells| {
+            let j = j as u64;
+            let mut row = vec![[0f32; 3]; w as usize];
+            let mut row_sums = vec![[0f32; 3]; gw];
+            let (y0, y1) = cell_span(j, gh64, h64);
+            for y64 in y0..y1 {
+                let y = y64 as u32;
+                for (x, px) in row.iter_mut().enumerate() {
+                    *px = pre(x as u32, y);
+                }
+                for (column, rs) in columns.iter().zip(row_sums.iter_mut()) {
+                    *rs = [0.0; 3];
+                    for &(x, ox) in column {
+                        let p = row[x];
+                        for c in 0..3 {
+                            rs[c] += ox * p[c];
+                        }
                     }
                 }
-            }
-            let y64 = y as u64;
-            let (j0, j1) = (y64 * gh64 / h64, ((y64 + 1) * gh64 - 1) / h64);
-            for j in j0..=j1 {
                 let oy = overlap(y64, j, gh64, h64) as f32;
-                let cells = &mut sums[j as usize * gw..][..gw];
                 for (cell, rs) in cells.iter_mut().zip(&row_sums) {
                     for c in 0..3 {
                         cell[c] += oy * rs[c];
                     }
                 }
             }
-        }
+        });
 
         let area = w as f32 * h as f32;
         let means = sums.iter().map(|s| s.map(|v| v / area));
