@@ -172,6 +172,9 @@ flowchart LR
 Its threads read the requests. The main thread runs them (`app/control.rs`). In the
 browser, `web/web_mcp.rs` registers WebMCP tools that send the same requests.
 
+Every channel signs in and obeys the anchor rule. See
+[ARCHITECTURE.md → Automation trust model](ARCHITECTURE.md#automation-trust-model).
+
 `bin/lightphotos_mcp/` is a separate binary. It links only the lib. With `--attach`, it
 sends each tool call to `shell/control/tcp.rs`. With `--folder`, no app runs: it writes the
 sidecars and renders through `export/`.
