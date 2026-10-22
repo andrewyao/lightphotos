@@ -75,7 +75,7 @@ pub use nonmac_decode::*;
 #[cfg(not(target_os = "macos"))]
 mod fit;
 #[cfg(not(target_os = "macos"))]
-pub use fit::{decode_fit, fit_decoded};
+pub use fit::{decode_fit, decoded_grant_bytes, fit_decoded};
 
 #[cfg(target_os = "macos")]
 mod raw_filter;

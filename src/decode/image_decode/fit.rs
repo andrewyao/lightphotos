@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Fits a decoded JPEG, PNG or TIFF within a size and turns it upright, for
-//! every decode of one off macOS: the photo itself, its EXIF thumbnail, and
-//! the camera JPEG inside a RAF or CR3.
+//! Fits a decoded image within a size and turns it upright, for every decode
+//! of one off macOS: a JPEG, PNG or TIFF photo, its EXIF thumbnail, the
+//! camera JPEG inside a RAF or CR3, and the RAW `Fast` tier's binned image.
 //!
 //! A large shrink first averages whole blocks down to two to four times the
 //! target, in the image's own layout and depth, then Lanczos3 finishes.
@@ -13,13 +13,13 @@
 //! zune-jpeg, the `image` crate's JPEG decoder, has no reduced-size IDCT, so
 //! the frame is still decoded once at full size.
 //!
-//! On wasm32 a decode first takes a `decode_budget` grant sized from the
-//! header for exactly these steps ([`Plan::peak_bytes`]).
+//! On wasm32 a decode first takes one `decode_budget` grant for all of it,
+//! sized from the header ([`Plan::peak_bytes`]).
 
 use image::metadata::Orientation;
-use image::{DynamicImage, ImageBuffer, ImageDecoder, RgbaImage};
+use image::{DynamicImage, ImageBuffer, ImageDecoder, ImageFormat, RgbaImage};
 
-use crate::decode::image_decode::fit_within;
+use crate::decode::image_decode::{check_decode_size, fit_within};
 
 /// Most a block shrink averages on a side. Past it Lanczos3 starts from a
 /// larger image; it also keeps an 8-bit block sum inside a `u32`.
@@ -60,19 +60,22 @@ impl Plan {
     }
 
     /// Most bytes held at once: the largest of the steps' live buffers, for
-    /// an image decoded at `native_bpp` bytes a pixel. `turns` when the
-    /// orientation copies the output.
+    /// an image decoded at `native_bpp` bytes a pixel with `scratch` more
+    /// bytes of decoder working memory. `turns` when the orientation copies
+    /// the output.
     #[cfg_attr(
         not(target_arch = "wasm32"),
         allow(dead_code, reason = "only wasm32 has a decode budget")
     )]
-    pub(crate) fn peak_bytes(&self, native_bpp: u64, turns: bool) -> u64 {
+    pub(crate) fn peak_bytes(&self, native_bpp: u64, scratch: u64, turns: bool) -> u64 {
         let px = |(w, h): (u32, u32)| u64::from(w) * u64::from(h);
         let native = px(self.src).saturating_mul(native_bpp);
         let shrunk_native = px(self.shrunk).saturating_mul(native_bpp);
         let rgba = px(self.shrunk).saturating_mul(4);
         let out = px(self.out).saturating_mul(4);
-        // Decode, then the block shrink beside it.
+        // The decode: its output and its own working memory.
+        let decode = native.saturating_add(scratch);
+        // The block shrink beside the decode's output.
         let shrink = if self.factor > 1 {
             native.saturating_add(shrunk_native)
         } else {
@@ -89,53 +92,137 @@ impl Plan {
             rgba.saturating_add(pass).saturating_add(out)
         };
         let turn = if turns { out.saturating_mul(2) } else { 0 };
-        shrink.max(to_rgba).max(lanczos).max(turn)
+        decode.max(shrink).max(to_rgba).max(lanczos).max(turn)
     }
 }
 
-/// Decodes `reader`'s image fit within `max_dim`, turned upright by
-/// `orientation`, or by the image's own EXIF orientation when `None`.
-pub fn decode_fit<R: std::io::BufRead + std::io::Seek>(
-    reader: image::ImageReader<R>,
+/// Decodes `bytes`, of `format` or guessed when `None`, fit within
+/// `max_dim` and turned upright by `orientation`, or by the image's own EXIF
+/// orientation when `None`. The header's size is checked against
+/// `check_decode_size` before anything is reserved or allocated.
+pub fn decode_fit(
+    bytes: &[u8],
+    format: Option<ImageFormat>,
     max_dim: u32,
     orientation: Option<Orientation>,
 ) -> Result<RgbaImage, String> {
+    let reader = std::io::Cursor::new(bytes);
+    let reader = match format {
+        Some(format) => image::ImageReader::with_format(reader, format),
+        None => image::ImageReader::new(reader)
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?,
+    };
     let mut decoder = reader.into_decoder().map_err(|e| e.to_string())?;
     let orientation =
         orientation.unwrap_or_else(|| decoder.orientation().unwrap_or(Orientation::NoTransforms));
-    let plan = Plan::new(decoder.dimensions(), max_dim);
+    let src = decoder.dimensions();
+    check_decode_size(src.0, src.1)?;
+    let plan = Plan::new(src, max_dim);
     // Six browser decode threads share one heap that never shrinks, so a
     // folder of large JPEGs must wait its turn as RAWs do. Held until this
     // returns; sized from the header before any pixel is allocated.
     #[cfg(target_arch = "wasm32")]
-    let _grant = grant(&plan, decoder.color_type(), orientation);
+    let _grant = {
+        let bpp = u64::from(decoder.color_type().bytes_per_pixel());
+        let scratch = decoder_scratch(bytes, src, decoder.color_type());
+        crate::decode::decode_budget::acquire(clamp_usize(plan.peak_bytes(
+            bpp,
+            scratch,
+            orientation != Orientation::NoTransforms,
+        )))
+    };
     let img = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
     fit_and_orient(img, &plan, orientation)
 }
 
-/// [`decode_fit`] for an image another decoder has already decoded, such
-/// as rawler's embedded camera JPEG. Its grant covers the steps here, not
-/// that decode.
+/// [`decode_fit`]'s steps after the decode, for an image another decoder
+/// produced: rawler's embedded camera JPEG, or the RAW `Fast` tier's bins.
+/// It takes no grant; on wasm32 the caller holds one for the whole decode
+/// (see [`decoded_grant_bytes`]), since a second grant asked for on the same
+/// thread could wait on the first forever.
 pub fn fit_decoded(
     img: DynamicImage,
     max_dim: u32,
     orientation: Orientation,
 ) -> Result<RgbaImage, String> {
     let plan = Plan::new((img.width(), img.height()), max_dim);
-    #[cfg(target_arch = "wasm32")]
-    let _grant = grant(&plan, img.color(), orientation);
     fit_and_orient(img, &plan, orientation)
 }
 
-#[cfg(target_arch = "wasm32")]
-fn grant(
-    plan: &Plan,
-    color: image::ColorType,
-    orientation: Orientation,
-) -> crate::decode::decode_budget::Grant {
-    let turns = orientation != Orientation::NoTransforms;
-    let bytes = plan.peak_bytes(u64::from(color.bytes_per_pixel()), turns);
-    crate::decode::decode_budget::acquire(usize::try_from(bytes).unwrap_or(usize::MAX))
+/// What to reserve for decoding a `src`-sized 8-bit RGB image elsewhere and
+/// then [`fit_decoded`]: the caller's grant, taken before that decode.
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(dead_code, reason = "only wasm32 has a decode budget")
+)]
+pub fn decoded_grant_bytes(src: (u32, u32), max_dim: u32) -> usize {
+    // A camera JPEG decodes to RGB8, with up to as much again for the
+    // decoder's own working memory; the turn may copy the output.
+    let native = 3;
+    let px = u64::from(src.0) * u64::from(src.1);
+    clamp_usize(Plan::new(src, max_dim).peak_bytes(native, px.saturating_mul(native), true))
+}
+
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(dead_code, reason = "only wasm32 has a decode budget")
+)]
+fn clamp_usize(bytes: u64) -> usize {
+    usize::try_from(bytes).unwrap_or(usize::MAX)
+}
+
+/// The decoder's working memory beyond its output: a progressive JPEG keeps
+/// every DCT coefficient, 2 bytes a sample, until its last scan. Baseline
+/// JPEGs, PNG and TIFF decode in rows.
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(dead_code, reason = "only wasm32 has a decode budget")
+)]
+fn decoder_scratch(bytes: &[u8], (w, h): (u32, u32), color: image::ColorType) -> u64 {
+    if !jpeg_is_progressive(bytes) {
+        return 0;
+    }
+    let samples = u64::from(color.channel_count());
+    (u64::from(w) * u64::from(h))
+        .saturating_mul(samples)
+        .saturating_mul(2)
+}
+
+/// Whether `bytes` is a JPEG whose frame header is progressive (SOF2, SOF6,
+/// SOF10 or SOF14). Walks the marker segments up to the first frame header;
+/// anything malformed reads as not progressive.
+fn jpeg_is_progressive(bytes: &[u8]) -> bool {
+    if bytes.get(..2) != Some(&[0xFF, 0xD8]) {
+        return false;
+    }
+    let mut at = 2usize;
+    loop {
+        let (Some(&0xFF), Some(&marker)) = (bytes.get(at), bytes.get(at + 1)) else {
+            return false;
+        };
+        match marker {
+            // Fill bytes before a marker.
+            0xFF => at += 1,
+            0xC2 | 0xC6 | 0xCA | 0xCE => return true,
+            0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => return false,
+            // Start of scan or end of image before any frame header.
+            0xDA | 0xD9 => return false,
+            _ => {
+                let len = match (bytes.get(at + 2), bytes.get(at + 3)) {
+                    (Some(&hi), Some(&lo)) => usize::from(u16::from_be_bytes([hi, lo])),
+                    _ => return false,
+                };
+                if len < 2 {
+                    return false;
+                }
+                at = match at.checked_add(2 + len) {
+                    Some(next) => next,
+                    None => return false,
+                };
+            }
+        }
+    }
 }
 
 fn fit_and_orient(
@@ -218,212 +305,182 @@ where
 {
     let (w, h) = src.dimensions();
     let k = factor.max(1);
-    let (dw, dh) = (w / k, h / k);
-    let channels = usize::from(P::CHANNEL_COUNT);
+    let dims = (w as usize, h as usize, k as usize);
     let data = src.as_raw();
-    let dims = (w as usize, h as usize, channels, k as usize);
-    let out = if alpha {
-        shrink_weighted(data, dims)
-    } else {
-        Sample::shrink_opaque(data, dims)
+    let out = match (P::CHANNEL_COUNT, alpha) {
+        (1, false) => shrink::<_, 1>(data, dims, false),
+        (2, true) => shrink::<_, 2>(data, dims, true),
+        (3, false) => shrink::<_, 3>(data, dims, false),
+        (4, true) => shrink::<_, 4>(data, dims, true),
+        _ => None,
     }?;
-    ImageBuffer::from_raw(dw, dh, out)
+    ImageBuffer::from_raw(w / k, h / k, out)
 }
 
-/// A channel type the block shrink averages.
+/// A channel type the block shrink averages, with the sums it averages in:
+/// for 8-bit, `u32` when opaque (`MAX_FACTOR` keeps them from overflowing)
+/// and `u64` when weighted by alpha; `f64` for 16-bit and float.
 trait Sample: Copy {
-    fn to_f64(self) -> f64;
-    fn from_f64(v: f64) -> Self;
-
-    /// Averages whole `k` x `k` blocks of a `w` x `h` buffer of `channels`
-    /// channels a pixel, all of them color.
-    fn shrink_opaque(data: &[Self], dims: (usize, usize, usize, usize)) -> Option<Vec<Self>> {
-        shrink_rows(
-            data,
-            dims,
-            0.0f64,
-            |sums, px| {
-                for (s, &v) in sums.iter_mut().zip(px) {
-                    *s += v.to_f64();
-                }
-            },
-            |sums, out, n| {
-                for (o, &s) in out.iter_mut().zip(sums) {
-                    *o = Self::from_f64(s / n as f64);
-                }
-            },
-        )
-    }
+    type Sum: Copy + Default + std::ops::AddAssign;
+    type Weighted: Copy + Default + std::ops::AddAssign + PartialEq;
+    fn sum(self) -> Self::Sum;
+    fn weighted(self, alpha: Self) -> Self::Weighted;
+    fn alpha(self) -> Self::Weighted;
+    /// The block's mean: `sum / n`, rounded, back in this type.
+    fn mean(sum: Self::Sum, n: usize) -> Self;
+    /// `sum / weight`, rounded, back in this type. `weight` is never 0.
+    fn mean_weighted(sum: Self::Weighted, weight: Self::Weighted) -> Self;
+    /// The block's mean alpha.
+    fn mean_alpha(sum: Self::Weighted, n: usize) -> Self;
+    fn zero() -> Self;
 }
 
 impl Sample for u8 {
-    fn to_f64(self) -> f64 {
-        f64::from(self)
+    type Sum = u32;
+    type Weighted = u64;
+    fn sum(self) -> u32 {
+        u32::from(self)
     }
-    fn from_f64(v: f64) -> Self {
-        v.round().clamp(0.0, 255.0) as u8
+    fn weighted(self, alpha: u8) -> u64 {
+        u64::from(self) * u64::from(alpha)
     }
-    /// The JPEG path: `u32` sums, which `MAX_FACTOR` keeps from
-    /// overflowing, over whole pixels of a channel count known at compile
-    /// time.
-    fn shrink_opaque(data: &[u8], dims: (usize, usize, usize, usize)) -> Option<Vec<u8>> {
-        match dims.2 {
-            1 => shrink_u8::<1>(data, dims),
-            3 => shrink_u8::<3>(data, dims),
-            4 => shrink_u8::<4>(data, dims),
-            _ => shrink_rows(
-                data,
-                dims,
-                0.0f64,
-                |sums, px| {
-                    for (s, &v) in sums.iter_mut().zip(px) {
-                        *s += f64::from(v);
-                    }
-                },
-                |sums, out, n| {
-                    for (o, &s) in out.iter_mut().zip(sums) {
-                        *o = u8::from_f64(s / n as f64);
-                    }
-                },
-            ),
-        }
+    fn alpha(self) -> u64 {
+        u64::from(self)
+    }
+    fn mean(sum: u32, n: usize) -> u8 {
+        let n = n as u32;
+        ((sum + n / 2) / n).min(255) as u8
+    }
+    fn mean_weighted(sum: u64, weight: u64) -> u8 {
+        ((sum + weight / 2) / weight).min(255) as u8
+    }
+    fn mean_alpha(sum: u64, n: usize) -> u8 {
+        let n = n as u64;
+        ((sum + n / 2) / n).min(255) as u8
+    }
+    fn zero() -> u8 {
+        0
     }
 }
 
-/// [`Sample::shrink_opaque`] for 8-bit pixels of `C` channels. The same
-/// checks as [`shrink_rows`] come first, so every row read lies inside
-/// `data`.
-fn shrink_u8<const C: usize>(
-    data: &[u8],
-    (w, h, _, k): (usize, usize, usize, usize),
-) -> Option<Vec<u8>> {
+/// `Sample` for a channel averaged in `f64`, rounding and clamping back
+/// with `back`.
+macro_rules! float_sample {
+    ($t:ty, $back:expr) => {
+        impl Sample for $t {
+            type Sum = f64;
+            type Weighted = f64;
+            fn sum(self) -> f64 {
+                f64::from(self)
+            }
+            fn weighted(self, alpha: $t) -> f64 {
+                f64::from(self) * f64::from(alpha)
+            }
+            fn alpha(self) -> f64 {
+                f64::from(self)
+            }
+            fn mean(sum: f64, n: usize) -> $t {
+                $back(sum / n as f64)
+            }
+            fn mean_weighted(sum: f64, weight: f64) -> $t {
+                $back(sum / weight)
+            }
+            fn mean_alpha(sum: f64, n: usize) -> $t {
+                $back(sum / n as f64)
+            }
+            fn zero() -> $t {
+                <$t>::default()
+            }
+        }
+    };
+}
+
+float_sample!(u16, |v: f64| v.round().clamp(0.0, 65535.0) as u16);
+float_sample!(f32, |v: f64| v as f32);
+
+/// Averages whole `k` x `k` blocks of a `w` x `h` buffer of `C`-channel
+/// pixels. With `alpha`, the last channel is alpha: colors are weighted by
+/// it, and a block with none comes out transparent black.
+fn shrink<S: Sample, const C: usize>(
+    data: &[S],
+    dims: (usize, usize, usize),
+    alpha: bool,
+) -> Option<Vec<S>> {
+    let n = dims.2.checked_mul(dims.2)?;
+    if !alpha {
+        return walk::<S, S::Sum, C>(
+            data,
+            dims,
+            |sum, px| {
+                for (s, &v) in sum.iter_mut().zip(px) {
+                    *s += v.sum();
+                }
+            },
+            |sum, out| {
+                for (o, &s) in out.iter_mut().zip(sum) {
+                    *o = S::mean(s, n);
+                }
+            },
+        );
+    }
+    walk::<S, S::Weighted, C>(
+        data,
+        dims,
+        |sum, px| {
+            let a = px[C - 1];
+            for (s, &v) in sum.iter_mut().zip(&px[..C - 1]) {
+                *s += v.weighted(a);
+            }
+            sum[C - 1] += a.alpha();
+        },
+        |sum, out| {
+            let a = sum[C - 1];
+            let none = a == S::Weighted::default();
+            for (o, &s) in out.iter_mut().zip(&sum[..C - 1]) {
+                *o = if none {
+                    S::zero()
+                } else {
+                    S::mean_weighted(s, a)
+                };
+            }
+            out[C - 1] = S::mean_alpha(a, n);
+        },
+    )
+}
+
+/// The block walk both shrinks share. `add` folds one pixel into its
+/// block's sums; `finish` writes a block's output pixel.
+///
+/// `data` is checked to hold exactly `w * h * C` samples first, so every
+/// row read below lies inside it: rows stop at `dh * k <= h` and columns at
+/// `dw * k <= w`. Each output row walks the source in `k`-pixel runs, one
+/// run a block, so the hot loop has no division.
+fn walk<S: Copy, A: Copy + Default, const C: usize>(
+    data: &[S],
+    (w, h, k): (usize, usize, usize),
+    add: impl Fn(&mut [A; C], &[S; C]),
+    finish: impl Fn(&[A; C], &mut [S; C]),
+) -> Option<Vec<S>> {
     let (dw, dh) = (w.checked_div(k)?, h.checked_div(k)?);
-    if dw == 0 || dh == 0 || data.len() != w.checked_mul(h)?.checked_mul(C)? {
+    if dw == 0 || dh == 0 || C == 0 || data.len() != w.checked_mul(h)?.checked_mul(C)? {
         return None;
     }
-    let n = u32::try_from(k * k).ok()?;
-    let mut out = vec![0u8; dw * dh * C];
-    let mut sums = vec![[0u32; C]; dw];
+    let mut out = vec![*data.first()?; dw * dh * C];
+    let mut sums = vec![[A::default(); C]; dw];
     for (dy, out_row) in out.chunks_exact_mut(dw * C).enumerate() {
-        sums.fill([0; C]);
+        sums.fill([A::default(); C]);
         for y in dy * k..(dy + 1) * k {
             let start = y * w * C;
             let (row, _) = data.get(start..start + dw * k * C)?.as_chunks::<C>();
             for (sum, block) in sums.iter_mut().zip(row.chunks_exact(k)) {
                 for px in block {
-                    for (s, &v) in sum.iter_mut().zip(px) {
-                        *s += u32::from(v);
-                    }
+                    add(sum, px);
                 }
             }
         }
         let (row, _) = out_row.as_chunks_mut::<C>();
         for (o, sum) in row.iter_mut().zip(&sums) {
-            for (o, &s) in o.iter_mut().zip(sum) {
-                *o = ((s + n / 2) / n) as u8;
-            }
-        }
-    }
-    Some(out)
-}
-
-impl Sample for u16 {
-    fn to_f64(self) -> f64 {
-        f64::from(self)
-    }
-    fn from_f64(v: f64) -> Self {
-        v.round().clamp(0.0, 65535.0) as u16
-    }
-}
-
-impl Sample for f32 {
-    fn to_f64(self) -> f64 {
-        f64::from(self)
-    }
-    fn from_f64(v: f64) -> Self {
-        v as f32
-    }
-}
-
-/// [`Sample::shrink_opaque`] for pixels whose last channel is alpha: each
-/// color is weighted by its alpha, and a block with no alpha at all comes
-/// out transparent black.
-fn shrink_weighted<S: Sample>(data: &[S], dims: (usize, usize, usize, usize)) -> Option<Vec<S>> {
-    let channels = dims.2;
-    shrink_rows(
-        data,
-        dims,
-        0.0f64,
-        |sums, px| {
-            let Some((&a, colors)) = px.split_last() else {
-                return;
-            };
-            let a = a.to_f64();
-            for (s, &v) in sums.iter_mut().zip(colors) {
-                *s += v.to_f64() * a;
-            }
-            if let Some(s) = sums.get_mut(channels - 1) {
-                *s += a;
-            }
-        },
-        |sums, out, n| {
-            let Some((&a, colors)) = sums.split_last() else {
-                return;
-            };
-            for (o, &s) in out.iter_mut().zip(colors) {
-                *o = S::from_f64(if a > 0.0 { s / a } else { 0.0 });
-            }
-            if let Some(o) = out.last_mut() {
-                *o = S::from_f64(a / n as f64);
-            }
-        },
-    )
-}
-
-/// The block walk the shrinks share. `data` is checked to hold exactly
-/// `w * h * channels` samples first, so every block row read below lies
-/// inside it: rows stop at `dh * k <= h` and columns at `dw * k <= w`.
-/// `add` folds one pixel into its block's sums; `finish` writes a block's
-/// output pixel from its sums and its pixel count. Each output row walks the
-/// source in `k`-pixel runs, one run a block, so the hot loop has no
-/// division.
-fn shrink_rows<S: Copy, A: Copy>(
-    data: &[S],
-    (w, h, channels, k): (usize, usize, usize, usize),
-    zero: A,
-    add: impl Fn(&mut [A], &[S]),
-    finish: impl Fn(&[A], &mut [S], usize),
-) -> Option<Vec<S>> {
-    let (dw, dh) = (w.checked_div(k)?, h.checked_div(k)?);
-    if dw == 0 || dh == 0 || channels == 0 {
-        return None;
-    }
-    if data.len() != w.checked_mul(h)?.checked_mul(channels)? {
-        return None;
-    }
-    let row_len = w * channels;
-    let run = k * channels;
-    let used = dw * run;
-    let n = k * k;
-    let first = *data.first()?;
-    let mut out = vec![first; dw * dh * channels];
-    let mut sums = vec![zero; dw * channels];
-    for (dy, out_row) in out.chunks_exact_mut(dw * channels).enumerate() {
-        sums.fill(zero);
-        for y in dy * k..(dy + 1) * k {
-            let start = y * row_len;
-            let row = data.get(start..start + used)?;
-            for (sum, block) in sums.chunks_exact_mut(channels).zip(row.chunks_exact(run)) {
-                for px in block.chunks_exact(channels) {
-                    add(sum, px);
-                }
-            }
-        }
-        for (sum, px) in sums
-            .chunks_exact(channels)
-            .zip(out_row.chunks_exact_mut(channels))
-        {
-            finish(sum, px, n);
+            finish(sum, o);
         }
     }
     Some(out)
@@ -444,7 +501,7 @@ mod tests {
 
     /// A transparent pixel's color must not tint the block: one opaque red
     /// pixel and three transparent blue ones average to red at a quarter
-    /// alpha.
+    /// alpha, in 8 and 16 bits.
     #[test]
     fn a_block_shrink_weights_color_by_alpha() {
         let mut src = image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 255, 0]));
@@ -456,17 +513,19 @@ mod tests {
             shrink_buffer(&clear, 2, true).unwrap().get_pixel(0, 0).0,
             [0, 0, 0, 0]
         );
+        let mut deep =
+            ImageBuffer::<image::Rgba<u16>, _>::from_pixel(2, 2, image::Rgba([0, 0, 65535, 0]));
+        deep.put_pixel(0, 0, image::Rgba([65535, 0, 0, 65535]));
+        let out = shrink_buffer(&deep, 2, true).unwrap();
+        assert_eq!(out.get_pixel(0, 0).0, [65535, 0, 0, 16384]);
     }
 
     /// A 16-bit image shrinks in its own depth, so there is no full-size
     /// RGBA8 copy before the shrink.
     #[test]
     fn a_16_bit_image_shrinks_in_its_own_depth() {
-        let src = image::ImageBuffer::<image::Rgb<u16>, _>::from_pixel(
-            8,
-            8,
-            image::Rgb([1000, 40000, 65535]),
-        );
+        let src =
+            ImageBuffer::<image::Rgb<u16>, _>::from_pixel(8, 8, image::Rgb([1000, 40000, 65535]));
         let out = box_shrink(DynamicImage::ImageRgb16(src), 4);
         let DynamicImage::ImageRgb16(out) = out else {
             panic!("the shrink changed the layout");
@@ -477,9 +536,9 @@ mod tests {
 
     #[test]
     fn a_buffer_that_does_not_match_its_size_is_left_alone() {
-        assert!(shrink_rows(&[0u8; 7], (2, 2, 2, 2), 0u32, |_, _| {}, |_, _, _| {}).is_none());
-        assert!(shrink_rows(&[0u8; 8], (2, 2, 2, 0), 0u32, |_, _| {}, |_, _, _| {}).is_none());
-        assert!(shrink_rows(&[0u8; 8], (2, 2, 2, 4), 0u32, |_, _| {}, |_, _, _| {}).is_none());
+        assert!(shrink::<u8, 2>(&[0; 7], (2, 2, 2), false).is_none());
+        assert!(shrink::<u8, 2>(&[0; 8], (2, 2, 0), false).is_none());
+        assert!(shrink::<u8, 2>(&[0; 8], (2, 2, 4), false).is_none());
     }
 
     /// Fitting before turning lands the same size and the same corners as
@@ -519,7 +578,7 @@ mod tests {
     /// The grant follows the pipeline: a thumbnail of a 24 MP JPEG holds the
     /// decode and its block shrink, far less than the old full-size RGBA8
     /// copies and full-width Lanczos pass; a large target holds Lanczos's
-    /// full-width pass.
+    /// full-width pass; a progressive decode's coefficients count.
     #[test]
     fn the_peak_follows_the_pipeline() {
         let rgb = 3;
@@ -527,14 +586,42 @@ mod tests {
         let thumb = Plan::new(src, 512);
         assert_eq!(thumb.factor, 5);
         assert_eq!(thumb.shrunk, (1200, 800));
-        assert_eq!(thumb.peak_bytes(rgb, false), 72_000_000 + 1200 * 800 * 3);
+        assert_eq!(thumb.peak_bytes(rgb, 0, false), 72_000_000 + 1200 * 800 * 3);
+        assert_eq!(thumb.peak_bytes(rgb, 144_000_000, false), 216_000_000);
         let large = Plan::new(src, 2560);
         assert_eq!(large.factor, 1);
         let lanczos = 96_000_000 + 6000 * 1706 * 16 + 2560 * 1706 * 4;
-        assert_eq!(large.peak_bytes(rgb, false), lanczos);
+        assert_eq!(large.peak_bytes(rgb, 0, false), lanczos);
         let whole = Plan::new(src, 8192);
-        assert_eq!(whole.peak_bytes(rgb, true), 96_000_000 * 2);
+        assert_eq!(whole.peak_bytes(rgb, 0, true), 96_000_000 * 2);
         let huge = Plan::new((u32::MAX, u32::MAX), 1);
-        assert!(huge.peak_bytes(u64::MAX, true) == u64::MAX);
+        assert_eq!(huge.peak_bytes(u64::MAX, 0, true), u64::MAX);
+    }
+
+    #[test]
+    fn a_progressive_jpeg_is_told_from_a_baseline_one() {
+        let jpeg = |sof: u8| {
+            let mut b = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0, 0, 0xFF, 0xFF];
+            b.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x02, 0xFF, sof, 0x00, 0x02]);
+            b
+        };
+        assert!(jpeg_is_progressive(&jpeg(0xC2)));
+        assert!(!jpeg_is_progressive(&jpeg(0xC0)));
+        assert!(!jpeg_is_progressive(b"\x89PNG"));
+        // Truncated or a length that runs off the end: not progressive.
+        assert!(!jpeg_is_progressive(&[0xFF, 0xD8, 0xFF, 0xE0, 0xFF]));
+        assert!(!jpeg_is_progressive(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x00]));
+    }
+
+    #[test]
+    fn a_huge_header_is_refused_before_anything_is_reserved() {
+        // A 16 x 16 PNG header claiming 65535 x 65535.
+        let mut png = Vec::new();
+        image::RgbImage::new(16, 16)
+            .write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+        png[16..20].copy_from_slice(&65535u32.to_be_bytes());
+        png[20..24].copy_from_slice(&65535u32.to_be_bytes());
+        assert!(decode_fit(&png, None, 512, None).is_err());
     }
 }
