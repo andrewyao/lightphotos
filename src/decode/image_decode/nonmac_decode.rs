@@ -64,6 +64,20 @@ pub fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedIma
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
 
+    // Six browser decode threads share one heap that never shrinks, so a
+    // folder of large JPEGs must wait its turn as RAWs do. Held until this
+    // returns; sized from the header before any pixel is allocated.
+    #[cfg(target_arch = "wasm32")]
+    let _grant = {
+        let (w, h) = decoder.dimensions();
+        let (out_w, out_h) = fit_within(w, h, max_dim);
+        crate::decode::decode_budget::acquire(crate::decode::decode_budget::nonraw_estimate(
+            decoder.total_bytes(),
+            u64::from(w) * u64::from(h),
+            u64::from(out_w) * u64::from(out_h),
+        ))
+    };
+
     let mut img = image::DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
     img.apply_orientation(orientation);
     let img = img.into_rgba8();
