@@ -669,10 +669,18 @@ impl App {
             adj: self.edits.get(&src).copied().unwrap_or_default(),
             touchups: self.touchups.get(&src).cloned().unwrap_or_default(),
             // The worker reads the coverage itself; the blocker held the
-            // export until every detection was recorded.
-            masks: crate::develop::MaskInput::OnDisk {
-                masks: self.masks.get(&src).cloned().unwrap_or_default(),
-                detections: self.detections.get(&src).cloned().unwrap_or_default(),
+            // export until every detection was recorded. In a read-only
+            // folder the detections live in memory, so the job takes them.
+            masks: if self.coverage.in_memory_for(&src) {
+                crate::develop::MaskInput::Ready(crate::develop::MaskSet::new(
+                    self.masks.get(&src).map_or(&[][..], Vec::as_slice),
+                    |t| self.coverage.ready(&src, t),
+                ))
+            } else {
+                crate::develop::MaskInput::OnDisk {
+                    masks: self.masks.get(&src).cloned().unwrap_or_default(),
+                    detections: self.detections.get(&src).cloned().unwrap_or_default(),
+                }
             },
             rot: self.rotations.get(&src).copied().unwrap_or(0),
             src,

@@ -293,7 +293,13 @@ impl App {
     /// Writes what `target` resolves to for `path`: the sidecar and the
     /// mirror, outside the undo history. A detection is a fact about the
     /// photo, not an edit the user made.
+    ///
+    /// Not in a read-only folder: the coverage stays in the store's memory,
+    /// and its sidecar isn't the app's to write.
     fn record_detection(&mut self, path: &Path, target: DetectTarget, id: Option<RasterId>) {
+        if self.coverage.read_only_photo(path) {
+            return;
+        }
         self.folder_store.set_detection(path, target, id);
         let entry = self.detections.entry(path.to_path_buf()).or_default();
         entry.set(target, id);
@@ -378,16 +384,16 @@ pub(crate) fn mask_input_of(
     if coverage.readiness(path, &masks, &detections) == coverage::Readiness::Pending {
         return None;
     }
+    // Natively a worker reads the coverage files itself, except in a
+    // read-only folder, whose detections write none; there, as in the
+    // browser, the bake takes what the store has in memory.
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        Some(MaskInput::OnDisk { masks, detections })
+    if !coverage.in_memory_for(path) {
+        return Some(MaskInput::OnDisk { masks, detections });
     }
-    #[cfg(target_arch = "wasm32")]
-    {
-        Some(MaskInput::Ready(MaskSet::new(&masks, |t| {
-            coverage.ready(path, t)
-        })))
-    }
+    Some(MaskInput::Ready(MaskSet::new(&masks, |t| {
+        coverage.ready(path, t)
+    })))
 }
 
 /// Reads and decodes one recorded coverage file through File System Access.
