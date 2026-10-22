@@ -308,6 +308,35 @@ mod tests {
         assert!(text.contains("can't be locked"), "{text}");
     }
 
+    /// Design row 22: a read-only visit sweeps nothing: the other program
+    /// may be writing the files a sweep would take for orphans.
+    #[test]
+    fn a_read_only_visit_sweeps_no_derived_files() {
+        use crate::app::test_support::load_folder;
+        use crate::sidecar::{FolderLock, Writer, SIDECAR_DIR};
+        let (dir, _) = one_photo("lock-sweep");
+        std::fs::create_dir_all(dir.join(SIDECAR_DIR)).unwrap();
+        let orphan = dir
+            .join(SIDECAR_DIR)
+            .join("gone.jpg.0123456789abcdef.thumb.jpg");
+        std::fs::write(&orphan, b"x").unwrap();
+        let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let kept = orphan.exists();
+        drop(other);
+        load_folder(&mut app, &dir);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while orphan.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let swept = !orphan.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(kept, "not swept while read-only");
+        assert!(swept, "swept once the folder opens writable");
+    }
+
     #[test]
     fn the_catalogs_folders_that_are_not_there_are_marked_missing() {
         let here = temp_folder("roots-here");

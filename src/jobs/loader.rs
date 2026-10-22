@@ -790,6 +790,10 @@ struct Shared {
 pub struct Loader {
     shared: Arc<Shared>,
     res_rx: Receiver<JobResult>,
+    /// The workers' thumbnail cache, so the app can tell it which folder
+    /// is read-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    thumbs: Arc<ThumbCache>,
 
     /// The GPU's max texture dimension, so full decodes only downscale images
     /// too large to upload.
@@ -951,6 +955,8 @@ impl Loader {
         Self {
             shared,
             res_rx,
+            #[cfg(not(target_arch = "wasm32"))]
+            thumbs,
             full_target: max_dim,
             limits,
             fulls: Tier::new(),
@@ -987,6 +993,13 @@ impl Loader {
             workers: started,
             generation: Generation::default(),
         }
+    }
+
+    /// The folder the app opened read-only, if one is: its thumbnails are
+    /// not written to the cache.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_read_only(&self, folder: Option<crate::sidecar::FolderKey>) {
+        self.thumbs.set_read_only(folder);
     }
 
     /// Requests the screen-fit view the loupe shows for `path` at `target_px`.

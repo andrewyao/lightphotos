@@ -170,6 +170,16 @@ impl App {
     /// show for the new one. `poll_folder_store_load` folds in the result.
     pub(super) fn request_folder_store_load(&mut self, dir: &Path, has_photos: bool) {
         let mark = self.folder_store.switch_dir(dir, has_photos);
+        // A read-only folder gets no derived file written or swept: no
+        // coverage, no thumbnail entry. See docs/design/folder-lock.md §6.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let read_only = self.folder_store.read_only_folder().cloned();
+            self.coverage.set_read_only(read_only.clone());
+            if let Some(loader) = self.loader.as_ref() {
+                loader.set_read_only(read_only);
+            }
+        }
         self.folder_store_load.token += 1;
         let token = self.folder_store_load.token;
         let dir = dir.to_path_buf();
@@ -178,6 +188,7 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let for_thread = dir.clone();
+            let sweep = self.folder_store.read_only().is_none();
             let spawned = std::thread::Builder::new()
                 .name("folder-store-load".into())
                 .spawn(move || {
@@ -190,11 +201,14 @@ impl App {
                         .collect();
                     let _ = tx.send((for_thread.clone(), token, mark, loaded));
                     // Sweep after sending, because the UI waits on the folder store
-                    // and nothing waits on the sweeps.
-                    crate::jobs::thumbnail::sweep_orphans(&for_thread);
-                    crate::develop::coverage::sweep_orphans(&for_thread, |photo, id| {
-                        named.get(photo).is_some_and(|d| d.names(id))
-                    });
+                    // and nothing waits on the sweeps. Not in a read-only folder:
+                    // the other program may be writing the files swept.
+                    if sweep {
+                        crate::jobs::thumbnail::sweep_orphans(&for_thread);
+                        crate::develop::coverage::sweep_orphans(&for_thread, |photo, id| {
+                            named.get(photo).is_some_and(|d| d.names(id))
+                        });
+                    }
                 });
             match spawned {
                 Ok(_) => self.folder_store_load.pending = Some((dir, token)),

@@ -79,12 +79,15 @@ pub(crate) enum Notice {
 
 /// A detector the store runs: `detect::run`, or a test's stand-in.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) type Detector = fn(&Path, DetectTarget) -> Result<Coverage, DetectError>;
+/// Detects `photo`'s target, writing its coverage file when the flag is set.
+pub(crate) type Detector = fn(&Path, DetectTarget, bool) -> Result<Coverage, DetectError>;
 
 #[cfg(not(target_arch = "wasm32"))]
 struct DetectJob {
     photo: PathBuf,
     target: DetectTarget,
+    /// False in a read-only folder: the coverage stays in memory.
+    write: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -130,6 +133,13 @@ pub(crate) struct CoverageStore {
     /// the file itself: the browser's rule, since no worker there can reach
     /// the folder. A test sets it to run the browser's path natively.
     in_memory: bool,
+    /// The folder open read-only, if one is: nothing is written into it or
+    /// deleted from it. A detection of its photos keeps the coverage in
+    /// memory, as the browser's does, and bakes take it from there. A
+    /// photo of another folder, such as one a carried-over job scores,
+    /// keeps the usual rules.
+    #[cfg(not(target_arch = "wasm32"))]
+    read_only: Option<crate::sidecar::FolderKey>,
 }
 
 /// Work the app finished for the store, on the web.
@@ -153,7 +163,7 @@ impl CoverageStore {
     pub(crate) fn new() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            Self::with_detector_and_availability(detect::run, detect::available)
+            Self::with_detector_and_availability(detect::run_with, detect::available)
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -218,7 +228,9 @@ impl CoverageStore {
             "detect",
             1,
             || {},
-            move |job: &DetectJob| detector(&job.photo, job.target).map_err(|e| e.to_string()),
+            move |job: &DetectJob| {
+                detector(&job.photo, job.target, job.write).map_err(|e| e.to_string())
+            },
             |job| format!("detecting {:?} panicked", job.target),
         );
         let load = WorkerPool::spawn(
@@ -238,6 +250,8 @@ impl CoverageStore {
             available,
             ready_budget: READY_BUDGET,
             in_memory: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            read_only: None,
         }
     }
 
@@ -360,7 +374,12 @@ impl CoverageStore {
     ) -> Readiness {
         let mut out = Readiness::Ready;
         for target in used_targets(masks) {
-            match self.need(photo, target, detections.get(target), self.in_memory) {
+            match self.need(
+                photo,
+                target,
+                detections.get(target),
+                self.in_memory_for(photo),
+            ) {
                 Need::Ready => {}
                 Need::Pending => out = Readiness::Pending,
                 Need::Load(id) => {
@@ -382,14 +401,17 @@ impl CoverageStore {
 
     /// Whether every target `masks` use has settled: detected and recorded,
     /// failed, or unsupported. A recorded coverage counts on every platform,
-    /// since the bake loads it when it runs. Starts nothing; the frame
+    /// since the bake loads it when it runs, except in a read-only folder,
+    /// where the export takes its coverage from memory, so it loads first. Starts nothing; the frame
     /// loop's [`kick`](Self::kick) over the selection starts what this
     /// reports pending, so pending never stands.
     fn is_ready(&self, photo: &Path, masks: &[Mask], detections: &Detections) -> bool {
-        used_targets(masks).all(|t| match self.need(photo, t, detections.get(t), false) {
-            Need::Ready => true,
-            Need::Detect => !(self.available)(t),
-            Need::Pending | Need::Load(_) => false,
+        used_targets(masks).all(|t| {
+            match self.need(photo, t, detections.get(t), self.read_only_photo(photo)) {
+                Need::Ready => true,
+                Need::Detect => !(self.available)(t),
+                Need::Pending | Need::Load(_) => false,
+            }
         })
     }
 
@@ -445,6 +467,31 @@ impl CoverageStore {
     /// Folder switch: drop every slot. A job already running finishes and
     /// writes its file (harmless, content-addressed); its landing finds no
     /// slot and is dropped, and the next open re-detects onto the same name.
+    /// The folder open read-only, if one is: see `read_only`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn set_read_only(&mut self, folder: Option<crate::sidecar::FolderKey>) {
+        self.read_only = folder;
+    }
+
+    /// Whether `photo` is in the folder open read-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn read_only_photo(&self, photo: &Path) -> bool {
+        self.read_only.as_ref().is_some_and(|folder| {
+            crate::sidecar::FolderKey::of_photo(photo).as_ref() == Some(folder)
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn read_only_photo(&self, _photo: &Path) -> bool {
+        false
+    }
+
+    /// Whether a bake of `photo` takes coverage from memory: always in the
+    /// browser, and natively for a photo of the folder open read-only.
+    pub(crate) fn in_memory_for(&self, photo: &Path) -> bool {
+        self.in_memory || self.read_only_photo(photo)
+    }
+
     pub(crate) fn clear(&mut self) {
         self.slots.clear();
         self.ready_order.clear();
@@ -542,7 +589,9 @@ impl CoverageStore {
                         Record::Keep
                     }
                     Err(e) => {
-                        if matches!(e, CoverageError::Corrupt(_)) {
+                        // Not in a read-only folder: the file may be the
+                        // other program's, mid-write.
+                        if matches!(e, CoverageError::Corrupt(_)) && !self.read_only_photo(&key.0) {
                             // Content-addressed, so a re-detect would skip
                             // writing over the bad file.
                             crate::develop::coverage::remove(&key.0, job.id);
@@ -608,6 +657,7 @@ impl CoverageStore {
         let submitted = self.detect.submit(DetectJob {
             photo: key.0.clone(),
             target: key.1,
+            write: !self.read_only_photo(&key.0),
         });
         // The app runs it on the shown photo's pixels; until then it waits
         // here without counting as in flight.
@@ -741,16 +791,26 @@ pub(crate) mod test_support {
 
     /// A detector that finds the left half of every photo as its subject
     /// and writes the file as the real one does.
-    pub(crate) fn half_left(photo: &Path, _: DetectTarget) -> Result<Coverage, DetectError> {
+    pub(crate) fn half_left(
+        photo: &Path,
+        _: DetectTarget,
+        write: bool,
+    ) -> Result<Coverage, DetectError> {
         note_run(photo);
         let alpha: Vec<u8> = (0..8).map(|i| if i % 4 < 2 { 255 } else { 0 }).collect();
         let c = Coverage::fit(4, 2, &alpha).map_err(|e| DetectError::Failed(e.to_string()))?;
-        crate::develop::coverage::write(photo, &c)
-            .map_err(|e| DetectError::Failed(e.to_string()))?;
+        if write {
+            crate::develop::coverage::write(photo, &c)
+                .map_err(|e| DetectError::Failed(e.to_string()))?;
+        }
         Ok(c)
     }
 
-    pub(crate) fn always_fails(photo: &Path, _: DetectTarget) -> Result<Coverage, DetectError> {
+    pub(crate) fn always_fails(
+        photo: &Path,
+        _: DetectTarget,
+        _: bool,
+    ) -> Result<Coverage, DetectError> {
         note_run(photo);
         Err(DetectError::Failed("no model today".into()))
     }
@@ -873,6 +933,67 @@ mod tests {
     /// and no slot blocked Export forever, since nothing started its
     /// detection. Readiness starts it, and a target this build can't detect
     /// settles rather than blocks.
+    /// In a read-only folder a detection runs in memory and writes no file,
+    /// and a bake takes the coverage from memory, so export keeps the mask.
+    #[test]
+    fn a_read_only_folder_detects_in_memory_and_writes_nothing() {
+        let (dir, p) = photo("read-only");
+        let masks = [Mask::detected(DetectTarget::Sky)];
+        let none = Detections::default();
+        let mut store = CoverageStore::with_detector(half_left);
+        store.set_read_only(crate::sidecar::FolderKey::of(&dir));
+        assert_eq!(store.readiness(&p, &masks, &none), Readiness::Pending);
+        drain_until(&mut store, |s| !s.busy());
+        let ready = store.readiness(&p, &masks, &none);
+        let coverage = store.ready(&p, DetectTarget::Sky);
+        let written = dir.join(".lightphotos").exists();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(ready, Readiness::Ready);
+        assert!(coverage.is_some(), "the coverage is in memory");
+        assert!(!written, "and nothing was written into the folder");
+    }
+
+    /// Design row 28: read-only is per folder. A photo of another folder,
+    /// such as one a carried-over scoring run bakes, keeps the usual rules:
+    /// its detection writes its file and its bakes read from disk.
+    #[test]
+    fn read_only_is_per_folder() {
+        let (ro, p_ro) = photo("per-folder-ro");
+        let (rw, p_rw) = photo("per-folder-rw");
+        let mut store = CoverageStore::with_detector(half_left);
+        store.set_read_only(crate::sidecar::FolderKey::of(&ro));
+        let modes = (store.in_memory_for(&p_ro), store.in_memory_for(&p_rw));
+        let masks = [Mask::detected(DetectTarget::Sky)];
+        let none = Detections::default();
+        assert_eq!(store.readiness(&p_rw, &masks, &none), Readiness::Pending);
+        drain_until(&mut store, |s| !s.busy());
+        let written = rw.join(".lightphotos").exists();
+        std::fs::remove_dir_all(&ro).unwrap();
+        std::fs::remove_dir_all(&rw).unwrap();
+        assert_eq!(modes, (true, false));
+        assert!(written, "the other folder's detection writes its file");
+    }
+
+    /// A recorded file that reads as corrupt in a read-only folder is left
+    /// alone: it may be the other program's, mid-write.
+    #[test]
+    fn a_read_only_folder_deletes_no_corrupt_coverage_file() {
+        let (dir, p) = photo("read-only-corrupt");
+        let c = Coverage::fit(1, 1, &[200]).unwrap();
+        let name = crate::develop::coverage::file_name(std::ffi::OsStr::new("a.jpg"), c.id());
+        let file = dir.join(".lightphotos").join("masks").join(name);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"not a coverage").unwrap();
+        let mut store = CoverageStore::with_detector(half_left);
+        store.set_read_only(crate::sidecar::FolderKey::of(&dir));
+        let t = DetectTarget::Sky;
+        assert!(matches!(store.ask(&p, t, Some(c.id())), Lookup::Pending));
+        drain_until(&mut store, |s| !s.busy());
+        let kept = file.exists();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(kept, "the corrupt file is left alone");
+    }
+
     #[test]
     fn readiness_starts_a_detection_nothing_else_asked_for_and_settles_the_unsupported() {
         fn sky_only(t: DetectTarget) -> bool {

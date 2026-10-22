@@ -51,10 +51,19 @@ pub const fn available(target: DetectTarget) -> bool {
 /// a sidecar can only ever name a file that exists.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run(photo: &Path, target: DetectTarget) -> Result<Coverage, DetectError> {
+    run_with(photo, target, true)
+}
+
+/// [`run`], writing the coverage file only when `write` is set: a folder
+/// the app opened read-only gets nothing written into it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_with(photo: &Path, target: DetectTarget, write: bool) -> Result<Coverage, DetectError> {
     let detect = || {
         let coverage = detect(&DetectInput::file(photo), target)?;
-        crate::develop::coverage::write(photo, &coverage)
-            .map_err(|e| DetectError::Failed(e.to_string()))?;
+        if write {
+            crate::develop::coverage::write(photo, &coverage)
+                .map_err(|e| DetectError::Failed(e.to_string()))?;
+        }
         Ok(coverage)
     };
     #[cfg(target_os = "macos")]

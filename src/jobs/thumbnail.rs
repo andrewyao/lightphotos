@@ -365,15 +365,41 @@ fn current_key(photo: &Path) -> Option<u64> {
 /// On-disk thumbnail cache in `<photo dir>/.lightphotos/`. It lives beside
 /// the photos because the browser can write only inside the picked folder.
 /// Writes are best-effort, so a read-only folder decodes every session.
+///
+/// Nothing is written into a folder the app opened read-only
+/// (`docs/design/folder-lock.md` §6): its thumbnails decode each time.
 #[cfg(not(target_arch = "wasm32"))]
-pub struct ThumbCache;
+pub struct ThumbCache {
+    read_only: std::sync::Mutex<Option<crate::sidecar::FolderKey>>,
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ThumbCache {
     /// Also deletes the old central cache in the background.
     pub fn new() -> ThumbCache {
         remove_legacy_cache();
-        ThumbCache
+        ThumbCache {
+            read_only: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The folder the app opened read-only, if one is.
+    pub fn set_read_only(&self, folder: Option<crate::sidecar::FolderKey>) {
+        *self
+            .read_only
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = folder;
+    }
+
+    /// Whether a new entry for `photo` may be written.
+    fn may_write(&self, photo: &Path) -> bool {
+        let read_only = self
+            .read_only
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        read_only.as_ref().is_none_or(|folder| {
+            crate::sidecar::FolderKey::of_photo(photo).as_ref() != Some(folder)
+        })
     }
 
     /// The cached thumbnail if current, else decode, cache, and return it.
@@ -407,7 +433,7 @@ impl ThumbCache {
                 pixel_format: PixelFormat::Srgb8,
             })
         };
-        if let Some(file) = &entry {
+        if let Some(file) = entry.as_ref().filter(|_| self.may_write(path)) {
             let _ = write_entry(file, &img);
         }
         Ok(Arc::new(img))
@@ -744,7 +770,7 @@ mod tests {
             208, 248, 15, 0, 4, 36, 1, 240, 183, 238, 60, 203, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
             96, 130,
         ];
-        let cache = ThumbCache;
+        let cache = ThumbCache::default();
         for (name, png, opaque) in [
             ("transparent.png", TRANSPARENT, false),
             ("opaque.png", OPAQUE, true),
@@ -763,6 +789,34 @@ mod tests {
             assert_eq!(entry.exists(), opaque);
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Design row 25: no thumbnail entry is written into a folder the app
+    /// opened read-only; another folder's still are.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_read_only_folder_gets_no_thumbnail_entry() {
+        const OPAQUE: &[u8] = &[
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 168, 8,
+            208, 248, 15, 0, 4, 36, 1, 240, 183, 238, 60, 203, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
+            96, 130,
+        ];
+        let base = std::env::temp_dir().join(format!("lp-thumb-ro-{}", std::process::id()));
+        let (ro, rw) = (base.join("ro"), base.join("rw"));
+        fs::create_dir_all(&ro).unwrap();
+        fs::create_dir_all(&rw).unwrap();
+        let cache = ThumbCache::default();
+        cache.set_read_only(crate::sidecar::FolderKey::of(&ro));
+        let mut written = Vec::new();
+        for dir in [&ro, &rw] {
+            let photo = dir.join("a.png");
+            fs::write(&photo, OPAQUE).unwrap();
+            cache.get_or_make(&photo).unwrap();
+            written.push(entry_path(&photo).unwrap().exists());
+        }
+        fs::remove_dir_all(&base).unwrap();
+        assert_eq!(written, [false, true]);
     }
 
     /// A `.lightphotos` that links elsewhere is not swept: its "orphans" are
