@@ -190,6 +190,11 @@ impl App {
     /// inside it; a photo makes its own folder a shallow root; a catalog
     /// makes its folders roots.
     pub(crate) fn open_from_user(&mut self, path: PathBuf) {
+        // `lightphotos .` must name this folder, not whatever the working
+        // directory of a later launch is: the catalog keeps what is opened.
+        // Spelled as given otherwise, so absolute photo names still match.
+        #[cfg(not(target_arch = "wasm32"))]
+        let path = std::path::absolute(&path).unwrap_or(path);
         #[cfg(not(target_arch = "wasm32"))]
         let catalog = crate::persist::catalog::CatalogRef::parse(&path).ok();
         #[cfg(not(target_arch = "wasm32"))]
