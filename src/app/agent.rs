@@ -1,13 +1,15 @@
 //! What an agent may do (control channel, MCP, WebMCP). It drives the app
 //! through the same [`Command`]s as the keyboard, but it reads photo names
 //! that anyone can write, so it can be talked into things. Every command it
-//! sends passes [`App::run_from_agent`], which holds it to the anchor: the
-//! folder the user has open. Every folder change that is not an agent's
+//! sends passes [`App::run_from_agent`], which holds it to the [`Anchor`]:
+//! the folder the user has open. Every folder change that is not an agent's
 //! command moves the anchor (the picker, the command line, Finder, the tree
-//! and the keyboard, a catalog, a launch restore); an agent's command never
-//! does. So an agent works in the user's folder and the folders inside it,
-//! can go back up to the anchor, and never above it. Catalogs and preset
-//! folders are the user's alone.
+//! and the keyboard, a catalog); a launch restore puts back the one saved
+//! with the session; an agent's command never moves it. So an agent works
+//! in the user's folder and, unless the user opened a single photo, the
+//! folders inside it; it can go back up to the anchor, and never above it.
+//! A photo that links out of the anchor is out of reach too. Catalogs and
+//! preset folders are the user's alone.
 
 use std::path::{Path, PathBuf};
 
@@ -23,12 +25,62 @@ pub(super) const EXPORT_REFUSED: &str = "an agent can export only into the folde
 const USER_ONLY: &str = "an agent can't make, open or switch catalogs, or add preset folders; \
                          the user does that in the app";
 
+/// The folder the user has open, resolved once when it is set.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Anchor {
+    path: PathBuf,
+    /// False when the user opened one photo: then only its folder (and that
+    /// folder's `Exports`) is in reach, not the folders inside it.
+    recursive: bool,
+}
+
+impl Anchor {
+    /// `dir` as an anchor, or `None` when it does not resolve.
+    pub(super) fn new(dir: &Path, recursive: bool) -> Option<Anchor> {
+        Some(Anchor {
+            path: resolve(dir)?,
+            recursive,
+        })
+    }
+
+    /// The saved anchor again, if it still resolves to the same folder.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn revalidated(&self) -> Option<Anchor> {
+        Anchor::new(&self.path, self.recursive).filter(|again| again == self)
+    }
+
+    /// Whether `real`, a resolved folder, is in reach.
+    fn covers(&self, real: &Path) -> bool {
+        match self.recursive {
+            true => real.starts_with(&self.path),
+            false => {
+                real == self.path || real.starts_with(self.path.join(crate::export::EXPORTS_DIR))
+            }
+        }
+    }
+
+    /// Whether the folder `dir` is in reach, once resolved.
+    pub(super) fn holds(&self, dir: &Path) -> bool {
+        resolve(dir).is_some_and(|real| self.covers(&real))
+    }
+
+    /// Whether the photo `file` is in reach: the folder it really lives in,
+    /// after its own link resolves, is.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn holds_photo(&self, file: &Path) -> bool {
+        std::fs::canonicalize(file)
+            .ok()
+            .and_then(|real| real.parent().map(|dir| self.covers(dir)))
+            .unwrap_or(false)
+    }
+}
+
 /// Where an agent's export may land: inside the anchor, or inside the
-/// export form's own folder. Both are kept resolved.
+/// export form's own folder (resolved).
 // The browser exports only into the picked folder; nothing reads this there.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) struct ExportConfine {
-    anchor: Option<PathBuf>,
+    anchor: Option<Anchor>,
     form_folder: Option<PathBuf>,
 }
 
@@ -36,10 +88,11 @@ impl ExportConfine {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn holds(&self, dir: &Path) -> bool {
         resolve(dir).is_some_and(|real| {
-            [&self.anchor, &self.form_folder]
-                .into_iter()
-                .flatten()
-                .any(|root| real.starts_with(root))
+            self.anchor.as_ref().is_some_and(|a| a.covers(&real))
+                || self
+                    .form_folder
+                    .as_ref()
+                    .is_some_and(|f| real.starts_with(f))
         })
     }
 }
@@ -77,20 +130,86 @@ fn absolute(path: PathBuf) -> PathBuf {
 }
 
 impl App {
-    /// Opens a path from the command line or Finder, made absolute first.
+    /// Opens a path from the command line or Finder. One that exists opens
+    /// resolved, as the OS reads it (`link/..` is the link's parent, not
+    /// this folder); one that doesn't is made absolute by name, for `open`
+    /// to report.
     pub(crate) fn open_from_user(&mut self, path: PathBuf) {
         #[cfg(not(target_arch = "wasm32"))]
-        let path = absolute(path);
+        let path = std::fs::canonicalize(&path).unwrap_or_else(|_| absolute(path));
         self.open(path);
     }
 
-    /// Whether `path`, resolved, is the anchor or inside it.
-    fn inside_anchor(&self, path: &Path) -> bool {
-        let anchor = self.folder_anchor.as_deref().and_then(resolve);
-        match (resolve(path), anchor) {
-            (Some(real), Some(anchor)) => real.starts_with(anchor),
-            _ => false,
-        }
+    /// Makes `dir` the anchor: what the user now has open.
+    pub(super) fn set_anchor(&mut self, dir: &Path, recursive: bool) {
+        self.folder_anchor = Anchor::new(dir, recursive);
+    }
+
+    /// After an agent's command: the anchor from before it, if the folder
+    /// showing is still inside it; nothing, if the command closed the
+    /// folder or left one the anchor doesn't hold.
+    pub(super) fn keep_anchor(&mut self, before: Option<Anchor>) {
+        self.folder_anchor = before.filter(|anchor| {
+            self.folder_sel
+                .as_deref()
+                .is_some_and(|dir| anchor.holds(dir))
+        });
+    }
+
+    /// The anchor saved with `session`, for its restore: still the same
+    /// folder, holding the restored one, and inside the catalog folder
+    /// `root` the session reopened. Nothing otherwise, so a restore never
+    /// hands an agent more than the user had open.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn restored_anchor(&self, saved: Option<&Anchor>, root: &Path) -> Option<Anchor> {
+        let anchor = saved?.revalidated()?;
+        let root = resolve(root)?;
+        let shown = self.folder_sel.as_deref()?;
+        (anchor.path.starts_with(&root) && anchor.holds(shown)).then_some(anchor)
+    }
+
+    /// Why an agent may not act on the photos `cmd` names: one of them
+    /// links out of the anchor.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn photos_outside_anchor(&self, cmd: &Command) -> Option<String> {
+        let paths = self.resolve(cmd.photos()?).ok()?;
+        let outside = paths.iter().find(|photo| {
+            !self
+                .folder_anchor
+                .as_ref()
+                .is_some_and(|anchor| anchor.holds_photo(photo))
+        })?;
+        Some(format!(
+            "an agent can act only on photos inside the folder the user has open; {} is \
+             outside it, or links outside",
+            outside.display()
+        ))
+    }
+
+    /// A photo's file is a handle in the browser, never a link.
+    #[cfg(target_arch = "wasm32")]
+    fn photos_outside_anchor(&self, _cmd: &Command) -> Option<String> {
+        None
+    }
+
+    /// Why a screenshot would show an agent a photo from outside the open
+    /// folder: the Grid or the Loupe shows one that links out of it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn screenshot_shows_outside(&self) -> Option<String> {
+        let playlist = self.playlist.as_ref()?;
+        let dir = resolve(playlist.dir())?;
+        let outside = playlist.entries().iter().find(|photo| {
+            photo
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+                && !std::fs::canonicalize(photo)
+                    .ok()
+                    .is_some_and(|real| real.parent() == Some(dir.as_path()))
+        })?;
+        Some(format!(
+            "no screenshot for an agent: {} links outside the open folder",
+            outside.display()
+        ))
     }
 
     /// Runs a command an agent sent, once it passes the checks here. The
@@ -106,12 +225,25 @@ impl App {
             | Command::SwitchCatalog(_)
             | Command::AddPresetFolder(_) => return Err(refuse(USER_ONLY)),
             Command::OpenFolder(p) => {
-                if !self.inside_anchor(&p.path) {
+                let real = resolve(&p.path).filter(|real| {
+                    self.folder_anchor
+                        .as_ref()
+                        .is_some_and(|anchor| anchor.covers(real))
+                });
+                let Some(real) = real else {
                     return Err(refuse(
                         "an agent can open only the folder the user has open, or a folder \
                          inside it",
                     ));
-                }
+                };
+                // Open what was checked, so a link swapped in later can't
+                // move where the sidecars go.
+                let before = self.folder_anchor.clone();
+                let out = self.run(Command::OpenFolder(crate::command::OpenFolderParams {
+                    path: real,
+                }));
+                self.keep_anchor(before);
+                return out;
             }
             // These act on the open folder's photos, or on nothing on disk.
             Command::View(_)
@@ -139,23 +271,30 @@ impl App {
             | Command::SavePreset(_)
             | Command::Undo => {}
         }
-        let anchor = self.folder_anchor.clone();
+        if let Some(why) = self.photos_outside_anchor(&cmd) {
+            return Err(refuse(&why));
+        }
+        let before = self.folder_anchor.clone();
         let out = self.run(cmd);
-        self.folder_anchor = anchor;
+        self.keep_anchor(before);
         out
     }
 
     /// An agent's export, held to the anchor and the form's folder.
     fn agent_export(&mut self, p: ExportParams) -> Result<Outcome, CommandError> {
         let refuse = |reason: String| CommandError::Failed { reason };
-        self.check(&Command::Export(p.clone()))?;
+        let cmd = Command::Export(p.clone());
+        self.check(&cmd)?;
+        if let Some(why) = self.photos_outside_anchor(&cmd) {
+            return Err(refuse(why));
+        }
         let form_folder: Option<PathBuf> = match &self.export_settings().target {
             #[cfg(not(target_arch = "wasm32"))]
             ExportTarget::Folder(FolderChoice::Custom(dir)) => resolve(dir),
             _ => None,
         };
         let confine = ExportConfine {
-            anchor: self.folder_anchor.as_deref().and_then(resolve),
+            anchor: self.folder_anchor.clone(),
             form_folder,
         };
         let Ok(settings) = confine_agent_export(
@@ -234,7 +373,7 @@ mod tests {
     /// Exports held to `anchor` alone.
     fn confine_to(anchor: &Path) -> ExportConfine {
         ExportConfine {
-            anchor: resolve(anchor),
+            anchor: Anchor::new(anchor, true),
             form_folder: None,
         }
     }
@@ -253,6 +392,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_relative_path_is_made_absolute_by_name() {
         let cwd = std::env::current_dir().unwrap();
@@ -329,6 +469,50 @@ mod tests {
         let started = app.export_with(vec![photo], Some(settings), Some(&confine));
         assert!(started.is_err(), "{started:?}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_one_photo_anchor_reaches_its_folder_and_its_exports_only() {
+        let dir = temp_folder("agent-anchor-flat");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let flat = Anchor::new(&dir, false).unwrap();
+        assert!(flat.holds(&dir));
+        assert!(flat.holds(&dir.join("Exports").join("web")));
+        assert!(!flat.holds(&dir.join("sub")));
+        assert!(Anchor::new(&dir, true).unwrap().holds(&dir.join("sub")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_anchor_after_an_agents_command_needs_the_folder_still_open() {
+        let dir = temp_folder("agent-keep-anchor");
+        let mut app = App::new(None);
+        app.open(dir.clone());
+        let before = app.folder_anchor.clone();
+        assert!(before.is_some());
+        app.keep_anchor(before.clone());
+        assert_eq!(app.folder_anchor, before, "the folder is still open");
+        app.close_folder();
+        app.keep_anchor(before);
+        assert_eq!(app.folder_anchor, None, "the command closed the folder");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_screenshot_is_refused_while_a_photo_links_outside() {
+        let dir = temp_folder("agent-shot-link");
+        let outside = temp_folder("agent-shot-link-out");
+        std::fs::write(dir.join("a.jpg"), []).unwrap();
+        std::fs::write(outside.join("secret.jpg"), []).unwrap();
+        let mut app = App::new(None);
+        app.open(dir.clone());
+        assert_eq!(app.screenshot_shows_outside(), None);
+        std::os::unix::fs::symlink(outside.join("secret.jpg"), dir.join("link.jpg")).unwrap();
+        app.open(dir.clone());
+        assert!(app.screenshot_shows_outside().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]
