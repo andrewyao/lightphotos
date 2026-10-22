@@ -1249,6 +1249,21 @@ fn tile_marks(
     hovered: bool,
     out: &mut FrameOutput,
 ) {
+    // Its stars, flags and buttons edit, so a read-only folder turns them off.
+    super::editable(ui, app, |ui| {
+        tile_marks_in(ui, app, rect, path, is_rep, hovered, out);
+    });
+}
+
+fn tile_marks_in(
+    ui: &mut egui::Ui,
+    app: &App,
+    rect: egui::Rect,
+    path: &std::path::Path,
+    is_rep: bool,
+    hovered: bool,
+    out: &mut FrameOutput,
+) {
     let colors = theme::colors(ui.ctx());
     let star_w = font_size::px(ui.style(), 16.0);
     let pad = font_size::px(ui.style(), 4.0);

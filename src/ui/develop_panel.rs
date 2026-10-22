@@ -20,10 +20,13 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
             // bottom panels off the window when the rows outgrow its height.
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| match app.develop_tab() {
-                    DevelopTab::Sliders => draw_sliders_tab(ui, app, out),
-                    DevelopTab::Crop => draw_crop_tab(ui, app, out),
-                    DevelopTab::Masks => draw_masks_tab(ui, app, out),
+                .show(ui, |ui| {
+                    // Every control on every page edits.
+                    super::editable(ui, app, |ui| match app.develop_tab() {
+                        DevelopTab::Sliders => draw_sliders_tab(ui, app, out),
+                        DevelopTab::Crop => draw_crop_tab(ui, app, out),
+                        DevelopTab::Masks => draw_masks_tab(ui, app, out),
+                    })
                 });
             region_focus_marker(ui, app, Region::Develop);
         });

@@ -1347,6 +1347,10 @@ impl App {
     /// keypress changes nothing, so a nudge never lands on a slider the
     /// person didn't see focused.
     pub(super) fn develop_adjust(&mut self, dir: isize) {
+        if self.read_only() {
+            self.refuse_if_read_only();
+            return;
+        }
         self.set_develop_tab(DevelopTab::Sliders);
         if self.home_develop_focus() {
             return;

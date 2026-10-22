@@ -24,7 +24,8 @@ impl App {
             && !self.egui_ctx.text_edit_focused()
     }
 
-    /// Handle a key press per the Lightroom key-binding table.
+    /// Handle a key press per the Lightroom key-binding table. A read-only
+    /// folder turns away every key that edits ([`key_edits_folder`]).
     pub(crate) fn handle_key(&mut self, code: KeyCode) {
         let shift = self.modifiers.shift_key();
         // Either modifier works as the accelerator everywhere. Only Cmd is
@@ -85,6 +86,15 @@ impl App {
                 KeyCode::Enter | KeyCode::NumpadEnter => self.commit_copy_settings(),
                 _ => {}
             }
+            return;
+        }
+
+        // A read-only folder takes no edit from the keyboard or the menu
+        // keys, and says why. Ahead of the tools'
+        // own keys, so Delete can't remove a selected mask either.
+        if self.read_only() && key_edits_folder(code, cmd, shift, alt, self.mode == ViewMode::Loupe)
+        {
+            self.refuse_if_read_only();
             return;
         }
 
@@ -444,6 +454,31 @@ fn flag(flag: FlagChange) -> Command {
         flag,
         photos: Photos::Selected,
     })
+}
+
+/// Whether `handle_key` binds the key to an edit of the open folder's
+/// photos: a rating, label, flag, rotation, group, crop, mask, touch-up,
+/// develop edit, paste, undo or delete. Keep in step with `handle_key`.
+fn key_edits_folder(code: KeyCode, cmd: bool, shift: bool, alt: bool, loupe: bool) -> bool {
+    if !cmd && !alt && digit_of(code).is_some() {
+        return true;
+    }
+    match code {
+        KeyCode::BracketLeft | KeyCode::BracketRight => cmd && !alt,
+        KeyCode::KeyK | KeyCode::KeyM | KeyCode::KeyR | KeyCode::KeyP | KeyCode::KeyX => {
+            !cmd && !alt
+        }
+        KeyCode::Backquote => !cmd && !alt,
+        KeyCode::KeyQ => loupe && !cmd && !alt,
+        KeyCode::KeyG => cmd && !alt,
+        KeyCode::KeyU => !alt && (!cmd || !shift),
+        KeyCode::KeyV => !alt && (!cmd || shift),
+        KeyCode::KeyZ => cmd && !alt && !shift,
+        KeyCode::Delete => true,
+        // Deletes the selected mask or touch-up spot.
+        KeyCode::Backspace => !cmd,
+        _ => false,
+    }
 }
 
 #[cfg(test)]

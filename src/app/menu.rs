@@ -19,16 +19,20 @@ impl App {
         let free = blocker.is_none();
         let loupe = self.mode == ViewMode::Loupe;
         let selected = self.selection_count();
+        // A read-only folder offers no edit; the commands' own items are off
+        // through `check`.
+        let rw = !self.read_only();
         match cmd {
             Cut | Copy | Paste | BiggerText | SmallerText => true,
             SelectAll => typing || (free && self.mode == ViewMode::Grid),
             Undo => {
                 typing
                     || (self.tool == LoupeTool::TouchUp && self.can_undo_touchup())
-                    || (free && self.history.can_undo())
+                    || (free && rw && self.history.can_undo())
             }
             Settings => matches!(blocker, None | Some(Blocker::Settings)),
-            NewCatalog | OpenCatalog | OpenFolder | Export | Crop | KeyboardShortcuts => free,
+            NewCatalog | OpenCatalog | OpenFolder | Export | KeyboardShortcuts => free,
+            Crop => free && rw,
             CompareStack => {
                 let on_stack = if loupe {
                     self.has_compare_set()
@@ -38,15 +42,15 @@ impl App {
                 let few = (2..=super::group_compare::COMPARE_SELECTION_MAX).contains(&selected);
                 free && (few || on_stack)
             }
-            AutoToneSelection => free && selected > 0,
-            ScorePhotos => free && selected > 0 && self.scoring_available(),
-            MoveToTrash => free && selected > 0 && self.delete_available(),
-            GroupSelected => free && self.group_available(),
-            GroupBursts => free && self.group_bursts_available(),
-            Ungroup => free && self.selection_has_group(),
-            DeleteGroup => free && self.selection_has_group() && self.delete_available(),
+            AutoToneSelection => free && rw && selected > 0,
+            ScorePhotos => free && rw && selected > 0 && self.scoring_available(),
+            MoveToTrash => free && rw && selected > 0 && self.delete_available(),
+            GroupSelected => free && rw && self.group_available(),
+            GroupBursts => free && rw && self.group_bursts_available(),
+            Ungroup => free && rw && self.selection_has_group(),
+            DeleteGroup => free && rw && self.selection_has_group() && self.delete_available(),
             CopySettings => free && selected == 1,
-            PasteSettings => free && selected > 0 && self.has_copied_settings(),
+            PasteSettings => free && rw && selected > 0 && self.has_copied_settings(),
             InfoPanel => free && matches!(self.mode, ViewMode::Grid | ViewMode::Loupe),
             BeforeAfter => free && loupe,
             Loupe => runs() && self.mode == ViewMode::Grid,

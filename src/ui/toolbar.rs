@@ -629,7 +629,7 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let (lo, hi) = app.selection_rating_span();
     let star_w = font_size::px(ui.style(), 20.0);
     let star_font = egui::FontId::proportional(font_size::px(ui.style(), 18.0));
-    ui.scope(|ui| {
+    super::editable(ui, app, |ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for s in 1..=5u8 {
             let (r, resp) =
@@ -656,7 +656,7 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         }
     });
     let flag_w = font_size::px(ui.style(), 20.0);
-    ui.scope(|ui| {
+    super::editable(ui, app, |ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for flag in FLAG_STATES {
             let coverage = app.selection_flag_coverage(flag);
@@ -701,7 +701,8 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 
     adjustment_pair(ui, app, n == 1, out);
 
-    // The bar sits at the window's bottom, so the menu opens upward.
+    // The bar sits at the window's bottom, so the menu opens upward. In a
+    // read-only folder only Export is on.
     let button = ui.button(actions_label(true));
     egui::Popup::menu(&button)
         .align(egui::RectAlign::TOP_START)
@@ -713,19 +714,21 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 ui.weak((t.selected_n_photos_title)(n));
                 t.update_scores
             };
-            score_button(ui, app, score, out);
-            auto_adjust_button(ui, t.auto_tone, out);
-            // One photo has no bursts of its own; the Grid's Actions menu
-            // stacks the whole folder.
-            if n >= 2
-                && app.group_bursts_available()
-                && ui
-                    .button(t.group_all_bursts)
-                    .on_hover_text(t.group_selected_bursts_tip)
-                    .clicked()
-            {
-                out.actions.push(UiAction::GroupSelectedBursts);
-            }
+            super::editable(ui, app, |ui| {
+                score_button(ui, app, score, out);
+                auto_adjust_button(ui, t.auto_tone, out);
+                // One photo has no bursts of its own; the Grid's Actions menu
+                // stacks the whole folder.
+                if n >= 2
+                    && app.group_bursts_available()
+                    && ui
+                        .button(t.group_all_bursts)
+                        .on_hover_text(t.group_selected_bursts_tip)
+                        .clicked()
+                {
+                    out.actions.push(UiAction::GroupSelectedBursts);
+                }
+            });
             if ui
                 .button(t.export_jpg)
                 .on_hover_text(t.export_jpg_tip)
@@ -736,7 +739,7 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             ui.separator();
             let delete = egui::Button::new(egui::RichText::new(t.delete).color(colors.danger));
             if ui
-                .add_enabled(app.delete_available(), delete)
+                .add_enabled(app.delete_available() && !app.read_only(), delete)
                 .on_hover_text(t.delete_selection_tip)
                 .clicked()
             {
@@ -776,7 +779,7 @@ fn adjustment_pair(ui: &mut egui::Ui, app: &App, one: bool, out: &mut FrameOutpu
             None => tip.into_owned(),
         };
         let apply = ui
-            .add_enabled(app.has_copied_settings(), apply)
+            .add_enabled(app.has_copied_settings() && !app.read_only(), apply)
             .on_disabled_hover_text(t.apply_settings_needs_copy)
             .on_hover_text(hover);
         if apply.clicked() {
@@ -792,33 +795,36 @@ fn all_photos_menu(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let any = app.visible_len() > 0;
     let button = ui.add_enabled(any, egui::Button::new(actions_label(false)));
     egui::Popup::menu(&button).show(|ui| {
-        if app.scoring_available()
-            && ui
-                .button(t.score_all)
-                .on_hover_text(t.score_all_tip)
+        // Every entry edits, so a read-only folder turns them all off.
+        ui.add_enabled_ui(!app.read_only(), |ui| {
+            if app.scoring_available()
+                && ui
+                    .button(t.score_all)
+                    .on_hover_text(t.score_all_tip)
+                    .clicked()
+            {
+                out.actions.push(UiAction::ScoreAll);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if ui
+                .add_enabled(
+                    app.group_bursts_available(),
+                    egui::Button::new(t.group_all_bursts),
+                )
+                .on_hover_text(t.group_all_bursts_tip)
                 .clicked()
-        {
-            out.actions.push(UiAction::ScoreAll);
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if ui
-            .add_enabled(
-                app.group_bursts_available(),
-                egui::Button::new(t.group_all_bursts),
-            )
-            .on_hover_text(t.group_all_bursts_tip)
-            .clicked()
-        {
-            out.actions.push(UiAction::GroupAllBursts);
-        }
-        if ui
-            .button(t.auto_adjust_all)
-            .on_hover_text(t.auto_adjust_all_tip)
-            .clicked()
-        {
-            out.actions
-                .push(UiAction::RequestBulk(BulkKind::AutoToneAll));
-        }
+            {
+                out.actions.push(UiAction::GroupAllBursts);
+            }
+            if ui
+                .button(t.auto_adjust_all)
+                .on_hover_text(t.auto_adjust_all_tip)
+                .clicked()
+            {
+                out.actions
+                    .push(UiAction::RequestBulk(BulkKind::AutoToneAll));
+            }
+        });
     });
 }
 
@@ -843,28 +849,32 @@ pub(super) fn pick_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
     };
     // The toolbar wraps, but never inside the label.
     ui.add(egui::Label::new(egui::RichText::new(label).strong()).extend());
-    rate_menu(ui, out);
+    super::editable(ui, app, |ui| rate_menu(ui, out));
     // The toolbar sits at the window's bottom, so the menu opens upward.
     let button = ui.button(actions_label(true));
     egui::Popup::menu(&button)
         .align(egui::RectAlign::TOP_START)
         .show(|ui| {
+            super::editable(ui, app, |ui| {
+                let (score, auto) = if picks == 1 {
+                    (t.update_score, t.auto_tone)
+                } else {
+                    (t.score_all, t.auto_adjust_all)
+                };
+                score_button(ui, app, score, out);
+                auto_adjust_button(ui, auto, out);
+            });
             if picks == 1 {
-                score_button(ui, app, t.update_score, out);
-                auto_adjust_button(ui, t.auto_tone, out);
                 copy_button(ui, out);
-            } else {
-                score_button(ui, app, t.score_all, out);
-                auto_adjust_button(ui, t.auto_adjust_all, out);
             }
-            apply_adjustment(ui, app, out);
+            super::editable(ui, app, |ui| apply_adjustment(ui, app, out));
             export_button(ui, out);
             ui.separator();
             let delete = egui::Button::new(
                 egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger),
             );
             if ui
-                .add_enabled(app.delete_available(), delete)
+                .add_enabled(app.delete_available() && !app.read_only(), delete)
                 .on_hover_text(t.delete_selection_tip)
                 .clicked()
             {
