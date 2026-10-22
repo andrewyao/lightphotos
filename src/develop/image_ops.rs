@@ -327,9 +327,12 @@ fn bake_samples<S: Sample>(
     let fine = (probe == BaseProbe::Fine || adj.texture != 0.0)
         .then(|| BaseLayer::build_fine(w, h, pre))
         .flatten();
-    let mut cropped = vec![S::default(); (cw * ch * 4) as usize];
+    let Some(len) = rgba_len(cw, ch) else {
+        return (0, 0, Vec::new());
+    };
+    let mut cropped = vec![S::default(); len];
     let opaque = S::encode(1.0);
-    develop::parallel::for_each_row(&mut cropped, (cw * 4) as usize, |y, out_row| {
+    develop::parallel::for_each_row(&mut cropped, cw as usize * 4, |y, out_row| {
         let y = y as u32;
         for (x, out_px) in (0..cw).zip(out_row.as_chunks_mut::<4>().0) {
             let (px, py) = (x0 + x, y0 + y);
@@ -596,17 +599,24 @@ fn apply_touchups(src: &Source, touchups: &[TouchUp], u: f32, v: f32, base: [f32
     out
 }
 
-/// Rotate packed RGBA8 by `steps` 90-degree clockwise turns. Returns the new
-/// `(width, height, rgba)`, and `src` itself, not a copy, for no turn.
+/// The length of a packed `w x h` RGBA buffer, `None` past `usize`. In
+/// `u32` the product wraps from 2^30 pixels (32768 x 32768) up.
+fn rgba_len(w: u32, h: u32) -> Option<usize> {
+    (w as usize).checked_mul(h as usize)?.checked_mul(4)
+}
+
+/// Rotate packed RGBA samples by `steps` 90-degree clockwise turns. Returns
+/// the new `(width, height, rgba)`, and `src` itself, not a copy, for no
+/// turn. `src` must hold `w * h` pixels; anything else comes back as is.
 #[hotpath::measure]
 fn rotate_rgba<S: Sample>(src: Vec<S>, w: u32, h: u32, steps: u8) -> (u32, u32, Vec<S>) {
     let steps = steps % 4;
-    if steps == 0 {
+    if steps == 0 || rgba_len(w, h) != Some(src.len()) {
         return (w, h, src);
     }
     let (nw, nh) = if steps == 2 { (w, h) } else { (h, w) };
-    let mut dst = vec![S::default(); (nw * nh * 4) as usize];
-    let px = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+    let mut dst = vec![S::default(); src.len()];
+    let px = |x: u32, y: u32| (y as usize * w as usize + x as usize) * 4;
     for yo in 0..nh {
         for xo in 0..nw {
             let (xs, ys) = match steps {
@@ -615,7 +625,7 @@ fn rotate_rgba<S: Sample>(src: Vec<S>, w: u32, h: u32, steps: u8) -> (u32, u32, 
                 _ => (w - 1 - yo, xo),         // 270° CW (90° CCW)
             };
             let s = px(xs, ys);
-            let d = ((yo * nw + xo) * 4) as usize;
+            let d = (yo as usize * nw as usize + xo as usize) * 4;
             dst[d..d + 4].copy_from_slice(&src[s..s + 4]);
         }
     }
@@ -1060,6 +1070,23 @@ mod tests {
         assert_eq!((w, h), (1, 2));
         assert_eq!(&out[0..4], &px(10));
         assert_eq!(&out[4..8], &px(20));
+    }
+
+    #[test]
+    fn rgba_len_counts_past_u32_without_wrapping() {
+        // `(32768 * 32768 * 4) as usize` in u32 math is 0.
+        assert_eq!(32768u32.wrapping_mul(32768).wrapping_mul(4), 0);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(rgba_len(32768, 32768), Some(1 << 32));
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(rgba_len(32768, 32768), None);
+        assert_eq!(rgba_len(3, 2), Some(24));
+    }
+
+    #[test]
+    fn rotate_leaves_a_buffer_of_the_wrong_size_alone() {
+        let src = [px(1), px(2), px(3)].concat();
+        assert_eq!(rotate_rgba(src.clone(), 2, 2, 1), (2, 2, src));
     }
 
     #[test]
