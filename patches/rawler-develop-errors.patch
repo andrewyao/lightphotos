@@ -1,0 +1,223 @@
+# The diff applied to vendor/rawler-0.8.0/ after rawler-cr2-sraw-black.patch.
+# RawDevelop::develop_intermediate panicked (todo!, panic!, unimplemented!,
+# expect, assert, and Rect::adapt's and Pix2D::crop's asserts) on layouts it
+# cannot take, which kills a wasm32 decode worker; they now return
+# RawlerError::DecoderFailed. A default crop reaching past the active area or
+# the image is clamped to it. apply_scaling returns an error for
+# black-is-zero data instead of todo!(), and correct_blacklevel_cfa scales an
+# odd sensor's last row and column, which kept raw sample values and showed
+# as a bright edge. Regenerate the full vendored copy via
+# ./scripts/setup-vendor-rawler.sh.
+--- a/rawler-upstream/src/imgop/develop.rs
++++ b/rawler-0.8.0/src/imgop/develop.rs
+@@ -23,7 +23,7 @@
+ };
+ 
+ use super::{
+-  Dim2, Rect, convert_from_f32_scaled_u16,
++  Dim2, Point, Rect, convert_from_f32_scaled_u16,
+   raw::{map_3ch_to_rgb, map_4ch_to_rgb},
+   sensor::bayer::{bilinear::Bilinear4Channel, ppg::PPGDemosaic},
+   xyz::Illuminant,
+@@ -142,6 +142,16 @@
+   }
+ }
+ 
++/// `rect` cut down to the part inside `bounds`, possibly empty, at `bounds`'s
++/// origin when it starts before it (patched locally).
++fn clamp_rect(rect: Rect, bounds: &Rect) -> Rect {
++  let x0 = rect.p.x.max(bounds.p.x);
++  let y0 = rect.p.y.max(bounds.p.y);
++  let x1 = rect.p.x.saturating_add(rect.d.w).min(bounds.p.x + bounds.d.w).max(x0);
++  let y1 = rect.p.y.saturating_add(rect.d.h).min(bounds.p.y + bounds.d.h).max(y0);
++  Rect::new(Point::new(x0, y0), Dim2::new(x1 - x0, y1 - y0))
++}
++
+ impl RawDevelop {
+   pub fn new_with(steps: &[ProcessingStep]) -> Self {
+     Self { steps: Vec::from(steps) }
+@@ -165,24 +175,40 @@
+   /// If demosaic is disabled or camera raw is monochrome, the TIFF
+   /// has only one color channel.
+   pub fn develop_intermediate(&self, rawimage: &RawImage) -> crate::Result<Intermediate> {
++    // Patched locally: every layout the steps below cannot take is an error
++    // rather than a panic, which kills a wasm32 decode worker.
++    let unsupported = |what: String| crate::RawlerError::DecoderFailed(format!("unsupported RAW layout: {what}"));
++    let samples = match &rawimage.data {
++      crate::RawImageData::Integer(data) => data.len(),
++      crate::RawImageData::Float(data) => data.len(),
++    };
++    let needed = rawimage.width.checked_mul(rawimage.height).and_then(|n| n.checked_mul(rawimage.cpp));
++    if rawimage.width == 0 || rawimage.height == 0 || needed.is_none_or(|n| samples < n) {
++      return Err(unsupported(format!("{}x{} with {} samples", rawimage.width, rawimage.height, samples)));
++    }
+     let mut rawimage = rawimage.clone();
+     if self.steps.contains(&ProcessingStep::Rescale) {
+       rawimage.apply_scaling()?;
+     }
++    let pixels = rawimage.width * rawimage.height * rawimage.cpp;
+ 
+     let mut intermediate = match rawimage.cpp {
+-      1 => Intermediate::Monochrome(PixF32::new_with(rawimage.data.as_f32().into_owned(), rawimage.width, rawimage.height)),
++      1 => {
++        let mut data = rawimage.data.as_f32().into_owned();
++        data.truncate(pixels);
++        Intermediate::Monochrome(PixF32::new_with(data, rawimage.width, rawimage.height))
++      }
+       3 => Intermediate::ThreeColor(Color2D::<f32, 3>::new_with(
+-        rawimage.data.as_f32().chunks_exact(3).map(|x| [x[0], x[1], x[2]]).collect(),
++        rawimage.data.as_f32()[..pixels].chunks_exact(3).map(|x| [x[0], x[1], x[2]]).collect(),
+         rawimage.width,
+         rawimage.height,
+       )),
+       4 => Intermediate::FourColor(Color2D::<f32, 4>::new_with(
+-        rawimage.data.as_f32().chunks_exact(4).map(|x| [x[0], x[1], x[2], x[3]]).collect(),
++        rawimage.data.as_f32()[..pixels].chunks_exact(4).map(|x| [x[0], x[1], x[2], x[3]]).collect(),
+         rawimage.width,
+         rawimage.height,
+       )),
+-      _ => todo!(),
++      cpp => return Err(unsupported(format!("{cpp} samples per pixel"))),
+     };
+ 
+     if self.steps.contains(&ProcessingStep::Demosaic) {
+@@ -191,13 +217,19 @@
+           if let Intermediate::Monochrome(pixels) = intermediate {
+             let roi = if self.steps.contains(&ProcessingStep::CropActiveArea) {
+               if rawimage.active_area.is_some() && rawimage.fuji_rotation_width.is_some() {
+-                panic!("ActiveArea is not possible when rotation is not normalized");
++                return Err(unsupported("an active area on a rotated sensor".to_string()));
+               }
+               rawimage.active_area.unwrap_or(pixels.rect())
+             } else {
+               pixels.rect()
+             };
+-            if config.cfa.is_rgb() && config.sensor == SensorType::Bayer {
++            let fits = roi.p.x.checked_add(roi.d.w).is_some_and(|x| x <= pixels.width)
++              && roi.p.y.checked_add(roi.d.h).is_some_and(|y| y <= pixels.height);
++            if !fits || roi.d.w < 2 || roi.d.h < 2 {
++              return Err(unsupported(format!("active area {roi:?}")));
++            }
++            let planes = config.colors.plane_count();
++            if config.cfa.is_rgb() && config.sensor == SensorType::Bayer && planes == 3 {
+               let ppg = PPGDemosaic::new();
+               let mut rgb = ppg.demosaic(&pixels, &config.cfa, &config.colors, roi);
+ 
+@@ -210,14 +242,14 @@
+                 log::debug!("dimension after rotate {:?}", rgb.dim());
+               }
+               Intermediate::ThreeColor(rgb)
+-            } else if config.cfa.unique_colors() == 4 && config.sensor == SensorType::Bayer {
++            } else if config.cfa.unique_colors() == 4 && config.sensor == SensorType::Bayer && planes == 4 {
+               let linear = Bilinear4Channel::new();
+               Intermediate::FourColor(linear.demosaic(&pixels, &config.cfa, &config.colors, roi))
+-            } else if config.cfa.is_rgb() && config.sensor == SensorType::Xtrans {
++            } else if config.cfa.is_rgb() && config.sensor == SensorType::Xtrans && planes == 3 {
+               let xtrans_demosaic = XTransBilinearDemosaic::new();
+               Intermediate::ThreeColor(xtrans_demosaic.demosaic(&pixels, &config.cfa, &config.colors, roi))
+             } else {
+-              todo!()
++              return Err(unsupported(format!("cfa={} with {planes} planes", config.cfa.name)));
+             }
+           } else {
+             intermediate
+@@ -251,14 +283,17 @@
+       } else {
+         log::warn!("Image has no D65 illuminant matrix, alternative for Bradford adaption: {:?}", illu);
+         d65_matrix = match matrix.len() {
+-          9 => adapt_bradford(&illu, &Illuminant::D65, &transform_1d::<3, 3>(&matrix).expect("Transformation failed"))
+-            .as_flattened()
+-            .to_vec(),
+-          _ => unimplemented!(),
++          9 => match transform_1d::<3, 3>(&matrix) {
++            Some(matrix) => adapt_bradford(&illu, &Illuminant::D65, &matrix).as_flattened().to_vec(),
++            None => return Err(unsupported("color matrix".to_string())),
++          },
++          len => return Err(unsupported(format!("color matrix of {len} values"))),
+         }
+       }
+ 
+-      assert_eq!(d65_matrix.len() % 3, 0); // this is not so nice...
++      if d65_matrix.len() % 3 != 0 || d65_matrix.len() > 12 {
++        return Err(unsupported(format!("color matrix of {} values", d65_matrix.len())));
++      }
+       let components = d65_matrix.len() / 3;
+       for i in 0..components {
+         for j in 0..3 {
+@@ -292,8 +327,11 @@
+       if let Some(mut crop) = rawimage.crop_area.or(rawimage.active_area) {
+         if self.steps.contains(&ProcessingStep::Demosaic) && self.steps.contains(&ProcessingStep::CropActiveArea) {
+           // If active area crop was already applied during demosaic, we need to
+-          // adapt default crop to active area crop.
++          // adapt default crop to active area crop. Patched locally: a crop
++          // reaching outside the active area is clamped to it rather than
++          // asserting in `Rect::adapt`.
+           if let Some(active_area) = &rawimage.active_area {
++            crop = clamp_rect(crop, active_area);
+             crop = crop.adapt(active_area);
+             log::debug!("Adapt crop to active_area: {:?}", crop);
+           }
+@@ -303,8 +341,12 @@
+           crop.scale(0.5);
+           log::debug!("Scale crop to 0.5: {:?}", crop);
+         }
++        // Patched locally: a crop reaching past the image is clamped to it,
++        // and one with nothing left is skipped, rather than panicking.
++        let dim = intermediate.dim();
++        crop = clamp_rect(crop, &Rect::new(Point::new(0, 0), dim));
+         // Only apply crop if dimensions differ.
+-        if crop.d != intermediate.dim() {
++        if crop.d != dim && crop.d.w > 0 && crop.d.h > 0 {
+           log::debug!("crop: {:?}, intermediate dim: {:?}, rawimage: {:?}", crop, intermediate.dim(), rawimage.dim());
+           intermediate = match intermediate {
+             Intermediate::Monochrome(pixels) => Intermediate::Monochrome(pixels.crop(crop)),
+--- a/rawler-upstream/src/imgop/raw.rs
++++ b/rawler-0.8.0/src/imgop/raw.rs
+@@ -162,7 +162,7 @@
+ /// This version is optimized vor vectorization, so please check
+ /// modifications on godbolt before committing.
+ #[multiversion(targets("x86_64+avx+avx2", "x86+sse", "aarch64+neon"))]
+-pub fn correct_blacklevel_cfa(raw: &mut [f32], width: usize, _height: usize, blacklevel: &[f32; 4], whitelevel: &[f32; 4]) {
++pub fn correct_blacklevel_cfa(raw: &mut [f32], width: usize, height: usize, blacklevel: &[f32; 4], whitelevel: &[f32; 4]) {
+   //assert_eq!(width % 2, 0, "width is {}", width);
+   //assert_eq!(height % 2, 0, "height is {}", height);
+   // max value can be pre-computed for all channels.
+@@ -187,6 +187,26 @@
+       b[1] = clip(b[1] - blacklevel[3]) / max[3];
+     });
+   });
++  // Patched locally: an odd width or height leaves a last column or row
++  // outside the 2x2 blocks above, which kept raw sample values and showed as
++  // a bright edge. Scale them by their own CFA phase.
++  let rows = height.min(raw.len() / width.max(1));
++  let mut fix = |i: usize, phase: usize| {
++    if let Some(v) = raw.get_mut(i) {
++      *v = clip(*v - blacklevel[phase]) / max[phase];
++    }
++  };
++  if width % 2 == 1 {
++    for y in 0..rows {
++      fix(y * width + width - 1, (y % 2) * 2);
++    }
++  }
++  if rows % 2 == 1 {
++    let y = rows - 1;
++    for x in 0..(width & !1) {
++      fix(y * width + x, x % 2);
++    }
++  }
+ }
+ 
+ #[multiversion(targets("x86_64+avx+avx2", "x86+sse", "aarch64+neon"))]
+--- a/rawler-upstream/src/rawimage.rs
++++ b/rawler-0.8.0/src/rawimage.rs
+@@ -519,7 +519,8 @@
+   pub fn apply_scaling(&mut self) -> crate::Result<()> {
+     let mut pixels = self.data.as_f32();
+     match &self.photometric {
+-      RawPhotometricInterpretation::BlackIsZero => todo!(),
++      // Patched locally: an error rather than `todo!()`.
++      RawPhotometricInterpretation::BlackIsZero => return Err(crate::RawlerError::DecoderFailed("black-is-zero RAW data is not supported".to_string())),
+       RawPhotometricInterpretation::Cfa(_) => {
+         correct_blacklevel_cfa(
+           pixels.to_mut(),

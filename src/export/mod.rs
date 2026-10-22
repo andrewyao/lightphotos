@@ -328,7 +328,11 @@ pub fn bake_export_from_shared_vec(
 ) -> Result<Vec<u8>, String> {
     let decode_px = decode_px(output.max_px, adj.crop);
     let img = if is_raw {
-        crate::decode::rawler::decode_raw_nonmac_from_shared_vec(src_bytes.clone(), decode_px)?
+        crate::decode::rawler::decode_raw_nonmac_from_shared_vec(
+            src_bytes.clone(),
+            decode_px,
+            crate::decode::rawler::RawIntent::Export,
+        )?
     } else {
         image_decode::decode_nonraw_from_bytes(src_bytes.as_slice(), decode_px)?
     };

@@ -102,8 +102,9 @@ fn run_nonmac_decode_probe(args: &[String]) -> Result<(), String> {
 
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let t0 = std::time::Instant::now();
-    let img = lp_rawler::decode_raw_nonmac_from_bytes(&bytes, max_dim)
-        .map_err(|e| format!("decode_raw_nonmac_from_bytes failed: {e}"))?;
+    let img =
+        lp_rawler::decode_raw_nonmac_from_bytes(&bytes, max_dim, lp_rawler::RawIntent::Display)
+            .map_err(|e| format!("decode_raw_nonmac_from_bytes failed: {e}"))?;
     println!(
         "nonmac-decode {}x{} in {:?}",
         img.width,
@@ -964,8 +965,9 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read fixture");
         let _ = std::fs::remove_file(&path);
 
-        let img = lp_rawler::decode_raw_nonmac_from_bytes(&bytes, u32::MAX)
-            .expect("bytes-core RAW decode should succeed");
+        let img =
+            lp_rawler::decode_raw_nonmac_from_bytes(&bytes, u32::MAX, lp_rawler::RawIntent::Export)
+                .expect("bytes-core RAW decode should succeed");
 
         assert_eq!((img.width, img.height), (w, h));
         assert_eq!(img.pixel_format, image_decode::PixelFormat::LinearF16);
@@ -996,8 +998,12 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         for max_dim in [u32::MAX, 16] {
-            let img = lp_rawler::decode_raw_nonmac_from_bytes(&bytes, max_dim)
-                .expect("RAW decode should succeed");
+            let img = lp_rawler::decode_raw_nonmac_from_bytes(
+                &bytes,
+                max_dim,
+                lp_rawler::RawIntent::Display,
+            )
+            .expect("RAW decode should succeed");
             assert_eq!(img.pixel_format, image_decode::PixelFormat::LinearF16);
             assert_eq!(
                 img.rgba.len(),
@@ -1038,8 +1044,12 @@ mod tests {
             }
             sum.map(|s| s / pixels.len() as f64)
         };
-        let full = lp_rawler::decode_raw_nonmac_from_bytes(&bytes, u32::MAX).expect("full");
-        let half = lp_rawler::decode_raw_nonmac_from_bytes(&bytes, 24).expect("half");
+        let full =
+            lp_rawler::decode_raw_nonmac_from_bytes(&bytes, u32::MAX, lp_rawler::RawIntent::Export)
+                .expect("full");
+        let half =
+            lp_rawler::decode_raw_nonmac_from_bytes(&bytes, 24, lp_rawler::RawIntent::Display)
+                .expect("half");
         assert_eq!((full.width, full.height), (64, 48));
         assert_eq!((half.width, half.height), (24, 18));
         for (f, h) in mean(&full).into_iter().zip(mean(&half)) {
@@ -1061,7 +1071,8 @@ mod tests {
 
         let via_path = lp_rawler::decode_raw_nonmac(&path, u32::MAX).expect("path decode");
         let via_bytes =
-            lp_rawler::decode_raw_nonmac_from_bytes(&bytes, u32::MAX).expect("bytes decode");
+            lp_rawler::decode_raw_nonmac_from_bytes(&bytes, u32::MAX, lp_rawler::RawIntent::Export)
+                .expect("bytes decode");
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(

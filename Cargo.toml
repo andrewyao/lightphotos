@@ -302,6 +302,11 @@ uuid = { version = "1", features = ["js"] }
 # level of 0. The camera already subtracted black, and taking off ColorData's
 # sensor black again cast those files green.
 #
+# `patches/rawler-develop-errors.patch` makes `RawDevelop::develop_intermediate`
+# and `apply_scaling` return an error instead of panicking on a layout they
+# cannot take, clamps a default crop to the active area, and scales an odd
+# sensor's last row and column, which showed as a bright edge.
+#
 # `[patch.crates-io]` applies globally (Cargo has no way to scope a patch to
 # one target), so `vendor/rawler-0.8.0` must exist for every platform and
 # every Cargo entry point. It is NOT committed — `scripts/setup-vendor-rawler.sh`

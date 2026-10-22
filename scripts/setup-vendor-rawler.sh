@@ -20,7 +20,10 @@
 # patches/rawler-sensor-type-fallback.patch, which stops a DNG with an
 # unusual CFA size from panicking inside rawler::decode, and
 # patches/rawler-cr2-sraw-black.patch, which stops a Canon sRAW/mRAW CR2
-# from losing its black level twice and turning green.
+# from losing its black level twice and turning green, and
+# patches/rawler-develop-errors.patch, which makes RawDevelop return an error
+# instead of panicking on a layout it cannot take, clamps a default crop to
+# the active area, and scales an odd sensor's last row and column.
 #
 # Needed for ANY cargo invocation that touches this crate, wasm32 or not —
 # [patch.crates-io] redirects every use of `rawler` here, globally (Cargo
@@ -48,7 +51,7 @@ DEST="$HERE/vendor/rawler-$CRATE_VERSION"
 # Written only after the patch applies cleanly; its presence is what marks
 # the tree as fully set up (a half-materialized dir has no sentinel).
 SENTINEL="$DEST/.lightphotos-patched"
-PATCHES="rawler-web-time.patch rawler-ljpeg-restart.patch rawler-sensor-type-fallback.patch rawler-cr2-sraw-black.patch"
+PATCHES="rawler-web-time.patch rawler-ljpeg-restart.patch rawler-sensor-type-fallback.patch rawler-cr2-sraw-black.patch rawler-develop-errors.patch"
 STAMP="rawler $CRATE_VERSION + $PATCHES"
 
 FORCE=0

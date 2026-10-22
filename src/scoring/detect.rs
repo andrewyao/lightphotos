@@ -229,7 +229,11 @@ impl<'a> DetectInput<'a> {
             #[cfg(not(target_os = "macos"))]
             PhotoSource::Bytes { bytes, is_raw } => {
                 if *is_raw {
-                    crate::decode::rawler::decode_raw_nonmac_from_bytes(bytes, PREVIEW_SIDE)
+                    crate::decode::rawler::decode_raw_nonmac_from_bytes(
+                        bytes,
+                        PREVIEW_SIDE,
+                        crate::decode::rawler::RawIntent::Display,
+                    )
                 } else {
                     crate::decode::image_decode::decode_nonraw_from_bytes(bytes, PREVIEW_SIDE)
                 }
