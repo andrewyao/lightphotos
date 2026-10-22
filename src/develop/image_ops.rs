@@ -152,84 +152,121 @@ fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
 struct Source<'a> {
     img: &'a DecodedImage,
     ca: develop::CaScale,
-    /// Every texel in linear light for denoise's taps, which read each one
-    /// 25 times; only [`Source::denoise_px`] and [`Source::denoise_uv`]
-    /// read it. Half floats keep it at 6 bytes a texel; their 11-bit
-    /// mantissa is finer than any step between two 8-bit sRGB levels, and a
-    /// half-float decode is stored exactly.
-    linear: Option<Vec<[f16; 3]>>,
 }
 
 impl<'a> Source<'a> {
     /// `None` for an empty image or one short of `width * height` pixels in
     /// its format, so every read below stays inside the buffer.
-    fn new(img: &'a DecodedImage, ca: develop::CaScale, cache: bool) -> Option<Self> {
-        let (w, h) = (img.width as usize, img.height as usize);
-        let n = w.checked_mul(h)?;
+    fn new(img: &'a DecodedImage, ca: develop::CaScale) -> Option<Self> {
+        let n = (img.width as usize).checked_mul(img.height as usize)?;
         if n == 0 || img.rgba.len() < n.checked_mul(img.pixel_format.bytes_per_pixel())? {
             return None;
         }
-        let linear = cache.then(|| {
-            let mut buf = vec![[f16::ZERO; 3]; n];
-            develop::parallel::for_each_light_row(&mut buf, w, n, |y, row| {
-                for (x, px) in row.iter_mut().enumerate() {
-                    *px = pixel_linear(img, x as u32, y as u32).map(f16::from_f32);
-                }
-            });
-            buf
-        });
-        Some(Self { img, ca, linear })
+        Some(Self { img, ca })
+    }
+
+    fn pixels(&self) -> usize {
+        self.img.width as usize * self.img.height as usize
     }
 
     /// Texel `(x, y)` clamped to the image, for the exact path.
     fn at_px(&self, x: i64, y: i64) -> [f32; 3] {
-        self.texel(x, y, false)
-    }
-
-    /// [`Source::at_px`] for a denoise tap, through the cache.
-    fn denoise_px(&self, x: i64, y: i64) -> [f32; 3] {
-        self.texel(x, y, true)
-    }
-
-    fn texel(&self, x: i64, y: i64, cached: bool) -> [f32; 3] {
         let (w, h) = (self.img.width as i64, self.img.height as i64);
-        let (x, y) = (x.clamp(0, w - 1), y.clamp(0, h - 1));
-        match self.linear.as_ref().filter(|_| cached) {
-            Some(buf) => buf[(y * w + x) as usize].map(f16::to_f32),
-            None => pixel_linear(self.img, x as u32, y as u32),
-        }
-    }
-
-    /// All three channels at source UV, as `textureSample` filters them:
-    /// the four texels around `uv * size - 0.5`, clamped at the edge.
-    fn bilinear(&self, u: f32, v: f32, cached: bool) -> [f32; 3] {
-        develop::base::bilinear(self.img.width, self.img.height, u, v, |x, y| {
-            self.texel(x, y, cached)
-        })
+        pixel_linear(self.img, x.clamp(0, w - 1) as u32, y.clamp(0, h - 1) as u32)
     }
 
     /// The source at UV with chromatic aberration removed. Must match
     /// `sampleSrc` and `sampleSrcLevel` in loupe_common.wgsl.
     fn at_uv(&self, u: f32, v: f32) -> [f32; 3] {
-        self.sample_uv(u, v, false)
+        self.at_uv_from(u, v, |x, y| self.at_px(x, y))
     }
 
-    /// [`Source::at_uv`] for a denoise tap, through the cache.
-    fn denoise_uv(&self, u: f32, v: f32) -> [f32; 3] {
-        self.sample_uv(u, v, true)
-    }
-
-    fn sample_uv(&self, u: f32, v: f32, cached: bool) -> [f32; 3] {
-        let g = self.bilinear(u, v, cached);
+    /// [`Source::at_uv`] with its texels read by `texel`: all three
+    /// channels as `textureSample` filters them, the four texels around
+    /// `uv * size - 0.5` clamped at the edge, red and blue through the CA
+    /// scales.
+    fn at_uv_from(&self, u: f32, v: f32, texel: impl Fn(i64, i64) -> [f32; 3]) -> [f32; 3] {
+        let (w, h) = (self.img.width, self.img.height);
+        let g = develop::base::bilinear(w, h, u, v, &texel);
         if self.ca.is_zero() {
             return g;
         }
         let channel = |k: f32, c: usize| {
             let (u, v) = develop::CaScale::source_uv(k, u, v);
-            self.bilinear(u, v, cached)[c]
+            develop::base::bilinear(w, h, u, v, &texel)[c]
         };
         [channel(self.ca.red, 0), g[1], channel(self.ca.blue, 2)]
     }
+}
+
+/// A linear-light copy of every texel, in half or full floats.
+enum Linear {
+    Half(Vec<[f16; 3]>),
+    Full(Vec<[f32; 3]>),
+}
+
+/// What denoise's taps read: the source's texels from a linear copy made
+/// once per bake, since each tap reads every texel 25 times. Only
+/// `develop::denoise_sample` reads through it; every other read of the
+/// photo goes to [`Source`].
+struct DenoiseTaps<'a> {
+    src: &'a Source<'a>,
+    linear: Linear,
+}
+
+impl<'a> DenoiseTaps<'a> {
+    fn new(src: &'a Source<'a>, half: bool) -> Self {
+        let linear = if half {
+            Linear::Half(linear_copy(src, |p| p.map(f16::from_f32)))
+        } else {
+            Linear::Full(linear_copy(src, |p| p))
+        };
+        Self { src, linear }
+    }
+
+    /// [`Source::at_px`] from the copy.
+    fn at_px(&self, x: i64, y: i64) -> [f32; 3] {
+        let (w, h) = (self.src.img.width as i64, self.src.img.height as i64);
+        let i = (y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) as usize;
+        match &self.linear {
+            Linear::Half(buf) => buf[i].map(f16::to_f32),
+            Linear::Full(buf) => buf[i],
+        }
+    }
+
+    /// [`Source::at_uv`] from the copy.
+    fn at_uv(&self, u: f32, v: f32) -> [f32; 3] {
+        self.src.at_uv_from(u, v, |x, y| self.at_px(x, y))
+    }
+}
+
+/// Every texel of `src` in linear light through `store`, in bands.
+fn linear_copy<T: Copy + Default + Send>(
+    src: &Source,
+    store: impl Fn([f32; 3]) -> T + Sync,
+) -> Vec<T> {
+    let (w, n) = (src.img.width as usize, src.pixels());
+    let mut buf = vec![T::default(); n];
+    develop::parallel::for_each_light_row(&mut buf, w, n, |y, row| {
+        for (x, px) in row.iter_mut().enumerate() {
+            *px = store(pixel_linear(src.img, x as u32, y as u32));
+        }
+    });
+    buf
+}
+
+/// Whether denoise's copy can be half floats (6 bytes a texel, not 12):
+/// only where that costs nothing a bake shows or waits on.
+/// - An 8-bit bake: an 11-bit mantissa is finer than any step between two
+///   8-bit sRGB levels, but a 16-bit bake would see it (11 of 65535 on a
+///   noisy frame).
+/// - Native: the CPU converts (f16c, or fp16 on Apple silicon), so even a
+///   straightened tap's twelve conversions cost nothing measurable (24 MP
+///   straightened denoise: 1257 ms half, 1226 ms full, within noise).
+///   wasm32 converts in software, 5-13x the cost of an f32 read (measured
+///   under node), so the browser keeps full floats.
+fn half_denoise_copy<S: Sample>() -> bool {
+    S::MAX <= 255.0 && !cfg!(target_arch = "wasm32")
 }
 
 /// A bilinear read of `img` at UV in linear light through the aberration
@@ -239,7 +276,7 @@ pub fn bilinear_sampler(
     img: &DecodedImage,
     ca: develop::CaScale,
 ) -> Option<impl Fn(f32, f32) -> [f32; 3] + '_> {
-    let src = Source::new(img, ca, false)?;
+    let src = Source::new(img, ca)?;
     Some(move |u, v| src.at_uv(u, v))
 }
 
@@ -297,10 +334,30 @@ fn bake_samples<S: Sample>(
     rot: u8,
     probe: BaseProbe,
 ) -> (u32, u32, Vec<S>) {
+    bake_with_copy(img, adj, touchups, masks, rot, probe, None)
+}
+
+/// [`bake_samples`] with denoise's copy in half floats when `half_copy`
+/// says, or as [`half_denoise_copy`] picks for `None`.
+fn bake_with_copy<S: Sample>(
+    img: &DecodedImage,
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    masks: &MaskSet,
+    rot: u8,
+    probe: BaseProbe,
+    half_copy: Option<bool>,
+) -> (u32, u32, Vec<S>) {
     let (w, h) = (img.width, img.height);
     let ca = adj.chromatic_aberration.unwrap_or_default();
     let sharpen = develop::Sharpen::new(&adj.sharpening, w as f32, h as f32);
-    let Some(src) = Source::new(img, ca, adj.denoise > 0.0) else {
+    let Some(src) = Source::new(img, ca) else {
+        return (0, 0, Vec::new());
+    };
+    let (x0, y0, x1, y1) = crop_bounds(adj.crop, w, h);
+    let (cw, ch) = (x1 - x0, y1 - y0);
+    // Before any layer is built, so an output too large to hold costs nothing.
+    let Some(len) = rgba_len(cw, ch) else {
         return (0, 0, Vec::new());
     };
     let turn = (adj.straighten != 0.0)
@@ -309,9 +366,8 @@ fn bake_samples<S: Sample>(
     // read texels directly: bit-exact, and the fast path for export.
     let exact = turn.is_none() && ca.is_zero();
     let (texel_w, texel_h) = (1.0 / w as f32, 1.0 / h as f32);
-
-    let (x0, y0, x1, y1) = crop_bounds(adj.crop, w, h);
-    let (cw, ch) = (x1 - x0, y1 - y0);
+    let half = half_copy.unwrap_or_else(half_denoise_copy::<S>);
+    let taps = (adj.denoise > 0.0).then(|| DenoiseTaps::new(&src, half));
     let dev = develop::Develop::framed(adj, w, h);
     let global = develop::LocalAmounts::of(adj);
     let masks = masks.on_photo(w as f32 / h as f32);
@@ -327,9 +383,6 @@ fn bake_samples<S: Sample>(
     let fine = (probe == BaseProbe::Fine || adj.texture != 0.0)
         .then(|| BaseLayer::build_fine(w, h, pre))
         .flatten();
-    let Some(len) = rgba_len(cw, ch) else {
-        return (0, 0, Vec::new());
-    };
     let mut cropped = vec![S::default(); len];
     let opaque = S::encode(1.0);
     develop::parallel::for_each_row(&mut cropped, cw as usize * 4, |y, out_row| {
@@ -338,13 +391,18 @@ fn bake_samples<S: Sample>(
             let (px, py) = (x0 + x, y0 + y);
             let canvas = ((px as f32 + 0.5) / w as f32, (py as f32 + 0.5) / h as f32);
             let (u, v) = turn.map_or(canvas, |t| t.to_source(canvas.0, canvas.1));
-            let lin = develop::denoise_sample(adj, |dx, dy| {
-                if exact {
-                    src.denoise_px(px as i64 + dx as i64, py as i64 + dy as i64)
-                } else {
-                    src.denoise_uv(u + dx as f32 * texel_w, v + dy as f32 * texel_h)
-                }
-            });
+            let (px64, py64) = (px as i64, py as i64);
+            let lin = match &taps {
+                Some(taps) => develop::denoise_sample(adj, |dx, dy| {
+                    if exact {
+                        taps.at_px(px64 + dx as i64, py64 + dy as i64)
+                    } else {
+                        taps.at_uv(u + dx as f32 * texel_w, v + dy as f32 * texel_h)
+                    }
+                }),
+                None if exact => src.at_px(px64, py64),
+                None => src.at_uv(u, v),
+            };
             let pre = apply_touchups(&src, touchups, u, v, lin);
             let base_here = base.as_ref().map(|b| b.at_uv(u, v));
             let fine_here = fine.as_ref().map(|f| f.at_uv(u, v));
@@ -607,11 +665,15 @@ fn rgba_len(w: u32, h: u32) -> Option<usize> {
 
 /// Rotate packed RGBA samples by `steps` 90-degree clockwise turns. Returns
 /// the new `(width, height, rgba)`, and `src` itself, not a copy, for no
-/// turn. `src` must hold `w * h` pixels; anything else comes back as is.
+/// turn. A `src` that doesn't hold `w * h` pixels comes back empty, as a
+/// failed bake.
 #[hotpath::measure]
 fn rotate_rgba<S: Sample>(src: Vec<S>, w: u32, h: u32, steps: u8) -> (u32, u32, Vec<S>) {
+    if rgba_len(w, h) != Some(src.len()) {
+        return (0, 0, Vec::new());
+    }
     let steps = steps % 4;
-    if steps == 0 || rgba_len(w, h) != Some(src.len()) {
+    if steps == 0 {
         return (w, h, src);
     }
     let (nw, nh) = if steps == 2 { (w, h) } else { (h, w) };
@@ -962,27 +1024,25 @@ mod tests {
             pixel_format: PixelFormat::Srgb8,
         });
         let ca = develop::CaScale::default();
-        let (exact, cached) = (
-            Source::new(&img, ca, false).expect("exact"),
-            Source::new(&img, ca, true).expect("cached"),
-        );
+        let exact = Source::new(&img, ca).expect("source");
+        let cached = DenoiseTaps::new(&exact, true);
         let lut = srgb8_to_linear_lut();
         for x in 0..512 {
-            let (e, c) = (exact.at_px(x, 0)[0], cached.denoise_px(x, 0)[0]);
+            let (e, c) = (exact.at_px(x, 0)[0], cached.at_px(x, 0)[0]);
             assert!((e - c).abs() <= e * 2f32.powi(-11), "texel {x}: {e} vs {c}");
         }
         for v in 1..256 {
             let (lo, hi) = (lut[v - 1], lut[v]);
-            let c = cached.denoise_px(2 * v as i64, 0)[0];
+            let c = cached.at_px(2 * v as i64, 0)[0];
             assert!((c - hi).abs() < (hi - lo) / 2.0, "level {v}: {c} vs {hi}");
         }
 
         let img = f16_gray(0.3, PixelFormat::TonedF16);
-        let (exact, cached) = (
-            Source::new(&img, ca, false).expect("exact"),
-            Source::new(&img, ca, true).expect("cached"),
+        let exact = Source::new(&img, ca).expect("source");
+        assert_eq!(
+            exact.at_px(1, 1),
+            DenoiseTaps::new(&exact, true).at_px(1, 1)
         );
-        assert_eq!(exact.at_px(1, 1), cached.denoise_px(1, 1));
     }
 
     /// A noisy sRGB8 photo whose levels the half-float cache rounds.
@@ -1024,31 +1084,45 @@ mod tests {
                 != bake_samples::<u16>(&img, &on, &[], &masks, 0, probe);
             assert!(!moved, "{probe:?} moved when denoise turned on");
         }
-        let ca = develop::CaScale {
-            red: 1.004,
-            blue: 0.996,
-        };
-        let (exact, cached) = (
-            Source::new(&img, ca, false).expect("exact"),
-            Source::new(&img, ca, true).expect("cached"),
-        );
-        for (u, v) in [(0.1, 0.2), (0.5, 0.5), (0.93, 0.71)] {
-            assert_eq!(exact.at_uv(u, v), cached.at_uv(u, v), "({u}, {v})");
-        }
-        assert_eq!(exact.at_px(5, 9), cached.at_px(5, 9));
+    }
 
-        // Denoise itself, through the cache, lands within an eighth of an
-        // 8-bit step of the same taps in f32, at 16 bits.
-        let mut worst = 0u16;
+    /// A 16-bit bake reads denoise's taps in full floats: the same pixels
+    /// as a bake whose copy is f32, which is every texel exactly. An 8-bit
+    /// bake takes the half-float copy natively, within a level of the f32
+    /// taps.
+    #[test]
+    fn a_16_bit_denoise_bake_reads_its_taps_in_full_floats() {
+        let img = noisy(96, 64);
+        let on = Adjustments {
+            denoise: 60.0,
+            clarity: 40.0,
+            ..Default::default()
+        };
+        let masks = MaskSet::default();
+        let bake = |half| bake_with_copy::<u16>(&img, &on, &[], &masks, 0, BaseProbe::Off, half);
+        assert!(
+            bake(None) == bake(Some(false)),
+            "16-bit denoise read half floats"
+        );
+        assert!(!half_denoise_copy::<u16>());
+        assert_eq!(half_denoise_copy::<u8>(), !cfg!(target_arch = "wasm32"));
+
+        let src = Source::new(&img, develop::CaScale::default()).expect("source");
+        let (full, half) = (DenoiseTaps::new(&src, false), DenoiseTaps::new(&src, true));
+        let mut worst = 0u8;
         for (x, y) in (0..96).flat_map(|x| (0..64).map(move |y| (x, y))) {
-            let at = |src: &Source, dx: i32, dy: i32| src.denoise_px(x + dx as i64, y + dy as i64);
-            let f32_taps = develop::denoise_sample(&on, |dx, dy| at(&exact, dx, dy));
-            let f16_taps = develop::denoise_sample(&on, |dx, dy| at(&cached, dx, dy));
+            assert_eq!(full.at_px(x, y), src.at_px(x, y));
+            let at = |t: &DenoiseTaps, dx: i32, dy: i32| t.at_px(x + dx as i64, y + dy as i64);
+            let f32_taps = develop::denoise_sample(&on, |dx, dy| at(&full, dx, dy));
+            let f16_taps = develop::denoise_sample(&on, |dx, dy| at(&half, dx, dy));
             for (a, b) in f32_taps.iter().zip(f16_taps) {
-                worst = worst.max(<u16 as Sample>::encode(*a).abs_diff(<u16 as Sample>::encode(b)));
+                worst = worst.max(<u8 as Sample>::encode(*a).abs_diff(<u8 as Sample>::encode(b)));
             }
         }
-        assert!(worst <= 257 / 8, "16-bit denoise moved {worst} levels");
+        assert!(
+            worst <= 1,
+            "8-bit denoise through half floats moved {worst} levels"
+        );
     }
 
     fn f16_gray(v: f32, format: PixelFormat) -> DecodedImage {
@@ -1084,9 +1158,11 @@ mod tests {
     }
 
     #[test]
-    fn rotate_leaves_a_buffer_of_the_wrong_size_alone() {
-        let src = [px(1), px(2), px(3)].concat();
-        assert_eq!(rotate_rgba(src.clone(), 2, 2, 1), (2, 2, src));
+    fn rotate_fails_a_buffer_of_the_wrong_size() {
+        for steps in 0..4 {
+            let src = [px(1), px(2), px(3)].concat();
+            assert_eq!(rotate_rgba(src, 2, 2, steps), (0, 0, Vec::new()));
+        }
     }
 
     #[test]
