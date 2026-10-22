@@ -15,22 +15,35 @@ const BAND_ROWS: usize = 16;
 /// `y`. The calling thread works too, so every row runs even when no other
 /// thread can start.
 pub fn for_each_row<T: Send>(out: &mut [T], row_len: usize, row: impl Fn(usize, &mut [T]) + Sync) {
-    if row_len == 0 {
-        return;
-    }
-    let band_len = BAND_ROWS.saturating_mul(row_len);
-    let bands = out.len().div_ceil(band_len);
-    let next = Mutex::new(out.chunks_mut(band_len).enumerate());
-    let work = || loop {
-        let taken = next.lock().unwrap_or_else(PoisonError::into_inner).next();
-        let Some((band, chunk)) = taken else {
-            return;
-        };
+    for_each_chunk(out, BAND_ROWS.saturating_mul(row_len), |band, chunk| {
         for (i, out_row) in chunk.chunks_mut(row_len).enumerate() {
             row(band * BAND_ROWS + i, out_row);
         }
+    });
+}
+
+/// Call `chunk(i, out_chunk)` for each `chunk_len`-element chunk of `out`,
+/// the last one possibly shorter, for a pass that sizes its own bands. The
+/// same rules as [`for_each_row`]: any order, any thread, and the calling
+/// thread works too.
+pub fn for_each_chunk<T: Send>(
+    out: &mut [T],
+    chunk_len: usize,
+    chunk: impl Fn(usize, &mut [T]) + Sync,
+) {
+    if chunk_len == 0 {
+        return;
+    }
+    let chunks = out.len().div_ceil(chunk_len);
+    let next = Mutex::new(out.chunks_mut(chunk_len).enumerate());
+    let work = || loop {
+        let taken = next.lock().unwrap_or_else(PoisonError::into_inner).next();
+        let Some((i, out_chunk)) = taken else {
+            return;
+        };
+        chunk(i, out_chunk);
     };
-    run_with_helpers(bands.saturating_sub(1), &work);
+    run_with_helpers(chunks.saturating_sub(1), &work);
 }
 
 /// Run `work` on this thread and on up to `helpers` others at once.
@@ -116,6 +129,19 @@ mod tests {
             });
             assert!(out.iter().enumerate().all(|(i, &v)| i == v), "{rows} rows");
         }
+    }
+
+    #[test]
+    fn every_chunk_runs_once_with_its_own_index_and_the_last_is_short() {
+        let mut out = vec![usize::MAX; 10];
+        for_each_chunk(&mut out, 4, |i, chunk| {
+            assert_eq!(chunk.len(), if i == 2 { 2 } else { 4 });
+            for (k, v) in chunk.iter_mut().enumerate() {
+                assert_eq!(*v, usize::MAX, "chunk {i} written twice");
+                *v = i * 4 + k;
+            }
+        });
+        assert!(out.iter().enumerate().all(|(i, &v)| i == v));
     }
 
     #[test]
