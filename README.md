@@ -129,7 +129,9 @@ LIGHTPHOTOS_CONTROL_TOKEN=<32 hex characters> ./target/release/lightphotos --con
 claude mcp add lightphotos -e LIGHTPHOTOS_CONTROL_TOKEN=<the same token> -- /path/to/lightphotos-mcp --attach 7777
 ```
 
-In the browser, the app registers `list_commands`, `run_command`, `get_state` and `list_photos` with WebMCP when the browser offers `document.modelContext` (or `navigator.modelContext`, as the `@mcp-b` polyfill does). An agent in the browser then drives the open app with the same requests as the control channel. There is no `screenshot` tool: the agent already sees the page. A browser without WebMCP logs one console line and the app runs as usual.
+An agent's `export` runs under tighter rules than the export form. It may go only to the form's own destination, the open folder's `Exports` folder, or a folder inside the open folder; an Immich upload needs the form set to Immich. It keeps location and identifying camera data only when the form keeps them. Photo and folder names reach the agent as text that anyone who can write a file name controls, so the tools tell the agent to treat them as data, never as instructions.
+
+In the browser, the app registers `list_commands`, `run_command`, `get_state` and `list_photos` with WebMCP when the browser offers `document.modelContext` (or `navigator.modelContext`, as the `@mcp-b` polyfill does). An agent in the browser then drives the open app with the same requests as the control channel. There is no `screenshot` tool: the agent already sees the page. `run_command` carries `destructiveHint: true`, so a browser that asks before a tool changes things asks before each command. A browser without WebMCP logs one console line and the app runs as usual.
 
 ## Releasing and packaging
 

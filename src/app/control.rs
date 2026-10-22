@@ -40,7 +40,7 @@ impl App {
         // A result shows in the window even with no input to wake it.
         self.request_redraw();
         let answer = match op {
-            Op::Run(cmd) => self.run(*cmd).map_err(Into::into).and_then(json),
+            Op::Run(cmd) => self.run_from_agent(*cmd).map_err(Into::into).and_then(json),
             Op::Commands => json(self.listing()),
             Op::State => json(State::of(self)),
             Op::List => json(PhotoList::of(self)),
@@ -203,5 +203,28 @@ mod tests {
         };
         assert!(frame_work(false), "a visible window draws a frame");
         assert!(!frame_work(true), "an occluded window draws none");
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_agent_export_outside_the_open_folder_is_refused() {
+        use crate::command::{Command, ExportParams, Photos};
+        use crate::export::{ExportSettings, ExportTarget, FolderChoice};
+        let (mut app, dir, photos) = crate::app::test_support::folder_app("control-export", 1);
+        app.folder_sel = Some(dir.clone());
+        let outside = crate::app::test_support::temp_folder("control-export-out");
+        let export = Command::Export(ExportParams {
+            photos: Photos::Named(photos),
+            settings: Some(ExportSettings {
+                target: ExportTarget::Folder(FolderChoice::Custom(outside.clone())),
+                ..ExportSettings::default()
+            }),
+        });
+        let (tx, rx) = mpsc::channel();
+        app.answer_control(live(Op::Run(Box::new(export))), tx);
+        let refused = json_of(rx.try_recv().unwrap()).unwrap_err();
+        assert!(refused.contains("open folder"), "{refused}");
+        assert!(!app.export_running(), "no batch started");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     }
 }
