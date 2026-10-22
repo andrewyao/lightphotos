@@ -345,6 +345,12 @@ impl App {
         };
     }
 
+    /// Whether the open folder is read-only for this visit, because another
+    /// program held it when it opened. Every edit control reads this.
+    pub(crate) fn read_only(&self) -> bool {
+        self.folder_store.read_only().is_some()
+    }
+
     /// The open folder's read-only reason, in the UI's language.
     pub(crate) fn folder_read_only_text(&self) -> Option<String> {
         self.folder_store.read_only().map(|by| by.read_only_text())

@@ -310,6 +310,76 @@ pub enum BulkKind {
     Delete,
 }
 
+impl UiAction {
+    /// Whether the action edits the open folder's photos, so a read-only
+    /// folder turns it away. Its control is off there too; this is the gate
+    /// behind it.
+    pub(crate) fn edits_folder(&self) -> bool {
+        use UiAction::*;
+        matches!(
+            self,
+            GroupAllBursts
+                | GroupSelectedBursts
+                | GroupSelected
+                | RequestDeleteStack
+                | ToggleLabel(_)
+                | ScoreAll
+                | RateGroupMember { .. }
+                | FlagGroupMember { .. }
+                | SetMemberAsRep(_)
+                | DeleteMember(_)
+                | RequestDeletePicks
+                | ApplyPreset(_)
+                | RequestBulk(_)
+                | ScoreSelection
+                | RemoveGroups
+                | TrashGroups
+                | SetRating(_)
+                | SetFlag(_)
+                | CropGrab(_)
+                | CropGrabMove(..)
+                | CropDragTo(..)
+                | CropRelease
+                | ToggleStraightenTool
+                | StraightenLineFrom(..)
+                | StraightenLineTo(..)
+                | ResetStraighten
+                | ResetCrop
+                | SetCropAspect(_)
+                | SetCropOrientation(_)
+                | Rotate(_)
+                | ToggleWbPicker
+                | PickWhiteBalance(..)
+                | ToggleTouchUp
+                | TouchUpClick(..)
+                | DeleteTouchUp
+                | ToggleMaskTool(_)
+                | AddMask(_)
+                | AddDetectedMask(_)
+                | RetryDetection(_)
+                | SetMask(..)
+                | BrushPress(..)
+                | BrushDrag(_)
+                | BrushRelease(_)
+                | DeleteMask(_)
+                | SetAdjustments(_)
+                | SetRemoveCa(_)
+                | ResetAdjustments
+                | StepSlider(..)
+                | ResetAllEdits
+                | AutoTone
+                | ToggleBlackAndWhite
+        )
+    }
+}
+
+/// Lay out `add` with its controls off while the open folder is read-only,
+/// the way the app disables any control that can't act now. The line
+/// under the folder's name says why.
+pub(super) fn editable<R>(ui: &mut egui::Ui, app: &App, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.add_enabled_ui(!app.read_only(), add).inner
+}
+
 /// What `draw` returns to `main.rs` each frame.
 #[derive(Default)]
 pub struct FrameOutput {
@@ -567,6 +637,11 @@ fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 loupe_title(ui, app, name, out);
             }
         });
+        // Under the folder's name in the Grid and the Loupe, Develop
+        // included, for the whole read-only visit.
+        if let Some(why) = app.folder_read_only_text() {
+            form::error(ui, &why);
+        }
         ui.add_space(font_size::px(ui.style(), 4.0));
     });
 }

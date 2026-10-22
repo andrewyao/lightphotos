@@ -22,7 +22,8 @@ pub(super) fn draw_presets_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
             egui::Panel::bottom("presets_footer")
                 .frame(egui::Frame::NONE.inner_margin(font_size::px(ui.style(), 8.0)))
                 .show_inside(ui, |ui| footer(ui, app, out));
-            form::page(ui, |ui| list(ui, app, out));
+            // Applying a preset edits; the footer's library work doesn't.
+            form::page(ui, |ui| super::editable(ui, app, |ui| list(ui, app, out)));
         });
 }
 

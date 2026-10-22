@@ -337,6 +337,122 @@ mod tests {
         assert!(swept, "swept once the folder opens writable");
     }
 
+    /// Design rows 18 and 19: a folder another program holds opens
+    /// read-only for the whole visit.
+    /// The state names the holder and the line under the folder's name
+    /// says so. Every way in to an edit (a key, a UI action, a command, an
+    /// undo, a menu item) is turned away before anything changes, with the
+    /// same reason, so nothing reaches the folder store to be refused. The
+    /// lock coming free doesn't make it writable; opening it again does.
+    #[test]
+    fn a_folder_held_by_another_program_turns_every_edit_away_for_the_visit() {
+        use crate::app::test_support::load_folder;
+        use crate::persist::folder_store::HeldBy;
+        #[cfg(target_os = "macos")]
+        use crate::shell::menu::MenuCommand;
+        use crate::sidecar::{FolderLock, Writer};
+        let (dir, photo) = one_photo("lock-held");
+        let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir);
+        app.select_single(0);
+        let by = app.folder_store.read_only();
+        let banner = app.folder_read_only_text().unwrap_or_default();
+        let state = serde_json::to_value(crate::app::state::State::of(&app)).unwrap();
+
+        app.handle_key(winit::keyboard::KeyCode::Digit4);
+        let by_key = app.status_text().map(str::to_string);
+        // K arms the Brush, which no command stands behind.
+        app.handle_key(winit::keyboard::KeyCode::KeyK);
+        let armed = app.mask_tool();
+        app.apply_ui_actions(vec![crate::ui::UiAction::SetRating(3)]);
+        let rated = app.run(crate::command::Command::Rate(crate::command::RateParams {
+            stars: crate::command::Stars::try_from(2).unwrap(),
+            advance: false,
+            photos: crate::command::Photos::Selected,
+        }));
+        let undone = app.run(crate::command::Command::Undo);
+        // The menu bar is macOS's alone.
+        #[cfg(target_os = "macos")]
+        let menu = [
+            MenuCommand::Rate(1),
+            MenuCommand::Pick,
+            MenuCommand::MoveToTrash,
+            MenuCommand::AutoToneSelection,
+            MenuCommand::Undo,
+        ]
+        .map(|m| app.menu_enabled(m));
+        #[cfg(not(target_os = "macos"))]
+        let menu = [false; 5];
+        let reached_store = app.folder_store.take_refused();
+        let (cache, mirror) = (
+            app.folder_store.get(&photo),
+            app.ratings.get(&photo).copied(),
+        );
+
+        drop(other);
+        app.handle_key(winit::keyboard::KeyCode::Digit5);
+        let still = app.folder_store.get(&photo);
+        load_folder(&mut app, &dir);
+        app.select_single(0);
+        let reopened = app.folder_store.read_only();
+        app.handle_key(winit::keyboard::KeyCode::Digit2);
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(10));
+        let saved = crate::sidecar::read_record(&photo).unwrap().rating;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let me = std::process::id();
+        assert_eq!(by, Some(HeldBy::Mcp(me)));
+        assert!(
+            banner.contains("lightphotos-mcp") && banner.contains(&me.to_string()),
+            "{banner}"
+        );
+        assert_eq!(state["read_only"], serde_json::json!(banner));
+        assert_eq!(by_key.as_deref(), Some(banner.as_str()), "a key says why");
+        assert_eq!(armed, None, "no edit tool arms");
+        assert!(
+            matches!(&rated, Err(crate::command::CommandError::Failed { reason }) if *reason == banner),
+            "{rated:?}"
+        );
+        assert!(undone.is_err(), "undo is turned away too: {undone:?}");
+        assert_eq!(menu, [false; 5], "the menu items that edit are off");
+        assert!(reached_store.is_empty(), "nothing reached the folder store");
+        assert_eq!((cache, mirror), (None, None), "nothing changed");
+        assert_eq!(still, None, "read-only for the whole visit");
+        assert_eq!(reopened, None, "opening it again takes the lock");
+        assert_eq!(saved, Some(2));
+    }
+
+    /// Delete on a selected mask is a tool key, handled before the keys
+    /// most edits use; a read-only folder still turns it away.
+    #[test]
+    fn a_read_only_folder_keeps_a_selected_mask_on_delete() {
+        use crate::app::test_support::load_folder;
+        use crate::develop::{DetectTarget, Mask};
+        use crate::sidecar::{FolderLock, Writer};
+        let (dir, photo) = one_photo("lock-mask");
+        let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir);
+        app.select_single(0);
+        app.enter_loupe();
+        app.shown = crate::app::Shown::Preview(photo.clone(), 1024, 1024);
+        app.develop_open = true;
+        app.develop_tab = crate::app::DevelopTab::Masks;
+        app.masks
+            .insert(photo.clone(), vec![Mask::detected(DetectTarget::Sky)]);
+        app.mask_selected = Some(0);
+        app.handle_key(winit::keyboard::KeyCode::Delete);
+        app.handle_key(winit::keyboard::KeyCode::Backspace);
+        let left = app.masks.get(&photo).map_or(0, Vec::len);
+        let undo = app.history.can_undo();
+        drop(other);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(left, 1, "the mask stays");
+        assert!(!undo, "and no undo step was recorded");
+    }
+
     #[test]
     fn the_catalogs_folders_that_are_not_there_are_marked_missing() {
         let here = temp_folder("roots-here");

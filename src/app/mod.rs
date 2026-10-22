@@ -1524,7 +1524,16 @@ impl App {
     }
 
     fn apply_ui_actions(&mut self, actions: Vec<ui::UiAction>) {
+        // The edit controls are off in a read-only folder; this turns away
+        // anything that still gets through, and says why once.
+        let mut refused = false;
         for action in actions {
+            if action.edits_folder() && self.read_only() {
+                if !std::mem::replace(&mut refused, true) {
+                    self.refuse_if_read_only();
+                }
+                continue;
+            }
             match action {
                 ui::UiAction::GroupAllBursts => self.group_all_bursts(),
                 ui::UiAction::GroupSelectedBursts => self.group_bursts(),

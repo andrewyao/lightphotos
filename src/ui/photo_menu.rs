@@ -93,81 +93,83 @@ fn photo_menu(ui: &mut egui::Ui, app: &App, cell: Option<usize>, out: &mut Frame
         ui.separator();
     }
 
-    let (lo, hi) = app.selection_rating_span();
-    ui.menu_button(m.rate, |ui| {
-        for stars in 0..=5u8 {
-            let label = if stars == 0 {
-                m.no_rating.to_string()
-            } else {
-                "\u{2605}".repeat(stars as usize)
-            };
+    super::editable(ui, app, |ui| {
+        let (lo, hi) = app.selection_rating_span();
+        ui.menu_button(m.rate, |ui| {
+            for stars in 0..=5u8 {
+                let label = if stars == 0 {
+                    m.no_rating.to_string()
+                } else {
+                    "\u{2605}".repeat(stars as usize)
+                };
+                if ui
+                    .selectable_label(lo == stars && hi == stars, label)
+                    .clicked()
+                {
+                    out.actions.push(UiAction::SetRating(stars));
+                }
+            }
+        });
+        ui.menu_button(m.set_flag, |ui| {
+            let flags: [(Option<Flag>, &str); 3] = [
+                (Some(Flag::Pick), m.flag_picked),
+                (None, m.flag_unflagged),
+                (Some(Flag::Reject), m.flag_rejected),
+            ];
+            for (flag, label) in flags {
+                let all = app.selection_flag_coverage(flag) == FlagCoverage::All;
+                if ui.selectable_label(all, label).clicked() && !all {
+                    out.actions.push(UiAction::SetFlag(flag));
+                }
+            }
+        });
+        ui.menu_button(m.color_label, |ui| {
+            let labels = [
+                (ColorLabel::Red, m.label_red),
+                (ColorLabel::Yellow, m.label_yellow),
+                (ColorLabel::Green, m.label_green),
+                (ColorLabel::Blue, m.label_blue),
+            ];
+            let current = (n == 1).then(|| app.selected_label()).flatten();
+            for (label, name) in labels {
+                if ui.selectable_label(current == Some(label), name).clicked() {
+                    out.actions.push(UiAction::ToggleLabel(label));
+                }
+            }
+        });
+        ui.menu_button(m.group_selected, |ui| {
             if ui
-                .selectable_label(lo == stars && hi == stars, label)
+                .add_enabled(app.group_available(), egui::Button::new(t.group_into_stack))
                 .clicked()
             {
-                out.actions.push(UiAction::SetRating(stars));
+                out.actions.push(UiAction::GroupSelected);
             }
-        }
-    });
-    ui.menu_button(m.set_flag, |ui| {
-        let flags: [(Option<Flag>, &str); 3] = [
-            (Some(Flag::Pick), m.flag_picked),
-            (None, m.flag_unflagged),
-            (Some(Flag::Reject), m.flag_rejected),
-        ];
-        for (flag, label) in flags {
-            let all = app.selection_flag_coverage(flag) == FlagCoverage::All;
-            if ui.selectable_label(all, label).clicked() && !all {
-                out.actions.push(UiAction::SetFlag(flag));
+            if n >= 2
+                && app.group_bursts_available()
+                && ui
+                    .button(m.group_bursts)
+                    .on_hover_text(t.group_selected_bursts_tip)
+                    .clicked()
+            {
+                out.actions.push(UiAction::GroupSelectedBursts);
             }
-        }
-    });
-    ui.menu_button(m.color_label, |ui| {
-        let labels = [
-            (ColorLabel::Red, m.label_red),
-            (ColorLabel::Yellow, m.label_yellow),
-            (ColorLabel::Green, m.label_green),
-            (ColorLabel::Blue, m.label_blue),
-        ];
-        let current = (n == 1).then(|| app.selected_label()).flatten();
-        for (label, name) in labels {
-            if ui.selectable_label(current == Some(label), name).clicked() {
-                out.actions.push(UiAction::ToggleLabel(label));
-            }
-        }
-    });
-    ui.menu_button(m.group_selected, |ui| {
-        if ui
-            .add_enabled(app.group_available(), egui::Button::new(t.group_into_stack))
-            .clicked()
-        {
-            out.actions.push(UiAction::GroupSelected);
-        }
-        if n >= 2
-            && app.group_bursts_available()
-            && ui
-                .button(m.group_bursts)
-                .on_hover_text(t.group_selected_bursts_tip)
+            let has_stack = app.selection_has_group();
+            if ui
+                .add_enabled(has_stack, egui::Button::new(m.ungroup))
                 .clicked()
-        {
-            out.actions.push(UiAction::GroupSelectedBursts);
-        }
-        let has_stack = app.selection_has_group();
-        if ui
-            .add_enabled(has_stack, egui::Button::new(m.ungroup))
-            .clicked()
-        {
-            out.actions.push(UiAction::RemoveGroups);
-        }
-        if ui
-            .add_enabled(
-                has_stack && app.delete_available(),
-                egui::Button::new(m.delete_group),
-            )
-            .clicked()
-        {
-            out.actions.push(UiAction::RequestDeleteStack);
-        }
+            {
+                out.actions.push(UiAction::RemoveGroups);
+            }
+            if ui
+                .add_enabled(
+                    has_stack && app.delete_available(),
+                    egui::Button::new(m.delete_group),
+                )
+                .clicked()
+            {
+                out.actions.push(UiAction::RequestDeleteStack);
+            }
+        });
     });
     ui.separator();
 
@@ -183,39 +185,40 @@ fn photo_menu(ui: &mut egui::Ui, app: &App, cell: Option<usize>, out: &mut Frame
     {
         out.actions.push(UiAction::CopySettings);
     }
-    if ui
-        .add_enabled(
-            app.has_copied_settings(),
-            egui::Button::new(m.paste_settings),
-        )
-        .clicked()
-    {
-        out.actions
-            .push(UiAction::RequestBulk(BulkKind::ApplySettings));
-    }
-    // Reset clears the shown photo's edits, which only the Loupe has.
-    if loupe && ui.button(t.reset_adjustments).clicked() {
-        out.actions.push(UiAction::ResetAllEdits);
-    }
-    if ui.button(m.auto_tone).clicked() {
-        out.actions.push(UiAction::RequestBulk(BulkKind::AutoTone));
-    }
-    if app.scoring_available() && ui.button(m.score_photos).clicked() {
-        out.actions.push(UiAction::ScoreSelection);
-    }
-    ui.separator();
-
-    // Rotation turns the shown photo, so it waits for the Loupe.
-    if loupe {
-        if ui.button(m.rotate_left).clicked() {
-            out.actions.push(UiAction::Rotate(false));
+    super::editable(ui, app, |ui| {
+        if ui
+            .add_enabled(
+                app.has_copied_settings(),
+                egui::Button::new(m.paste_settings),
+            )
+            .clicked()
+        {
+            out.actions
+                .push(UiAction::RequestBulk(BulkKind::ApplySettings));
         }
-        if ui.button(m.rotate_right).clicked() {
-            out.actions.push(UiAction::Rotate(true));
+        // Reset clears the shown photo's edits, which only the Loupe has.
+        if loupe && ui.button(t.reset_adjustments).clicked() {
+            out.actions.push(UiAction::ResetAllEdits);
+        }
+        if ui.button(m.auto_tone).clicked() {
+            out.actions.push(UiAction::RequestBulk(BulkKind::AutoTone));
+        }
+        if app.scoring_available() && ui.button(m.score_photos).clicked() {
+            out.actions.push(UiAction::ScoreSelection);
         }
         ui.separator();
-    }
 
+        // Rotation turns the shown photo, so it waits for the Loupe.
+        if loupe {
+            if ui.button(m.rotate_left).clicked() {
+                out.actions.push(UiAction::Rotate(false));
+            }
+            if ui.button(m.rotate_right).clicked() {
+                out.actions.push(UiAction::Rotate(true));
+            }
+            ui.separator();
+        }
+    });
     if ui.button(m.export).clicked() {
         out.actions.push(UiAction::ToggleExportForm);
     }
@@ -223,7 +226,10 @@ fn photo_menu(ui: &mut egui::Ui, app: &App, cell: Option<usize>, out: &mut Frame
 
     let danger = super::theme::colors(ui.ctx()).danger;
     let delete = egui::Button::new(egui::RichText::new(t.delete).color(danger));
-    if ui.add_enabled(app.delete_available(), delete).clicked() {
+    if ui
+        .add_enabled(app.delete_available() && !app.read_only(), delete)
+        .clicked()
+    {
         out.actions.push(UiAction::RequestBulk(BulkKind::Delete));
     }
 }
