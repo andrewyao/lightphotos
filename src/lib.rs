@@ -17,6 +17,8 @@
 
 pub mod base64;
 pub mod command;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod control_auth;
 pub mod decode;
 pub mod develop;
 pub mod export;

@@ -2230,6 +2230,7 @@ dependencies = [
  "rawler",
  "rayon",
  "rfd",
+ "ring",
  "security-framework",
  "serde",
  "serde_json",

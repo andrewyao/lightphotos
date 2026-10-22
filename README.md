@@ -93,16 +93,26 @@ Three processes run, because lightphotos emits only half the picture by itself. 
 # [control] listening on 127.0.0.1:52113 token 3f9c…
 ```
 
-Set `LIGHTPHOTOS_CONTROL_TOKEN` (16 characters or more) to choose the token. The app then doesn't print it. Send one JSON object per line on a TCP connection. Each request gets one JSON line back:
+Set `LIGHTPHOTOS_CONTROL_TOKEN` (16 characters or more) to choose the token. The app then doesn't print it. Send one JSON object per line on a TCP connection. Each request gets one JSON line back.
+
+A connection signs in first. The token itself never goes over the socket, so a program that took the port before the app learns nothing it can use. Send `{"op": "hello"}`. The reply holds a fresh `nonce` (64 hex characters). Send back the HMAC-SHA256 of `lightphotos-control:<nonce>`, keyed by the token, as lowercase hex:
+
+```sh
+mac=$(printf 'lightphotos-control:%s' "$nonce" | openssl dgst -sha256 -hmac "$TOKEN" | awk '{print $NF}')
+```
 
 ```json
-{"token": "…", "op": "run", "command": {"id": "photo.rate", "params": {"stars": 3}}}
-{"token": "…", "op": "commands"}
-{"token": "…", "op": "state"}
-{"token": "…", "op": "list"}
-{"token": "…", "op": "wait", "timeout_ms": 10000}
-{"token": "…", "op": "screenshot"}
+{"op": "hello"}
+{"op": "auth", "mac": "…"}
+{"op": "run", "command": {"id": "photo.rate", "params": {"stars": 3}}}
+{"op": "commands"}
+{"op": "state"}
+{"op": "list"}
+{"op": "wait", "timeout_ms": 10000}
+{"op": "screenshot"}
 ```
+
+Each nonce answers one `auth`, right or wrong. A wrong `mac` gets `bad_token`; send `hello` again to retry. A request before the sign-in gets `auth_required`. A request that carries a `token`, as clients before the sign-in did, gets `raw_token_refused` with a message to update the client.
 
 - `run` runs one command. `commands` lists every command id with an example, and every develop control with its range and current value.
 - `state` returns the view, the selection, and the current photo's rating, flag and label.
@@ -110,7 +120,7 @@ Set `LIGHTPHOTOS_CONTROL_TOKEN` (16 characters or more) to choose the token. The
 - `wait` returns the state when decodes, sidecar writes, batches and animations are done, or a `timeout` error. The default is 10 s and the limit is 60 s.
 - `screenshot` returns the window as a PNG: `{"png_base64", "width", "height"}`.
 
-A reply is `{"ok": true, "result": …}` or `{"ok": false, "error": {"error": "<code>", …}, "message": "…"}`. The codes are the command errors and `bad_json`, `bad_token`, `unknown_op`, `too_long`, `too_many_connections`, `idle_timeout`, `timeout`, `app_closed` and `failed`. A bad line gets an error and the connection stays open. A line over 1 MiB closes the connection. A connection that sends nothing for 60 s gets an `idle_timeout` error and closes. The app accepts 4 connections at a time. When the app closes a connection, open a new one to send more requests.
+A reply is `{"ok": true, "result": …}` or `{"ok": false, "error": {"error": "<code>", …}, "message": "…"}`. The codes are the command errors and `bad_json`, `bad_token`, `auth_required`, `raw_token_refused`, `unknown_op`, `too_long`, `too_many_connections`, `idle_timeout`, `timeout`, `app_closed` and `failed`. A bad line gets an error and the connection stays open. A line over 1 MiB closes the connection. A connection that sends nothing for 60 s gets an `idle_timeout` error and closes. The app accepts 4 connections at a time. When the app closes a connection, open a new one to send more requests.
 
 ### Agent control (MCP)
 
@@ -122,7 +132,7 @@ Headless, it works on one folder with no app open. Commands marked `headless` (r
 claude mcp add lightphotos -- /path/to/lightphotos-mcp --folder ~/Pictures/shoot
 ```
 
-Attached, it drives a running app through the control channel, and `screenshot` returns the window. Start the app and the server with the same token. The token goes in `LIGHTPHOTOS_CONTROL_TOKEN`, not on the command line, where `ps` shows it to every user:
+Attached, it drives a running app through the control channel, and `screenshot` returns the window. Start the app and the server with the same token; the server signs in with it and never sends it. The app and the server must be the same version: an older server gets `raw_token_refused` from a newer app, and a newer server says the app is older. The token goes in `LIGHTPHOTOS_CONTROL_TOKEN`, not on the command line, where `ps` shows it to every user:
 
 ```sh
 LIGHTPHOTOS_CONTROL_TOKEN=<32 hex characters> ./target/release/lightphotos --control 7777 ~/Pictures/shoot

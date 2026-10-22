@@ -112,15 +112,30 @@ impl From<ChannelError> for Failure {
 // Most variants are about TCP lines and connections, which the browser has none of.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) enum ChannelError {
-    BadJson { reason: String },
+    BadJson {
+        reason: String,
+    },
+    /// A wrong `mac` in `auth`.
     BadToken,
-    UnknownOp { op: String },
-    TooLong { limit: usize },
-    TooManyConnections { limit: usize },
+    /// A request before the connection signed in.
+    AuthRequired,
+    /// A request with a `token`, as clients before the sign-in sent.
+    RawTokenRefused,
+    UnknownOp {
+        op: String,
+    },
+    TooLong {
+        limit: usize,
+    },
+    TooManyConnections {
+        limit: usize,
+    },
     IdleTimeout,
     Timeout,
     AppClosed,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ChannelError {
@@ -128,14 +143,24 @@ impl std::fmt::Display for ChannelError {
         match self {
             ChannelError::BadJson { reason } => write!(
                 f,
-                "not a request: {reason}; send one JSON object per line with `token` and `op`"
+                "not a request: {reason}; send one JSON object per line with an `op`"
             ),
-            ChannelError::BadToken => {
-                f.write_str("wrong or missing `token`; use the one the app printed at startup")
-            }
+            ChannelError::BadToken => f.write_str(
+                "wrong `mac`: sign `lightphotos-control:<nonce>` with HMAC-SHA256 keyed by \
+                 the token the app printed at startup, then send `hello` again",
+            ),
+            ChannelError::AuthRequired => f.write_str(
+                "not signed in: send {\"op\":\"hello\"} for a nonce, then \
+                 {\"op\":\"auth\",\"mac\":\"…\"} with its HMAC-SHA256 keyed by the token",
+            ),
+            ChannelError::RawTokenRefused => f.write_str(
+                "this app no longer takes the token in a request, so nothing on the port can \
+                 learn it. Update lightphotos-mcp (or your client) to this app's version: it \
+                 signs in with `hello` and `auth`",
+            ),
             ChannelError::UnknownOp { op } => write!(
                 f,
-                "no op `{op}`; use run, commands, state, list, screenshot or wait"
+                "no op `{op}`; use hello, auth, run, commands, state, list, screenshot or wait"
             ),
             ChannelError::TooLong { limit } => {
                 write!(
