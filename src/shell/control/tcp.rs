@@ -27,7 +27,7 @@
 
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -48,6 +48,12 @@ const TOKEN_ENV: &str = "LIGHTPHOTOS_CONTROL_TOKEN";
 /// How long a connection may go without sending a line before it closes,
 /// so idle clients can't hold every slot.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a new connection has to sign in, so connections that never do
+/// can't hold every slot.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(5);
+/// The longest line before the sign-in. A `hello` or an `auth` is a few
+/// hundred bytes, so nothing larger is parsed for a stranger.
+const MAX_SIGN_IN_LINE: usize = 4 << 10;
 const MAX_WAIT: Duration = Duration::from_secs(60);
 
 /// Splits `--control <port>` out of the arguments. Returns the port, if the
@@ -76,9 +82,13 @@ pub(crate) fn split_args(
 /// the port, and the token when the app made it, to stderr.
 pub(crate) fn start(port: u16, proxy: EventLoopProxy<UserEvent>) -> Result<(), String> {
     let (token, generated) = token_from_env()?;
-    let port = listen(port, token.clone(), IDLE_TIMEOUT, move |request, reply| {
-        proxy.send_event(UserEvent::Control(request, reply)).is_ok()
-    })?;
+    let port = listen(
+        port,
+        token.clone(),
+        IDLE_TIMEOUT,
+        SIGN_IN_TIMEOUT,
+        move |request, reply| proxy.send_event(UserEvent::Control(request, reply)).is_ok(),
+    )?;
     eprintln!("{}", listening_line(port, &token, generated));
     Ok(())
 }
@@ -117,14 +127,19 @@ fn new_token() -> Result<String, String> {
     control_auth::random_hex::<16>().map_err(|e| format!("can't make a token: {e}"))
 }
 
-/// One connection's sign-in: the nonces of its last `hello`, and whether
-/// it has answered them.
+/// One connection's sign-in: its one `hello`'s nonces, and whether it
+/// has answered them.
 struct Session {
     token: Arc<str>,
     /// The client's nonce, then the app's.
     nonces: Option<(String, String)>,
-    signed_in: bool,
-    /// A wrong `mac` ends the connection, so each guess costs a new one.
+    said_hello: bool,
+    /// Shared with the connection's reader, which allows a signed-in
+    /// connection the idle timeout and any other only until `sign_in_by`.
+    signed_in: Arc<AtomicBool>,
+    sign_in_by: Instant,
+    /// A wrong `mac` or a second `hello` ends the connection, so each
+    /// guess costs a new one.
     closing: bool,
 }
 
@@ -133,15 +148,29 @@ impl Session {
         Session {
             token,
             nonces: None,
-            signed_in: false,
+            said_hello: false,
+            signed_in: Arc::new(AtomicBool::new(false)),
+            sign_in_by: Instant::now() + SIGN_IN_TIMEOUT,
             closing: false,
         }
     }
 
+    fn is_signed_in(&self) -> bool {
+        self.signed_in.load(Ordering::Acquire)
+    }
+
     /// Answers one line: a sign-in step here, a request on the main thread.
     fn answer(&mut self, line: &[u8], app: &impl Fn(Request, Reply) -> bool) -> Answer {
-        match parse_request(line)? {
+        match parse_request(line, self.is_signed_in())? {
+            Asked::Hello(_) if self.said_hello => {
+                self.closing = true;
+                Err(ChannelError::Failed {
+                    reason: "one `hello` per connection; open a new one to sign in again".into(),
+                }
+                .into())
+            }
             Asked::Hello(client) => {
+                self.said_hello = true;
                 let server = control_auth::new_nonce().map_err(|reason| ChannelError::Failed {
                     reason: format!("can't make a sign-in nonce: {reason}"),
                 })?;
@@ -152,16 +181,14 @@ impl Session {
             Asked::Auth(mac) => {
                 // The nonces answer once, right or wrong.
                 let (client, server) = self.nonces.take().ok_or(ChannelError::AuthRequired)?;
-                self.signed_in =
-                    control_auth::verify(&self.token, Side::Client, &client, &server, &mac);
-                if !self.signed_in {
+                if !control_auth::verify(&self.token, Side::Client, &client, &server, &mac) {
                     self.closing = true;
                     return Err(ChannelError::BadToken.into());
                 }
+                self.signed_in.store(true, Ordering::Release);
                 Ok(Payload::Json(json!({ "signed_in": true })))
             }
-            Asked::Op(op) if self.signed_in => ask(app, op),
-            Asked::Op(_) => Err(ChannelError::AuthRequired.into()),
+            Asked::Op(op) => ask(app, op),
         }
     }
 }
@@ -170,7 +197,13 @@ impl Session {
 /// own, closing one that sends nothing for `idle`. Returns the bound port.
 /// `app` hands a request to the main thread and returns false once the app
 /// is gone.
-fn listen<A>(port: u16, token: String, idle: Duration, app: A) -> Result<u16, String>
+fn listen<A>(
+    port: u16,
+    token: String,
+    idle: Duration,
+    sign_in: Duration,
+    app: A,
+) -> Result<u16, String>
 where
     A: Fn(Request, Reply) -> bool + Clone + Send + 'static,
 {
@@ -184,7 +217,7 @@ where
         .spawn(move || {
             for stream in listener.incoming() {
                 match stream {
-                    Ok(stream) => accept(stream, &token, &open, idle, app.clone()),
+                    Ok(stream) => accept(stream, &token, &open, (idle, sign_in), app.clone()),
                     // Out of file descriptors, say. Don't spin on it.
                     Err(_) => std::thread::sleep(Duration::from_millis(50)),
                 }
@@ -198,7 +231,7 @@ fn accept<A>(
     mut stream: TcpStream,
     token: &Arc<str>,
     open: &Arc<AtomicUsize>,
-    idle: Duration,
+    (idle, sign_in): (Duration, Duration),
     app: A,
 ) where
     A: Fn(Request, Reply) -> bool + Send + 'static,
@@ -211,20 +244,54 @@ fn accept<A>(
         return;
     };
     let _ = stream.set_nodelay(true);
-    if stream.set_read_timeout(Some(idle)).is_err() {
-        return;
-    }
-    let Ok(reader) = stream.try_clone().map(BufReader::new) else {
+    let mut session = Session {
+        sign_in_by: Instant::now() + sign_in,
+        ..Session::new(Arc::clone(token))
+    };
+    let Ok(read_half) = stream.try_clone() else {
         return;
     };
-    let token = Arc::clone(token);
+    let reader = BufReader::new(ConnReader {
+        stream: read_half,
+        idle,
+        sign_in_by: session.sign_in_by,
+        signed_in: Arc::clone(&session.signed_in),
+    });
     // A failed spawn drops the closure, and with it the slot.
     let _ = std::thread::Builder::new()
         .name("control-conn".into())
         .spawn(move || {
             let _slot = slot;
-            serve(reader, stream, &mut Session::new(token), &app);
+            serve(reader, stream, &mut session, &app);
         });
+}
+
+/// A connection's reads: until it signs in they end by its sign-in
+/// deadline, after that each may wait the idle timeout.
+struct ConnReader {
+    stream: TcpStream,
+    idle: Duration,
+    sign_in_by: Instant,
+    signed_in: Arc<AtomicBool>,
+}
+
+impl Read for ConnReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let timeout = if self.signed_in.load(Ordering::Acquire) {
+            self.idle
+        } else {
+            let left = self.sign_in_by.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(std::io::Error::new(
+                    ErrorKind::TimedOut,
+                    "no sign-in in time",
+                ));
+            }
+            left.min(self.idle)
+        };
+        self.stream.set_read_timeout(Some(timeout))?;
+        self.stream.read(buf)
+    }
 }
 
 /// One open connection, counted against `MAX_CONNECTIONS` until dropped.
@@ -254,15 +321,24 @@ fn serve(
     app: &impl Fn(Request, Reply) -> bool,
 ) {
     loop {
-        let line = match read_line(&mut reader) {
+        let limit = match session.is_signed_in() {
+            true => MAX_LINE,
+            false => MAX_SIGN_IN_LINE,
+        };
+        let line = match read_line(&mut reader, limit) {
             Ok(Line::Text(line)) => line,
             Ok(Line::TooLong) => {
-                let too_long = ChannelError::TooLong { limit: MAX_LINE };
+                let too_long = ChannelError::TooLong { limit };
                 let _ = write_reply(&mut writer, Err(too_long.into()));
                 return;
             }
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                let _ = write_reply(&mut writer, Err(ChannelError::IdleTimeout.into()));
+                let late = !session.is_signed_in() && Instant::now() >= session.sign_in_by;
+                let why = match late {
+                    true => ChannelError::SignInTimeout,
+                    false => ChannelError::IdleTimeout,
+                };
+                let _ = write_reply(&mut writer, Err(why.into()));
                 return;
             }
             Ok(Line::End) | Err(_) => return,
@@ -283,15 +359,13 @@ enum Line {
     End,
 }
 
-/// Reads one line of at most `MAX_LINE` bytes, never buffering more.
-fn read_line(reader: &mut impl BufRead) -> std::io::Result<Line> {
+/// Reads one line of at most `max` bytes, never buffering more.
+fn read_line(reader: &mut impl BufRead, max: usize) -> std::io::Result<Line> {
     let mut line = Vec::new();
-    let read = reader
-        .take(MAX_LINE as u64 + 1)
-        .read_until(b'\n', &mut line)?;
+    let read = reader.take(max as u64 + 1).read_until(b'\n', &mut line)?;
     Ok(if read == 0 {
         Line::End
-    } else if line.len() > MAX_LINE && line.last() != Some(&b'\n') {
+    } else if line.len() > max && line.last() != Some(&b'\n') {
         Line::TooLong
     } else {
         Line::Text(line)
@@ -308,8 +382,9 @@ enum Asked {
     Op(Op),
 }
 
-/// Parses one request line.
-fn parse_request(line: &[u8]) -> Result<Asked, Failure> {
+/// Parses one request line. Before the sign-in only `hello` and `auth` are
+/// read; anything else is refused before its command is looked at.
+fn parse_request(line: &[u8], signed_in: bool) -> Result<Asked, Failure> {
     let bad = |reason: &str| ChannelError::BadJson {
         reason: reason.into(),
     };
@@ -342,6 +417,7 @@ fn parse_request(line: &[u8]) -> Result<Asked, Failure> {
                 .ok_or_else(|| bad("`auth` takes the nonce's MAC as a hex string `mac`"))?;
             return Ok(Asked::Auth(mac.into()));
         }
+        _ if !signed_in => return Err(ChannelError::AuthRequired.into()),
         _ => {}
     }
     Ok(Asked::Op(match op {
@@ -430,7 +506,7 @@ mod tests {
     }
 
     fn parse_op(line: &str) -> Result<Op, Failure> {
-        match parse_request(line.as_bytes())? {
+        match parse_request(line.as_bytes(), true)? {
             Asked::Op(op) => Ok(op),
             other => panic!("not an op: {other:?}"),
         }
@@ -438,10 +514,9 @@ mod tests {
 
     /// A connection that has already signed in.
     fn signed_in() -> Session {
-        Session {
-            signed_in: true,
-            ..Session::new(token())
-        }
+        let session = Session::new(token());
+        session.signed_in.store(true, Ordering::Release);
+        session
     }
 
     fn json_answer(answer: Answer) -> Result<Value, String> {
@@ -505,7 +580,7 @@ mod tests {
             format!(r#"{{"token":"{TOKEN}","op":"state"}}"#),
             r#"{"token":42,"op":"dance"}"#.to_string(),
         ] {
-            let failure = parse_request(line.as_bytes()).unwrap_err();
+            let failure = parse_request(line.as_bytes(), false).unwrap_err();
             assert_eq!(error_tag(&failure), "raw_token_refused", "{line}");
             assert!(
                 failure.message.contains("Update lightphotos-mcp"),
@@ -569,6 +644,9 @@ mod tests {
             "the nonces answer once"
         );
 
+        // A new connection: one `hello` each.
+        let mut session = Session::new(token());
+        let mut say = |line: &str| json_answer(session.answer(line.as_bytes(), &fake_app));
         let fresh = say(&hello(CLIENT)).unwrap()["nonce"]
             .as_str()
             .unwrap()
@@ -613,13 +691,19 @@ mod tests {
         at_cap.extend_from_slice(&vec![b'x'; MAX_LINE + 1]);
         let mut reader = Cursor::new(at_cap);
         assert!(
-            matches!(read_line(&mut reader).unwrap(), Line::Text(l) if l.len() == MAX_LINE + 1)
+            matches!(read_line(&mut reader, MAX_LINE).unwrap(), Line::Text(l) if l.len() == MAX_LINE + 1)
         );
-        assert!(matches!(read_line(&mut reader).unwrap(), Line::TooLong));
+        assert!(matches!(
+            read_line(&mut reader, MAX_LINE).unwrap(),
+            Line::TooLong
+        ));
 
         let mut short = Cursor::new(b"{}".to_vec());
-        assert!(matches!(read_line(&mut short).unwrap(), Line::Text(l) if l == b"{}"));
-        assert!(matches!(read_line(&mut short).unwrap(), Line::End));
+        assert!(matches!(read_line(&mut short, MAX_LINE).unwrap(), Line::Text(l) if l == b"{}"));
+        assert!(matches!(
+            read_line(&mut short, MAX_LINE).unwrap(),
+            Line::End
+        ));
     }
 
     /// Stands in for the main thread: answers each op on a thread of its own.
@@ -678,6 +762,86 @@ mod tests {
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["error"]["error"], "failed");
         assert_eq!(reply["message"], "edit.undo refused");
+    }
+
+    /// Replies to `input` on a connection that has not signed in.
+    fn unsigned_replies(input: &str) -> Vec<Value> {
+        let mut out = Vec::new();
+        serve(
+            Cursor::new(input.as_bytes().to_vec()),
+            &mut out,
+            &mut Session::new(token()),
+            &fake_app,
+        );
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn one_hello_per_connection() {
+        let replies = unsigned_replies(&format!(
+            "{}\n{}\n{}\n",
+            hello(CLIENT),
+            hello(CLIENT),
+            request("state")
+        ));
+        assert_eq!(
+            replies.len(),
+            2,
+            "nothing after the second hello: {replies:?}"
+        );
+        assert_eq!(replies[0]["ok"], true);
+        assert_eq!(replies[1]["ok"], false);
+    }
+
+    #[test]
+    fn before_the_sign_in_a_request_learns_nothing_about_commands() {
+        let replies = unsigned_replies(concat!(
+            r#"{"op":"run","command":{"id":"photo.zap"}}"#,
+            "\n",
+            r#"{"op":"run","command":{"id":"photo.rate","params":{"stars":9}}}"#,
+            "\n",
+            r#"{"op":"wait","timeout_ms":"soon"}"#,
+            "\n"
+        ));
+        let tags: Vec<&str> = replies
+            .iter()
+            .map(|r| r["error"]["error"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(tags, ["auth_required"; 3]);
+    }
+
+    #[test]
+    fn before_the_sign_in_a_long_line_is_too_long() {
+        let long = format!(
+            r#"{{"op":"hello","nonce":"00","pad":"{}"}}"#,
+            "x".repeat(8 << 10)
+        );
+        let replies = unsigned_replies(&format!("{long}\n"));
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert_eq!(replies[0]["error"]["error"], "too_long");
+    }
+
+    #[test]
+    fn a_connection_that_does_not_sign_in_soon_is_closed() {
+        let sign_in = Duration::from_millis(200);
+        let port = listen(0, TOKEN.into(), IDLE_TIMEOUT, sign_in, fake_app).unwrap();
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .unwrap();
+        let start = std::time::Instant::now();
+        let mut said = String::new();
+        let _ = stream.read_to_string(&mut said);
+        assert!(said.contains("sign_in_timeout"), "{said:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
@@ -768,7 +932,7 @@ mod tests {
     #[test]
     fn idle_connections_get_one_error_line_and_free_their_slots() {
         let idle = Duration::from_millis(100);
-        let port = listen(0, TOKEN.into(), idle, fake_app).unwrap();
+        let port = listen(0, TOKEN.into(), idle, SIGN_IN_TIMEOUT, fake_app).unwrap();
         let connect = || TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
         let held: Vec<TcpStream> = (0..MAX_CONNECTIONS).map(|_| connect()).collect();
         for mut stream in held {
@@ -789,7 +953,7 @@ mod tests {
 
     #[test]
     fn over_loopback_a_screenshot_decodes_and_extra_connections_are_refused() {
-        let port = listen(0, TOKEN.into(), IDLE_TIMEOUT, fake_app).unwrap();
+        let port = listen(0, TOKEN.into(), IDLE_TIMEOUT, SIGN_IN_TIMEOUT, fake_app).unwrap();
         let connect = || TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
 
         let mut first = connect();

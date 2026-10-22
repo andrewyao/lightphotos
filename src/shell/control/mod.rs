@@ -131,6 +131,8 @@ pub(crate) enum ChannelError {
         limit: usize,
     },
     IdleTimeout,
+    /// A connection that did not sign in within the time allowed.
+    SignInTimeout,
     Timeout,
     AppClosed,
     Failed {
@@ -174,6 +176,10 @@ impl std::fmt::Display for ChannelError {
             ),
             ChannelError::IdleTimeout => f.write_str(
                 "no request for a while; closing the connection, open a new one to go on",
+            ),
+            ChannelError::SignInTimeout => f.write_str(
+                "no sign-in in time; closing the connection, open a new one and send `hello` \
+                 at once",
             ),
             ChannelError::Timeout => f.write_str("timed out: the app is still busy"),
             ChannelError::AppClosed => f.write_str("the app is closing"),
