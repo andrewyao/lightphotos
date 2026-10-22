@@ -655,12 +655,13 @@ impl App {
         // On a screen that shows a fitted photo larger than its preview,
         // stepping would land on a soft preview, so prefetch the neighbors'
         // full decodes too. Only once the current photo's own full decode has
-        // landed, so they never compete with it. The native full cache holds
-        // the current photo plus both neighbors. The web build keeps one.
+        // landed, so they never compete with it, and only when the full tier
+        // holds all three, else each would evict the other and decode again.
+        // The web build keeps one.
         #[cfg(not(target_arch = "wasm32"))]
         let fulls = self.full_wanted_at_fit()
             && match (&self.want, self.loader.as_ref()) {
-                (Some(want), Some(loader)) => loader.get_full(want).is_some(),
+                (Some(want), Some(loader)) => loader.fulls_fit(want, 1 + paths.len()),
                 _ => false,
             };
         let full_running = match (&self.want, self.loader.as_ref()) {

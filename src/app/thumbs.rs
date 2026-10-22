@@ -33,7 +33,8 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         self.ensure_full_after_preview();
 
-        if let Some(loader) = &self.loader {
+        if let Some(loader) = &mut self.loader {
+            loader.touch(&want, target);
             if let Some(img) = loader.get_full(&want) {
                 let origin = loader.full_origin(&want);
                 if !self.shown.is_full_of(&want) {

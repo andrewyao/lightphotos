@@ -1232,6 +1232,7 @@ impl App {
     fn seed_mirrors(&mut self, playlist: &Playlist) {
         self.finish_folder_jobs();
         if self.playlist.as_ref().map(Playlist::dir) != Some(playlist.dir()) {
+            self.forget_loupe_decodes();
             self.expanded_stacks.clear();
             self.thumb_aspect.clear();
             // Read from the files, which may change while the user is away.
@@ -1241,6 +1242,13 @@ impl App {
         }
         self.adopt_signal_cache(playlist);
         self.request_folder_store_load(playlist.dir());
+    }
+
+    /// Drops the Loupe tiers' decodes, which another folder never shows.
+    fn forget_loupe_decodes(&mut self) {
+        if let Some(loader) = self.loader.as_mut() {
+            loader.forget_loupe_decodes();
+        }
     }
 
     /// Finish the jobs that write to the folder showing, before the folder store
