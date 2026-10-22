@@ -452,4 +452,22 @@ mod tests {
         );
         assert!(same.is_ok(), "{same:?}");
     }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_relative_path_the_user_opens_is_kept_absolute() {
+        let dir = photo_folder("agent-relative");
+        let cwd = std::env::current_dir().unwrap();
+        let ups = cwd.components().count().saturating_sub(1);
+        let mut rel = std::path::PathBuf::new();
+        for _ in 0..ups {
+            rel.push("..");
+        }
+        rel.push(dir.strip_prefix("/").unwrap());
+        let mut app = App::new(None);
+        app.open_from_user(rel);
+        let shown = app.folder_sel.clone().unwrap();
+        assert!(shown.is_absolute(), "{}", shown.display());
+        assert!(app.catalog.folders().iter().all(|f| f.is_absolute()));
+    }
 }
