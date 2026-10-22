@@ -152,6 +152,77 @@ pub struct BaseLayer {
     cells: Vec<BaseTexel>,
 }
 
+/// Each cell's sum of `pre(x, y)` over its texels, weighted by overlap, a
+/// band of `band_cells` cell rows at a time on any thread. Each band sums
+/// its texel rows top to bottom, the order base.wgsl adds them in, so every
+/// cell gets the same f32 sum whatever the bands. A texel row a band edge
+/// splits is read by both bands.
+fn cell_sums(
+    grid: Grid,
+    w: u32,
+    h: u32,
+    pre: &(impl Fn(u32, u32) -> [f32; 3] + Sync),
+    band_cells: u64,
+) -> Vec<[f32; 3]> {
+    let (gw, gh) = (grid.w as usize, grid.h as usize);
+    let (w64, h64, gw64, gh64) = (w as u64, h as u64, grid.w as u64, grid.h as u64);
+    // Each cell's texels along x and their overlap weights, the same for
+    // every row.
+    let columns: Vec<Vec<(usize, f32)>> = (0..gw64)
+        .map(|i| {
+            let (x0, x1) = cell_span(i, gw64, w64);
+            (x0..x1)
+                .map(|x| (x as usize, overlap(x, i, gw64, w64) as f32))
+                .collect()
+        })
+        .collect();
+    let mut sums = vec![[0f32; 3]; gw * gh];
+    // One texel row and its per-cell sums, per thread.
+    let scratch = || (vec![[0f32; 3]; w as usize], vec![[0f32; 3]; gw]);
+    let pixels = (w as usize).saturating_mul(h as usize);
+    let chunk_len = gw.saturating_mul(band_cells as usize);
+    super::parallel::for_each_chunk(
+        &mut sums,
+        chunk_len,
+        pixels,
+        scratch,
+        |(row, row_sums), band, cells| {
+            let j_first = band as u64 * band_cells;
+            let j_end = j_first + (cells.len() / gw) as u64;
+            let y_first = cell_span(j_first, gh64, h64).0;
+            let y_end = cell_span(j_end - 1, gh64, h64).1;
+            for y64 in y_first..y_end {
+                let y = y64 as u32;
+                for (x, px) in row.iter_mut().enumerate() {
+                    *px = pre(x as u32, y);
+                }
+                for (column, rs) in columns.iter().zip(row_sums.iter_mut()) {
+                    *rs = [0.0; 3];
+                    for &(x, ox) in column {
+                        let p = row[x];
+                        for c in 0..3 {
+                            rs[c] += ox * p[c];
+                        }
+                    }
+                }
+                // The cell rows this texel row overlaps, within the band.
+                let j0 = (y64 * gh64 / h64).max(j_first);
+                let j1 = (((y64 + 1) * gh64 - 1) / h64).min(j_end - 1);
+                for j in j0..=j1 {
+                    let oy = overlap(y64, j, gh64, h64) as f32;
+                    let at = (j - j_first) as usize * gw;
+                    for (cell, rs) in cells[at..at + gw].iter_mut().zip(row_sums.iter()) {
+                        for c in 0..3 {
+                            cell[c] += oy * rs[c];
+                        }
+                    }
+                }
+            }
+        },
+    );
+    sums
+}
+
 /// The texels `[first, end)` along one axis that cell `i` of `cells` covers
 /// over `size` texels, and each one's overlap with the cell in units of
 /// `1 / cells` texel. A cell's overlaps sum to `size`. Must match
@@ -197,66 +268,11 @@ impl BaseLayer {
         pre: impl Fn(u32, u32) -> [f32; 3] + Sync,
     ) -> Option<BaseLayer> {
         let (gw, gh) = (grid.w as usize, grid.h as usize);
-        let (w64, h64, gw64, gh64) = (w as u64, h as u64, grid.w as u64, grid.h as u64);
-        // Each cell's texels along x and their overlap weights, the same for
-        // every row.
-        let columns: Vec<Vec<(usize, f32)>> = (0..gw64)
-            .map(|i| {
-                let (x0, x1) = cell_span(i, gw64, w64);
-                (x0..x1)
-                    .map(|x| (x as usize, overlap(x, i, gw64, w64) as f32))
-                    .collect()
-            })
-            .collect();
-
-        // A band of cell rows at a time, on any thread. Each band sums its
-        // texel rows top to bottom, the order base.wgsl adds them in, so
-        // every cell gets the same f32 sum as a single pass. A band covers
-        // at least `BAND_TEXEL_ROWS` texel rows, so only the one texel row a
-        // band edge may split is read twice, however dense the grid.
-        let band_cells = (BAND_TEXEL_ROWS * gh64).div_ceil(h64).max(1);
-        let mut sums = vec![[0f32; 3]; gw * gh];
-        let threads = w as usize * h as usize >= super::parallel::THREADS_FROM_PX;
-        super::parallel::for_each_chunk(
-            threads,
-            &mut sums,
-            gw * band_cells as usize,
-            |band, cells| {
-                let j_first = band as u64 * band_cells;
-                let j_end = j_first + (cells.len() / gw) as u64;
-                let mut row = vec![[0f32; 3]; w as usize];
-                let mut row_sums = vec![[0f32; 3]; gw];
-                let y_first = cell_span(j_first, gh64, h64).0;
-                let y_end = cell_span(j_end - 1, gh64, h64).1;
-                for y64 in y_first..y_end {
-                    let y = y64 as u32;
-                    for (x, px) in row.iter_mut().enumerate() {
-                        *px = pre(x as u32, y);
-                    }
-                    for (column, rs) in columns.iter().zip(row_sums.iter_mut()) {
-                        *rs = [0.0; 3];
-                        for &(x, ox) in column {
-                            let p = row[x];
-                            for c in 0..3 {
-                                rs[c] += ox * p[c];
-                            }
-                        }
-                    }
-                    // The cell rows this texel row overlaps, within the band.
-                    let j0 = (y64 * gh64 / h64).max(j_first);
-                    let j1 = (((y64 + 1) * gh64 - 1) / h64).min(j_end - 1);
-                    for j in j0..=j1 {
-                        let oy = overlap(y64, j, gh64, h64) as f32;
-                        let at = (j - j_first) as usize * gw;
-                        for (cell, rs) in cells[at..at + gw].iter_mut().zip(&row_sums) {
-                            for c in 0..3 {
-                                cell[c] += oy * rs[c];
-                            }
-                        }
-                    }
-                }
-            },
-        );
+        // A band covers at least `BAND_TEXEL_ROWS` texel rows, so only the
+        // one texel row a band edge may split is read twice, however dense
+        // the grid.
+        let band_cells = (BAND_TEXEL_ROWS * grid.h as u64).div_ceil(h as u64).max(1);
+        let sums = cell_sums(grid, w, h, &pre, band_cells);
 
         let area = w as f32 * h as f32;
         let means = sums.iter().map(|s| s.map(|v| v / area));
@@ -454,6 +470,36 @@ mod tests {
     use super::*;
     use crate::develop::image_ops::fit_long_edge;
     use crate::develop::{srgb_decode, srgb_encode};
+
+    /// The banded, threaded sums are bit-identical to one band read top to
+    /// bottom on one thread, where cell rows split texel rows at band edges:
+    /// a base grid taller than its image, a fine grid of 1.2 texel rows a
+    /// cell, and a 2 MP frame big enough to run on helper threads.
+    #[test]
+    fn banded_cell_sums_match_one_band() {
+        let pre = |x: u32, y: u32| {
+            let n = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503);
+            [
+                (n % 251) as f32 / 251.0,
+                (n % 241) as f32 / 241.0,
+                (x + y) as f32 * 1e-3,
+            ]
+        };
+        for (w, h, fine) in [(300, 200, false), (1350, 900, true), (2000, 1000, false)] {
+            let grid = if fine {
+                Grid::fine(w, h)
+            } else {
+                Grid::for_image(w, h)
+            };
+            let grid = grid.expect("grid");
+            assert_ne!(h % grid.h, 0, "{w}x{h}: rows must split");
+            let one_band = cell_sums(grid, w, h, &pre, grid.h as u64);
+            for band_cells in [1, 3, 7, (32 * grid.h as u64).div_ceil(h as u64)] {
+                let banded = cell_sums(grid, w, h, &pre, band_cells);
+                assert!(banded == one_band, "{w}x{h}, {band_cells} cell rows a band");
+            }
+        }
+    }
 
     #[test]
     fn the_kernel_tables_are_their_gaussians() {

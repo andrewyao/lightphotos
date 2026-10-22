@@ -10,34 +10,20 @@ use std::sync::{Mutex, PoisonError};
 /// costs nothing next to its pixels.
 const BAND_ROWS: usize = 16;
 
-/// Call `row(y, out_row)` for every row of `out`, `row_len` elements each.
-/// Rows run in any order and on any thread, so `row` must depend only on
-/// `y`. The calling thread works too, so every row runs even when no other
-/// thread can start.
+/// Call `row(y, out_row)` for every row of `out`, `row_len` elements each,
+/// for a pass whose every pixel is costly (the bake, a RAW demosaic), so it
+/// takes helper threads at any size: at 1024 px with four bakes at once,
+/// running it on the calling thread alone doubled their wall time. Rows run
+/// in any order and on any thread, so `row` must depend only on `y`. The
+/// calling thread works too, so every row runs even when no other thread
+/// can start.
 pub fn for_each_row<T: Send>(out: &mut [T], row_len: usize, row: impl Fn(usize, &mut [T]) + Sync) {
-    for_each_row_on(true, out, row_len, row);
-}
-
-/// Below this many pixels a pass that is cheap next to the bake around it,
-/// such as building a layer, stays on the calling thread. The thumbnail
-/// and scoring bakes (512 and 1024 px) run 2-4 at once on their own
-/// workers, so helpers there only add thread starts; an export's full-size
-/// bake is well past it.
-pub const THREADS_FROM_PX: usize = 2_000_000;
-
-/// [`for_each_row`], on helper threads only when `threads`; otherwise every
-/// row runs here, in order.
-pub fn for_each_row_on<T: Send>(
-    threads: bool,
-    out: &mut [T],
-    row_len: usize,
-    row: impl Fn(usize, &mut [T]) + Sync,
-) {
-    for_each_chunk(
-        threads,
+    run_chunks(
         out,
         BAND_ROWS.saturating_mul(row_len),
-        |band, chunk| {
+        true,
+        || (),
+        |(), band, chunk| {
             for (i, out_row) in chunk.chunks_mut(row_len).enumerate() {
                 row(band * BAND_ROWS + i, out_row);
             }
@@ -45,33 +31,78 @@ pub fn for_each_row_on<T: Send>(
     );
 }
 
-/// Call `chunk(i, out_chunk)` for each `chunk_len`-element chunk of `out`,
-/// the last one possibly shorter, for a pass that sizes its own bands. The
-/// same rules as [`for_each_row`]: any order, any thread, and the calling
-/// thread works too. Without `threads` every chunk runs here, in order.
-pub fn for_each_chunk<T: Send>(
-    threads: bool,
+/// Below this many pixels a cheap pass runs on the calling thread, in order.
+/// The thumbnail and scoring bakes (512 and 1024 px) run 2-4 at once on
+/// their own workers, so helpers for their layer and copy passes only add
+/// thread starts; an export's full-size bake is well past it.
+pub const THREADS_FROM_PX: usize = 2_000_000;
+
+/// Call `chunk(scratch, i, out_chunk)` for each `chunk_len`-element chunk of
+/// `out`, the last one possibly shorter, for a cheap pass over `pixels`
+/// pixels that sizes its own bands: helper threads from
+/// [`THREADS_FROM_PX`] up, else every chunk here, in order. Otherwise the
+/// rules of [`for_each_row`]. Each thread makes one `scratch` with `init`
+/// and hands it to every chunk it runs.
+pub fn for_each_chunk<T: Send, S>(
     out: &mut [T],
     chunk_len: usize,
-    chunk: impl Fn(usize, &mut [T]) + Sync,
+    pixels: usize,
+    init: impl Fn() -> S + Sync,
+    chunk: impl Fn(&mut S, usize, &mut [T]) + Sync,
 ) {
-    if chunk_len == 0 {
+    run_chunks(out, chunk_len, pixels >= THREADS_FROM_PX, init, chunk);
+}
+
+/// [`for_each_row`] for a cheap pass over `pixels` pixels, threaded only
+/// from [`THREADS_FROM_PX`] up.
+pub fn for_each_light_row<T: Send>(
+    out: &mut [T],
+    row_len: usize,
+    pixels: usize,
+    row: impl Fn(usize, &mut [T]) + Sync,
+) {
+    for_each_chunk(
+        out,
+        BAND_ROWS.saturating_mul(row_len),
+        pixels,
+        || (),
+        |(), band, chunk| {
+            for (i, out_row) in chunk.chunks_mut(row_len).enumerate() {
+                row(band * BAND_ROWS + i, out_row);
+            }
+        },
+    );
+}
+
+fn run_chunks<T: Send, S>(
+    out: &mut [T],
+    chunk_len: usize,
+    threads: bool,
+    init: impl Fn() -> S + Sync,
+    chunk: impl Fn(&mut S, usize, &mut [T]) + Sync,
+) {
+    if chunk_len == 0 || out.is_empty() {
         return;
     }
     if !threads {
+        let mut scratch = init();
         for (i, out_chunk) in out.chunks_mut(chunk_len).enumerate() {
-            chunk(i, out_chunk);
+            chunk(&mut scratch, i, out_chunk);
         }
         return;
     }
     let chunks = out.len().div_ceil(chunk_len);
     let next = Mutex::new(out.chunks_mut(chunk_len).enumerate());
-    let work = || loop {
-        let taken = next.lock().unwrap_or_else(PoisonError::into_inner).next();
-        let Some((i, out_chunk)) = taken else {
+    let take = || next.lock().unwrap_or_else(PoisonError::into_inner).next();
+    let work = || {
+        let Some((i, out_chunk)) = take() else {
             return;
         };
-        chunk(i, out_chunk);
+        let mut scratch = init();
+        chunk(&mut scratch, i, out_chunk);
+        while let Some((i, out_chunk)) = take() {
+            chunk(&mut scratch, i, out_chunk);
+        }
     };
     run_with_helpers(chunks.saturating_sub(1), &work);
 }
@@ -162,29 +193,65 @@ mod tests {
     }
 
     #[test]
-    fn every_chunk_runs_once_with_its_own_index_and_the_last_is_short() {
-        let mut out = vec![usize::MAX; 10];
-        for_each_chunk(true, &mut out, 4, |i, chunk| {
-            assert_eq!(chunk.len(), if i == 2 { 2 } else { 4 });
-            for (k, v) in chunk.iter_mut().enumerate() {
-                assert_eq!(*v, usize::MAX, "chunk {i} written twice");
-                *v = i * 4 + k;
-            }
-        });
-        assert!(out.iter().enumerate().all(|(i, &v)| i == v));
+    fn every_light_row_runs_once_with_its_own_index() {
+        for pixels in [0, THREADS_FROM_PX] {
+            let mut out = vec![usize::MAX; 1000 * 5];
+            for_each_light_row(&mut out, 5, pixels, |y, out_row| {
+                for (x, v) in out_row.iter_mut().enumerate() {
+                    assert_eq!(*v, usize::MAX, "row {y} written twice");
+                    *v = y * 5 + x;
+                }
+            });
+            assert!(out.iter().enumerate().all(|(i, &v)| i == v));
+        }
     }
 
     #[test]
-    fn without_threads_every_chunk_runs_here_in_order() {
+    fn every_chunk_runs_once_with_its_own_index_and_the_last_is_short() {
+        for pixels in [0, THREADS_FROM_PX] {
+            let mut out = vec![usize::MAX; 10];
+            for_each_chunk(
+                &mut out,
+                4,
+                pixels,
+                || (),
+                |(), i, chunk| {
+                    assert_eq!(chunk.len(), if i == 2 { 2 } else { 4 });
+                    for (k, v) in chunk.iter_mut().enumerate() {
+                        assert_eq!(*v, usize::MAX, "chunk {i} written twice");
+                        *v = i * 4 + k;
+                    }
+                },
+            );
+            assert!(out.iter().enumerate().all(|(i, &v)| i == v));
+        }
+    }
+
+    #[test]
+    fn a_small_pass_runs_here_in_order_with_one_scratch() {
         let here = std::thread::current().id();
-        let seen = Mutex::new(Vec::new());
+        let (seen, made) = (Mutex::new(Vec::new()), Mutex::new(0));
         let mut out = vec![0u8; 100];
-        for_each_chunk(false, &mut out, 3, |i, _| {
+        let init = || *made.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        for_each_chunk(&mut out, 3, THREADS_FROM_PX - 1, init, |(), i, _| {
             assert_eq!(std::thread::current().id(), here);
             seen.lock().unwrap_or_else(PoisonError::into_inner).push(i);
         });
         let seen = seen.into_inner().unwrap_or_else(PoisonError::into_inner);
         assert_eq!(seen, (0..34).collect::<Vec<_>>());
+        assert_eq!(made.into_inner().unwrap_or_else(PoisonError::into_inner), 1);
+    }
+
+    #[test]
+    fn a_threaded_pass_makes_a_scratch_per_thread_not_per_chunk() {
+        let made = Mutex::new(0usize);
+        let mut out = vec![0u8; 10_000];
+        let init = || *made.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        for_each_chunk(&mut out, 1, THREADS_FROM_PX, init, |(), _, c| c[0] = 1);
+        assert!(out.iter().all(|&v| v == 1));
+        let made = made.into_inner().unwrap_or_else(PoisonError::into_inner);
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        assert!((1..=cores).contains(&made), "{made} scratches");
     }
 
     #[test]
