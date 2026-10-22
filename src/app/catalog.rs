@@ -252,7 +252,7 @@ impl App {
         }
     }
 
-    fn open_catalog_ref(&mut self, at: CatalogRef) -> Result<(), String> {
+    pub(super) fn open_catalog_ref(&mut self, at: CatalogRef) -> Result<(), String> {
         let catalog = Catalog::open(at).map_err(|e| e.to_string())?;
         self.switch_catalog(catalog);
         Ok(())
@@ -298,12 +298,15 @@ impl App {
         let Some(path) = crate::shell::dialog::save_catalog(default_dir()) else {
             return;
         };
-        if let Err(e) = self.create_catalog_at(&path) {
-            self.set_status(
-                StatusKind::Error,
-                (crate::i18n::t().catalog_create_failed)(&e),
-            );
-            self.request_redraw();
+        match self.create_catalog_at(&path) {
+            Ok(()) => self.adopt_catalog_folders(),
+            Err(e) => {
+                self.set_status(
+                    StatusKind::Error,
+                    (crate::i18n::t().catalog_create_failed)(&e),
+                );
+                self.request_redraw();
+            }
         }
     }
 
@@ -312,12 +315,15 @@ impl App {
         let Some(path) = crate::shell::dialog::pick_catalog() else {
             return;
         };
-        if let Err(e) = self.open_catalog_at(&path) {
-            self.set_status(
-                StatusKind::Error,
-                (crate::i18n::t().catalog_open_failed)(&e),
-            );
-            self.request_redraw();
+        match self.open_catalog_at(&path) {
+            Ok(()) => self.adopt_catalog_folders(),
+            Err(e) => {
+                self.set_status(
+                    StatusKind::Error,
+                    (crate::i18n::t().catalog_open_failed)(&e),
+                );
+                self.request_redraw();
+            }
         }
     }
 

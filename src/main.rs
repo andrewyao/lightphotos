@@ -90,7 +90,7 @@ fn finish_window_setup(
 
     if let Some(path) = app.pending_initial.take() {
         jobs::loader::mark("opening initial path");
-        app.open(path);
+        app.open_from_user(path);
         jobs::loader::mark("initial open() returned");
     } else {
         app.restore_last_session();
@@ -171,7 +171,7 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::OpenFile(path) => {
                 if self.renderer.is_some() {
-                    self.open(path);
+                    self.open_from_user(path);
                 } else {
                     self.pending_initial = Some(path);
                 }

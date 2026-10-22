@@ -444,7 +444,7 @@ impl App {
             Command::Export(p) => {
                 let paths = self.resolve(&p.photos)?;
                 let pending = self
-                    .export_with(paths.clone(), p.settings)
+                    .export_with(paths.clone(), p.settings, None)
                     .map_err(|why| CommandError::Failed { reason: why })?;
                 Ok(Outcome {
                     photos: paths.len(),

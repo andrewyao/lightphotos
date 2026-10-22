@@ -231,13 +231,11 @@ mod tests {
     /// An App where the user (not an agent) opened a folder of one photo.
     #[cfg(not(target_arch = "wasm32"))]
     fn user_opened(tag: &str) -> (App, std::path::PathBuf, std::path::PathBuf) {
-        use crate::command::{Command, OpenFolderParams};
         let dir = crate::app::test_support::temp_folder(tag);
         let photo = dir.join("a.jpg");
         std::fs::write(&photo, []).unwrap();
         let mut app = App::new(None);
-        app.run(Command::OpenFolder(OpenFolderParams { path: dir.clone() }))
-            .unwrap();
+        app.open_from_user(dir.clone());
         (app, dir, photo)
     }
 
@@ -253,18 +251,13 @@ mod tests {
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn a_folder_an_agent_opened_is_no_export_root() {
+    fn a_folder_the_user_never_chose_is_no_export_root() {
         use crate::command::{Command, ExportParams, OpenFolderParams, Photos};
         let (mut app, user_dir, _) = user_opened("agent-root-user");
         let elsewhere = crate::app::test_support::temp_folder("agent-root-elsewhere");
         std::fs::write(elsewhere.join("b.jpg"), []).unwrap();
-        agent_runs(
-            &mut app,
-            Command::OpenFolder(OpenFolderParams {
-                path: elsewhere.clone(),
-            }),
-        )
-        .unwrap();
+        // Loaded, but not at an entry point: as the tree or a restore does.
+        app.load_folder(elsewhere.clone());
         let export = |name: &str| {
             Command::Export(ExportParams {
                 photos: Photos::Named(vec![name.into()]),
@@ -325,5 +318,88 @@ mod tests {
             presets.as_ref().is_err_and(|e| e.contains("an agent")),
             "{presets:?}"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn export_here(name: &str) -> crate::command::Command {
+        crate::command::Command::Export(crate::command::ExportParams {
+            photos: crate::command::Photos::Named(vec![name.into()]),
+            settings: None,
+        })
+    }
+
+    /// `dir` with one empty photo, `b.jpg`, in it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn photo_folder(tag: &str) -> std::path::PathBuf {
+        let dir = crate::app::test_support::temp_folder(tag);
+        std::fs::write(dir.join("b.jpg"), []).unwrap();
+        dir
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_agent_cannot_open_a_folder_outside_the_users() {
+        use crate::command::{Command, OpenFolderParams};
+        let (mut app, _, _) = user_opened("agent-open-user");
+        let outside = photo_folder("agent-open-out");
+        let opened = agent_runs(
+            &mut app,
+            Command::OpenFolder(OpenFolderParams {
+                path: outside.clone(),
+            }),
+        );
+        assert!(
+            opened.as_ref().is_err_and(|e| e.contains("an agent")),
+            "{opened:?}"
+        );
+        assert_ne!(app.folder_sel.as_deref(), Some(outside.as_path()));
+        assert!(!outside.join(".lightphotos").exists(), "no sidecars there");
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_keystroke_after_an_agent_moved_the_cursor_adds_no_root() {
+        use crate::command::{Command, OpenFolderParams};
+        let (mut app, _, _) = user_opened("agent-key-user");
+        let outside = photo_folder("agent-key-out");
+        let child = outside.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let _ = agent_runs(
+            &mut app,
+            Command::OpenFolder(OpenFolderParams { path: child }),
+        );
+        // Left in the tree: up to the parent, which the agent's folder named.
+        app.folder_collapse();
+        let in_outside = app
+            .folder_sel
+            .as_deref()
+            .is_some_and(|f| f.starts_with(&outside));
+        let export = agent_runs(&mut app, export_here("b.jpg"));
+        assert!(!(in_outside && export.is_ok()), "{export:?}");
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_crafted_catalog_an_agent_opened_adds_no_roots_on_restore() {
+        use crate::command::{CatalogPathParams, Command};
+        use crate::persist::catalog::{Catalog, CatalogRef};
+        let (mut app, user_dir, _) = user_opened("agent-cat-user");
+        let outside = photo_folder("agent-cat-out");
+        let at = CatalogRef::parse(&user_dir.join("Crafted.lightphotos")).unwrap();
+        drop(Catalog::create_at(at.clone(), vec![outside.clone()]).unwrap());
+        let _ = agent_runs(
+            &mut app,
+            Command::OpenCatalog(CatalogPathParams {
+                path: at.path().to_path_buf(),
+            }),
+        );
+        // What the next launch does with the remembered catalog.
+        app.restore_last_session();
+        let in_outside = app
+            .folder_sel
+            .as_deref()
+            .is_some_and(|f| f.starts_with(&outside));
+        let export = agent_runs(&mut app, export_here("b.jpg"));
+        assert!(!(in_outside && export.is_ok()), "{export:?}");
     }
 }
