@@ -45,10 +45,7 @@ impl App {
             Op::State => json(State::of(self)),
             Op::List => json(PhotoList::of(self)),
             #[cfg(not(target_arch = "wasm32"))]
-            Op::Screenshot => match self.screenshot_shows_outside() {
-                Some(reason) => Err(ChannelError::Failed { reason }.into()),
-                None => return self.control.shots.push(reply),
-            },
+            Op::Screenshot => return self.control.shots.push(reply),
             Op::Wait(timeout) => {
                 return self
                     .control
@@ -64,7 +61,13 @@ impl App {
     pub(crate) fn poll_control(&mut self) -> Option<Duration> {
         #[cfg(not(target_arch = "wasm32"))]
         for reply in std::mem::take(&mut self.control.shots) {
-            let _ = reply.send(self.screenshot());
+            // Checked as the picture is taken: a request on another
+            // connection may have changed the folder since this one came.
+            let answer = match self.screenshot_shows_outside() {
+                Some(reason) => Err(ChannelError::Failed { reason }.into()),
+                None => self.screenshot(),
+            };
+            let _ = reply.send(answer);
         }
         if self.control.waits.is_empty() {
             return None;
@@ -278,9 +281,15 @@ mod tests {
         let dir = folder("anchor-updown");
         let mut app = user_opened(&dir);
         agent_runs(&mut app, open_folder(&dir.join("sub"))).unwrap();
-        let sub = dir.join("sub").canonicalize().unwrap();
-        assert_eq!(app.folder_sel.as_deref(), Some(sub.as_path()));
+        // Spelled under the catalog folder the user opened.
+        assert_eq!(app.folder_sel.as_deref(), Some(dir.join("sub").as_path()));
         assert!(agent_runs(&mut app, open_folder(&dir)).is_ok(), "back up");
+        let shown = app.folder_sel.clone().unwrap();
+        assert_eq!(
+            shown.as_os_str(),
+            dir.as_os_str(),
+            "the root's own spelling"
+        );
         let above = dir.parent().unwrap().to_path_buf();
         assert!(refused(&agent_runs(&mut app, open_folder(&above))));
         let _ = std::fs::remove_dir_all(&dir);
@@ -425,8 +434,8 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("sub"), dir.join("alias")).unwrap();
         let mut app = user_opened(&dir);
         agent_runs(&mut app, open_folder(&dir.join("alias"))).unwrap();
-        let real = dir.join("sub").canonicalize().unwrap();
-        assert_eq!(app.folder_sel.as_deref(), Some(real.as_path()));
+        // The link resolved to `sub`, spelled under the folder the user opened.
+        assert_eq!(app.folder_sel.as_deref(), Some(dir.join("sub").as_path()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -474,5 +483,101 @@ mod tests {
         assert!(agent_runs(&mut app, rate_own).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_open_keeps_the_catalog_and_its_roots_spelling() {
+        let dir = folder("anchor-root-link");
+        let link = dir.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        let mut app = App::new(None);
+        app.open(link.clone());
+        let roots = app.catalog.folders().to_vec();
+        agent_runs(&mut app, open_folder(&link.join("sub"))).unwrap();
+        assert_eq!(app.catalog.folders(), roots.as_slice(), "no root added");
+        assert_eq!(app.folder_sel.as_deref(), Some(link.join("sub").as_path()));
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_screenshot_is_checked_when_it_is_taken() {
+        let dir = folder("anchor-shot-late");
+        let outside = crate::app::test_support::temp_folder("anchor-shot-late-out");
+        std::fs::write(outside.join("secret.jpg"), []).unwrap();
+        let mut app = user_opened(&dir);
+        let (tx, rx) = mpsc::channel();
+        app.answer_control(live(Op::Screenshot), tx);
+        // Between the request and the picture, the folder comes to show a
+        // photo that links outside.
+        std::os::unix::fs::symlink(outside.join("secret.jpg"), dir.join("link.jpg")).unwrap();
+        app.load_folder(dir.clone());
+        app.poll_control();
+        let refused = json_of(rx.try_recv().unwrap()).unwrap_err();
+        assert!(refused.contains("links outside"), "{refused}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_user_open_keeps_the_path_as_given_unless_it_has_dot_dot() {
+        let dir = folder("anchor-as-given");
+        let other = crate::app::test_support::temp_folder("anchor-as-given-other");
+        std::fs::write(other.join("x.jpg"), []).unwrap();
+        std::os::unix::fs::symlink(other.join("x.jpg"), dir.join("link.jpg")).unwrap();
+        let mut app = App::new(None);
+        app.open_from_user(dir.join("link.jpg"));
+        assert_eq!(
+            app.folder_sel.as_deref(),
+            Some(dir.as_path()),
+            "the link's folder"
+        );
+        let mut app = App::new(None);
+        app.open_from_user(dir.clone());
+        assert_eq!(
+            app.folder_sel.as_deref(),
+            Some(dir.as_path()),
+            "spelled as given"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_cannot_move_onto_a_photo_while_one_links_outside() {
+        let dir = folder("anchor-select-link");
+        let outside = crate::app::test_support::temp_folder("anchor-select-link-out");
+        std::fs::write(outside.join("secret.jpg"), []).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.jpg"), dir.join("link.jpg")).unwrap();
+        let mut app = user_opened(&dir);
+        for json in [
+            r#"{"id":"select","params":{"photos":["link.jpg"]}}"#,
+            r#"{"id":"navigate","params":{"to":"next"}}"#,
+            r#"{"id":"view.mode","params":{"mode":"loupe"}}"#,
+        ] {
+            let cmd = crate::command::Command::parse(json).unwrap();
+            let out = agent_runs(&mut app, cmd);
+            assert!(refused(&out), "{json}: {out:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_link_to_a_photo_elsewhere_in_the_anchor_is_no_outside_link() {
+        let dir = folder("anchor-inner-link");
+        std::fs::create_dir_all(dir.join("x")).unwrap();
+        std::fs::write(dir.join("x/real.jpg"), []).unwrap();
+        std::os::unix::fs::symlink(dir.join("x/real.jpg"), dir.join("sub/link.jpg")).unwrap();
+        let mut app = user_opened(&dir);
+        agent_runs(&mut app, open_folder(&dir.join("sub"))).unwrap();
+        assert_eq!(app.screenshot_shows_outside(), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

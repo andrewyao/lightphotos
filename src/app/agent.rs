@@ -4,8 +4,9 @@
 //! sends passes [`App::run_from_agent`], which holds it to the [`Anchor`]:
 //! the folder the user has open. Every folder change that is not an agent's
 //! command moves the anchor (the picker, the command line, Finder, the tree
-//! and the keyboard, a catalog); a launch restore puts back the one saved
-//! with the session; an agent's command never moves it. So an agent works
+//! and the keyboard, a catalog). A launch restore puts back the anchor saved
+//! with the session, or, for a session saved without one, anchors the
+//! folder it reopens. An agent's command never moves it. So an agent works
 //! in the user's folder and, unless the user opened a single photo, the
 //! folders inside it; it can go back up to the anchor, and never above it.
 //! A photo that links out of the anchor is out of reach too. Catalogs and
@@ -108,6 +109,46 @@ fn resolve(_path: &Path) -> Option<PathBuf> {
     None
 }
 
+/// A path the user gave, made absolute. With no `..` it keeps its spelling,
+/// so a photo that is a link opens in its own folder and Windows gets no
+/// `\\?\` path. With a `..` the folder part resolves, as the OS reads it
+/// (`link/..` is the link target's parent), and the name stays.
+#[cfg(not(target_arch = "wasm32"))]
+fn user_path(path: PathBuf) -> PathBuf {
+    if !path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return std::path::absolute(&path).unwrap_or(path);
+    }
+    let resolved = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => std::fs::canonicalize(parent).map(|dir| dir.join(name)),
+        _ => std::fs::canonicalize(&path),
+    };
+    resolved.map(plain).unwrap_or_else(|_| absolute(path))
+}
+
+/// `path` without Windows' `\\?\` verbatim prefix where a plain path says
+/// the same, as `canonicalize` adds it there.
+#[cfg(windows)]
+fn plain(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
+#[cfg(all(not(windows), not(target_arch = "wasm32")))]
+fn plain(path: PathBuf) -> PathBuf {
+    path
+}
+
 /// `path` made absolute against the working directory, with `.` and `..`
 /// taken out by name. `lightphotos ../shoot` must name that folder, not
 /// whatever a later launch's working directory makes of it.
@@ -130,13 +171,11 @@ fn absolute(path: PathBuf) -> PathBuf {
 }
 
 impl App {
-    /// Opens a path from the command line or Finder. One that exists opens
-    /// resolved, as the OS reads it (`link/..` is the link's parent, not
-    /// this folder); one that doesn't is made absolute by name, for `open`
-    /// to report.
+    /// Opens a path from the command line or Finder, made absolute
+    /// ([`user_path`]).
     pub(crate) fn open_from_user(&mut self, path: PathBuf) {
         #[cfg(not(target_arch = "wasm32"))]
-        let path = std::fs::canonicalize(&path).unwrap_or_else(|_| absolute(path));
+        let path = user_path(path);
         self.open(path);
     }
 
@@ -161,29 +200,50 @@ impl App {
     /// `root` the session reopened. Nothing otherwise, so a restore never
     /// hands an agent more than the user had open.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn restored_anchor(&self, saved: Option<&Anchor>, root: &Path) -> Option<Anchor> {
-        let anchor = saved?.revalidated()?;
+    pub(super) fn restored_anchor(&self, saved: &Anchor, root: &Path) -> Option<Anchor> {
+        let anchor = saved.revalidated()?;
         let root = resolve(root)?;
         let shown = self.folder_sel.as_deref()?;
         (anchor.path.starts_with(&root) && anchor.holds(shown)).then_some(anchor)
     }
 
-    /// Why an agent may not act on the photos `cmd` names: one of them
-    /// links out of the anchor.
+    /// Why an agent may not act on the photos `cmd` names: one of them is
+    /// outside the anchor, or links out of it. The folder is checked once;
+    /// only the entries its listing marked as links resolve one by one.
     #[cfg(not(target_arch = "wasm32"))]
     fn photos_outside_anchor(&self, cmd: &Command) -> Option<String> {
         let paths = self.resolve(cmd.photos()?).ok()?;
-        let outside = paths.iter().find(|photo| {
-            !self
-                .folder_anchor
-                .as_ref()
-                .is_some_and(|anchor| anchor.holds_photo(photo))
-        })?;
+        let playlist = self.playlist.as_ref()?;
+        let anchor = self.folder_anchor.as_ref();
+        let folder_held = anchor.is_some_and(|a| a.holds(playlist.dir()));
+        let outside = paths
+            .iter()
+            .find(|photo| match playlist.links().contains(*photo) {
+                true => !anchor.is_some_and(|a| a.holds_photo(photo)),
+                false => !folder_held,
+            })?;
         Some(format!(
             "an agent can act only on photos inside the folder the user has open; {} is \
              outside it, or links outside",
             outside.display()
         ))
+    }
+
+    /// The first photo the open folder lists that links out of the anchor.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn link_outside(&self) -> Option<PathBuf> {
+        let playlist = self.playlist.as_ref()?;
+        let anchor = self.folder_anchor.as_ref();
+        playlist
+            .links()
+            .iter()
+            .find(|photo| !anchor.is_some_and(|a| a.holds_photo(photo)))
+            .cloned()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn link_outside(&self) -> Option<PathBuf> {
+        None
     }
 
     /// A photo's file is a handle in the browser, never a link.
@@ -192,22 +252,13 @@ impl App {
         None
     }
 
-    /// Why a screenshot would show an agent a photo from outside the open
-    /// folder: the Grid or the Loupe shows one that links out of it.
+    /// Why a screenshot would show an agent a photo from outside the
+    /// anchor: the open folder lists one that links out of it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn screenshot_shows_outside(&self) -> Option<String> {
-        let playlist = self.playlist.as_ref()?;
-        let dir = resolve(playlist.dir())?;
-        let outside = playlist.entries().iter().find(|photo| {
-            photo
-                .symlink_metadata()
-                .is_ok_and(|m| m.file_type().is_symlink())
-                && !std::fs::canonicalize(photo)
-                    .ok()
-                    .is_some_and(|real| real.parent() == Some(dir.as_path()))
-        })?;
+        let outside = self.link_outside()?;
         Some(format!(
-            "no screenshot for an agent: {} links outside the open folder",
+            "no screenshot for an agent: {} links outside the folder the user has open",
             outside.display()
         ))
     }
@@ -238,20 +289,42 @@ impl App {
                 };
                 // Open what was checked, so a link swapped in later can't
                 // move where the sidecars go.
+                // Spelled under the catalog folder it lies in, so the tree
+                // and the catalog see a folder they already list.
+                let path = self
+                    .catalog
+                    .folders()
+                    .iter()
+                    .find_map(|root| {
+                        let tail = real.strip_prefix(resolve(root)?).ok()?;
+                        Some(match tail.as_os_str().is_empty() {
+                            true => root.clone(),
+                            false => root.join(tail),
+                        })
+                    })
+                    .unwrap_or(real);
                 let before = self.folder_anchor.clone();
                 let out = self.run(Command::OpenFolder(crate::command::OpenFolderParams {
-                    path: real,
+                    path,
                 }));
                 self.keep_anchor(before);
                 return out;
             }
+            // These put a photo on screen, where `commands` and a screenshot
+            // read it: not while the folder lists one that links outside.
+            Command::View(_) | Command::Select(_) | Command::Navigate(_) => {
+                if let Some(photo) = self.link_outside() {
+                    return Err(refuse(&format!(
+                        "an agent can't move through this folder: {} links outside the \
+                         folder the user has open",
+                        photo.display()
+                    )));
+                }
+            }
             // These act on the open folder's photos, or on nothing on disk.
-            Command::View(_)
-            | Command::Zoom(_)
+            Command::Zoom(_)
             | Command::Filter(_)
             | Command::Sort(_)
-            | Command::Select(_)
-            | Command::Navigate(_)
             | Command::Rate(_)
             | Command::Flag(_)
             | Command::Label(_)
