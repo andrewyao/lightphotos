@@ -99,6 +99,9 @@ impl Folder {
                 paths.push(path);
             }
         }
+        // One writer per folder: hold the lock from the read to the last
+        // write, and leave a folder the app has open to the app.
+        let _lock = self.lock()?;
         let mut records = paths
             .iter()
             .map(|p| self.record(p))
@@ -134,6 +137,33 @@ impl Folder {
         Ok(vec![text(reply.to_string())])
     }
 
+    /// The folder's lock for one writing command. Refused, with nothing
+    /// changed, while LightPhotos has the folder open or another command
+    /// is writing it. A volume without locks is written without one.
+    fn lock(&self) -> Result<Option<sidecar::FolderLock>, String> {
+        use sidecar::{FolderLock, Holder, LockError, Writer, LOCK_WAIT};
+        match FolderLock::acquire(&self.root, Writer::Mcp, LOCK_WAIT) {
+            Ok(lock) => Ok(Some(lock)),
+            Err(
+                e @ LockError::Busy(Some(Holder {
+                    writer: Writer::Mcp,
+                    ..
+                })),
+            ) => Err(format!("{e}; nothing was changed. Try again.")),
+            Err(e @ LockError::Busy(_)) => Err(format!(
+                "{e}, so headless lightphotos-mcp can't change it; nothing was changed. \
+                 Send the command through the app instead: start it with \
+                 `lightphotos --control <port> {}` and run `lightphotos-mcp --attach <port>`. \
+                 Reading (get_state, render) still works here.",
+                self.root.display()
+            )),
+            Err(e @ (LockError::Unavailable(_) | LockError::Unsupported(_))) => {
+                eprintln!("lightphotos-mcp: {e}; saving without a lock");
+                Ok(None)
+            }
+        }
+    }
+
     fn state(&self) -> Result<Value, String> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&self.root)
             .map_err(|e| format!("cannot list {}: {e}", self.root.display()))?
@@ -150,12 +180,20 @@ impl Folder {
                 Err(e) => json!({ "name": file_name(p), "sidecar_error": e }),
             })
             .collect();
-        Ok(json!({
+        let mut state = json!({
             "folder": self.root,
             "photos": photos,
             "total": total,
             "truncated": total > MAX_LISTED,
-        }))
+        });
+        // A folder another program holds refuses every writing command.
+        if let Some(held) = sidecar::probe(&self.root) {
+            state["read_only"] = json!(format!(
+                "{held}; writing commands are refused here. Use lightphotos-mcp --attach to \
+                 send them through the app."
+            ));
+        }
+        Ok(state)
     }
 
     fn render(&self, name: &Path, max: u32) -> ToolResult {

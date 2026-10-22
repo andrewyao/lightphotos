@@ -3,8 +3,9 @@
 //! Per-photo sidecars that persist ratings and develop edits. Each photo's
 //! record lives in `<photo dir>/.lightphotos/<photo filename>.xmp`, so edits
 //! travel with the folder and originals are never touched. The body is our
-//! own JSON, not Adobe XMP; the extension is cosmetic. `.lightphotos/` is
-//! created on the first write, so browsing a folder never changes it.
+//! own JSON, not Adobe XMP; the extension is cosmetic. Natively, opening a
+//! folder creates `.lightphotos/` for its lock file and nothing else (see
+//! [`FolderLock`]); a photo's sidecar appears on its first edit.
 //!
 //! This module owns the record, its path and its single-file read and write.
 //! The app's folder store caches a folder of them and queues the writes.
@@ -17,6 +18,13 @@ use serde_json::value::RawValue;
 
 use crate::develop::{Adjustments, Detections, Mask, MaskShape, TouchUp, MAX_MASKS};
 use crate::scoring::quality::QualityScore;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod lock;
+#[cfg(not(target_arch = "wasm32"))]
+pub use lock::{
+    probe, FolderKey, FolderLock, Holder, LockError, Writer, LOCK_FILE, LOCK_WAIT, WHO_FILE,
+};
 
 /// Hidden subfolder holding a directory's sidecars and thumbnail cache.
 pub const SIDECAR_DIR: &str = ".lightphotos";
