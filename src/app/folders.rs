@@ -217,6 +217,43 @@ mod tests {
         assert!(loader.get_preview(&photo, 2560).is_none(), "changed folder");
     }
 
+    /// The hold follows the app every frame: a filter that changes the
+    /// neighbors without loading a photo moves it too, and leaving and
+    /// coming back to the Loupe opens the full tier again.
+    #[test]
+    fn the_loupe_hold_follows_the_neighbors_and_the_mode() {
+        use crate::jobs::loader::Loader;
+        use crate::jobs::thumbnail::Origin;
+        let (mut app, dir, paths) = crate::app::test_support::folder_app("loupe-hold", 5);
+        app.loader = Some(Loader::queue_only_for_test());
+        app.sel = Some(2);
+        app.want = Some(paths[2].clone());
+        app.mode = ViewMode::Loupe;
+        app.pump();
+        let held = |app: &App| app.loader.as_ref().unwrap().held().fulls.clone();
+        assert_eq!(
+            held(&app),
+            [paths[2].clone(), paths[1].clone(), paths[3].clone()]
+        );
+
+        // Hide photo 3 without loading anything: its neighbor is now 4.
+        app.visible = vec![0, 1, 2, 4];
+        app.pump();
+        assert_eq!(
+            held(&app),
+            [paths[2].clone(), paths[1].clone(), paths[4].clone()]
+        );
+
+        app.mode = ViewMode::Grid;
+        app.pump();
+        app.mode = ViewMode::Loupe;
+        app.pump();
+        let loader = app.loader.as_mut().unwrap();
+        loader.insert_full_external(paths[2].clone(), one_pixel(), Origin::Decoded);
+        assert!(loader.get_full(&paths[2]).is_some(), "the tier reopened");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn opening_a_subfolder_of_a_root_reveals_it() {
         let a = photos("roots-reveal");

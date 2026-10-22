@@ -256,16 +256,6 @@ pub(super) fn sync_full_crops(
             in_flight -= 1;
         }
     }
-    // Held until each tile crops its full, so a full that lands beside
-    // another in one drain is never evicted before the tile reads it.
-    loader.hold_fulls(
-        tiles
-            .members
-            .iter()
-            .flatten()
-            .filter(|t| matches!(t.full, Full::Waiting))
-            .map(|t| t.path.clone()),
-    );
 }
 
 /// Free every crop, for leaving Full.
@@ -344,6 +334,21 @@ impl App {
     /// group, the shown photo among them, requesting previews as needed. A
     /// photo in no group, or the Edit view, leaves `compare_tiles` empty, which keeps
     /// the Loupe whole.
+    /// The Compare tiles waiting on their full decode, read from the live
+    /// tiles, so closing Compare by any path stops holding them. Held until
+    /// each tile crops its full, so one that lands beside another in a
+    /// drain is never evicted before the tile reads it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn compare_fulls_waiting(&self) -> Vec<PathBuf> {
+        self.group_compare
+            .tiles
+            .iter()
+            .flat_map(|tiles| tiles.members.iter().flatten())
+            .filter(|t| matches!(t.full, Full::Waiting))
+            .map(|t| t.path.clone())
+            .collect()
+    }
+
     pub(super) fn sync_compare_tiles(&mut self) {
         if self.mode != ViewMode::Loupe {
             return;
@@ -453,10 +458,7 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         match self.group_compare.fidelity {
             TileFidelity::Full => sync_full_crops(tiles, square, loader, r),
-            TileFidelity::Speed => {
-                drop_full_crops(tiles, r);
-                loader.hold_fulls([]);
-            }
+            TileFidelity::Speed => drop_full_crops(tiles, r),
         }
         if !tiles.reported && tiles.members.iter().all(Option::is_some) {
             tiles.reported = true;

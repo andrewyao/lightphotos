@@ -1171,17 +1171,6 @@ impl Renderer {
     /// Runs on the UI thread when the photo should appear, so it avoids bulk CPU
     /// pixel work: it uploads level 0 and the GPU builds the other levels.
     #[hotpath::measure]
-    /// Frees the Loupe image's texture and the layers built from it, so
-    /// nothing is drawn until the next `set_image`.
-    pub fn clear_image(&mut self) {
-        self.fine = None;
-        self.image_view = None;
-        self.layers_built_for = [None; 2];
-        self.image_bind = None;
-        self.base = None;
-        self.image_size = (0, 0);
-    }
-
     pub fn set_image(&mut self, img: &DecodedImage) {
         // `std::time::Instant::now()` panics on wasm32.
         let t0 = web_time::Instant::now();
@@ -1264,6 +1253,17 @@ impl Renderer {
             "set_image {w}x{h} ({mip_count} mips): took {:?}",
             t0.elapsed()
         ));
+    }
+
+    /// Frees the Loupe image's texture and the layers built from it, so
+    /// nothing is drawn until the next `set_image`.
+    pub fn clear_image(&mut self) {
+        self.fine = None;
+        self.image_view = None;
+        self.layers_built_for = [None; 2];
+        self.image_bind = None;
+        self.base = None;
+        self.image_size = (0, 0);
     }
 
     /// The Loupe's group 0: the image, its sampler, and the base and fine

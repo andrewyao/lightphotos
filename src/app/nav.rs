@@ -602,10 +602,6 @@ impl App {
             return;
         };
         self.leave_compare_off_group();
-        let loupe_photos = std::iter::once(path.clone()).chain(self.neighbor_paths());
-        if let Some(loader) = &mut self.loader {
-            loader.set_loupe_photos(loupe_photos);
-        }
         // On wasm32 `app/web.rs` decodes the preview and thumbnail instead.
         #[cfg(not(target_arch = "wasm32"))]
         {
