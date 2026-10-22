@@ -239,10 +239,14 @@ pub const AUTO_RAW_DENOISE_STRENGTH: f32 = 25.0;
 /// layouts it cannot take (`patches/rawler-develop-errors.patch`).
 #[allow(dead_code)]
 #[hotpath::measure]
-pub fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
+pub fn decode_raw_nonmac(
+    path: &Path,
+    max_dim: u32,
+    intent: RawIntent,
+) -> Result<DecodedImage, String> {
     // Memory-mapped, so the file is never copied onto the heap.
     let source = rawler::rawsource::RawSource::new(path).map_err(|e| e.to_string())?;
-    decode_raw_nonmac_from_source(source, max_dim, RawIntent::Display)
+    decode_raw_nonmac_from_source(source, max_dim, intent)
 }
 
 /// What a RAW develop is for. Only a display decode may bin 2x2 when it is
@@ -359,7 +363,12 @@ fn half_res_image(
     let rawler::RawImageData::Float(data) = &mut raw.data else {
         return Err("RAW scaling left integer samples".to_string());
     };
-    let pixels = rawler::pixarray::Pix2D::new_with(std::mem::take(data), raw.width, raw.height);
+    // `bayer_mosaic` checked there are at least this many; a longer buffer
+    // is cut, as the vendored `RawDevelop` cuts it, since `Pix2D` holds
+    // exactly its size.
+    let mut data = std::mem::take(data);
+    data.truncate(raw.width * raw.height);
+    let pixels = rawler::pixarray::Pix2D::new_with(data, raw.width, raw.height);
     let binned = raw_preview::bin_bayer(&pixels, &mosaic);
     drop(pixels);
     let (width, height) = (binned.width, binned.height);
@@ -778,6 +787,18 @@ mod tests {
             matches!(raw.data, rawler::RawImageData::Integer(_)),
             "not scaled"
         );
+    }
+
+    /// A buffer longer than its size bins rather than panicking in
+    /// `Pix2D::new_with`, which wants exactly its size.
+    #[test]
+    fn surplus_samples_bin_without_panicking() {
+        let mut raw = bayer(40, 24, "RGGB", 1000);
+        if let rawler::RawImageData::Integer(data) = &mut raw.data {
+            data.extend([1000; 7]);
+        }
+        let img = develop(&mut raw, 20).unwrap();
+        assert_eq!((img.width, img.height), (20, 12));
     }
 
     /// An export at a reduced size keeps PPG: the superpixel's channels sit

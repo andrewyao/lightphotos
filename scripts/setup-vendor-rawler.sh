@@ -52,7 +52,10 @@ DEST="$HERE/vendor/rawler-$CRATE_VERSION"
 # the tree as fully set up (a half-materialized dir has no sentinel).
 SENTINEL="$DEST/.lightphotos-patched"
 PATCHES="rawler-web-time.patch rawler-ljpeg-restart.patch rawler-sensor-type-fallback.patch rawler-cr2-sraw-black.patch rawler-develop-errors.patch"
-STAMP="rawler $CRATE_VERSION + $PATCHES"
+# The patches' contents, not just their names, so a revised patch
+# regenerates the tree too.
+PATCH_SUM="$(cd "$HERE/patches" && cat $PATCHES | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)"
+STAMP="rawler $CRATE_VERSION + $PATCHES ($PATCH_SUM)"
 
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1

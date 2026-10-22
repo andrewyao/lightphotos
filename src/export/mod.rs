@@ -760,7 +760,7 @@ pub fn export_file(
     rot: u8,
     output: &Output,
 ) -> Result<Vec<u8>, String> {
-    let img = image_decode::decode(src, decode_px(output.max_px, adj.crop))?;
+    let img = image_decode::decode_for_export(src, decode_px(output.max_px, adj.crop))?;
     render(
         &img,
         adj,

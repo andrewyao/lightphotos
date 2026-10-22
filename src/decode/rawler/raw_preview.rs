@@ -247,8 +247,16 @@ pub(super) fn default_crop(
     let crop = raw.crop_area?;
     let x0 = crop.p.x.max(area.p.x);
     let y0 = crop.p.y.max(area.p.y);
-    let x1 = crop.p.x.saturating_add(crop.d.w).min(area.p.x + area.d.w);
-    let y1 = crop.p.y.saturating_add(crop.d.h).min(area.p.y + area.d.h);
+    let x1 = crop
+        .p
+        .x
+        .saturating_add(crop.d.w)
+        .min(area.p.x.checked_add(area.d.w)?);
+    let y1 = crop
+        .p
+        .y
+        .saturating_add(crop.d.h)
+        .min(area.p.y.checked_add(area.d.h)?);
     (x1 > x0 && y1 > y0).then(|| Rect::new(Point::new(x0, y0), Dim2::new(x1 - x0, y1 - y0)))
 }
 

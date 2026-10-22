@@ -1057,6 +1057,26 @@ mod tests {
         }
     }
 
+    /// The desktop export's decode is the export one: at half the sensor
+    /// or less it keeps PPG and a downscale, where the display decode bins.
+    #[test]
+    fn the_desktop_export_decode_never_bins() {
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_raw_export_intent_{}.dng",
+            std::process::id()
+        ));
+        write_bayer_dng(&path, 64, 48).expect("write_bayer_dng failed");
+        let bytes = std::fs::read(&path).expect("read fixture");
+        let export = image_decode::decode_for_export(&path, 24).expect("export decode");
+        let display = image_decode::decode(&path, 24).expect("display decode");
+        let _ = std::fs::remove_file(&path);
+        let want =
+            lp_rawler::decode_raw_nonmac_from_bytes(&bytes, 24, lp_rawler::RawIntent::Export)
+                .expect("export bytes");
+        assert_eq!(export.rgba, want.rgba);
+        assert_ne!(export.rgba, display.rgba, "the display decode bins");
+    }
+
     /// Path and bytes entry points give byte-identical output, so native and
     /// wasm export can share one pipeline.
     #[test]
@@ -1069,7 +1089,8 @@ mod tests {
         write_linear_dng(&path, w, h).expect("write_linear_dng failed");
         let bytes = std::fs::read(&path).expect("read fixture");
 
-        let via_path = lp_rawler::decode_raw_nonmac(&path, u32::MAX).expect("path decode");
+        let via_path = lp_rawler::decode_raw_nonmac(&path, u32::MAX, lp_rawler::RawIntent::Export)
+            .expect("path decode");
         let via_bytes =
             lp_rawler::decode_raw_nonmac_from_bytes(&bytes, u32::MAX, lp_rawler::RawIntent::Export)
                 .expect("bytes decode");

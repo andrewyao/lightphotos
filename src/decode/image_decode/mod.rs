@@ -359,6 +359,11 @@ pub fn apple_tone_curve() -> bool {
 /// Decode `path` upright, downscaled so neither side exceeds `max_dim`
 /// (the GPU's max texture size, or `u32::MAX` for full resolution).
 #[cfg(target_os = "macos")]
+pub fn decode_for_export(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
+    decode(path, max_dim)
+}
+
+#[cfg(target_os = "macos")]
 #[hotpath::measure]
 pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     if is_raw_extension(path) {
