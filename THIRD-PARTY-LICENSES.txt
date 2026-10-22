@@ -8336,6 +8336,7 @@ these patches from the patches/ directory:
   patches/rawler-ljpeg-restart.patch
   patches/rawler-sensor-type-fallback.patch
   patches/rawler-cr2-sraw-black.patch
+  patches/rawler-develop-errors.patch
 
 The modified source, the patches and the script are available at
 https://github.com/andrewyao/lightphotos.

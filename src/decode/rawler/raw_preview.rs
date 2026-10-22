@@ -222,16 +222,17 @@ fn wasm_needs_bin(area: rawler::imgop::Rect) -> bool {
 }
 
 /// A Bayer mosaic that rawler's 3-plane Bayer demosaics take without
-/// panicking (see `is_supported_bayer_layout`), with the area and crop both
-/// develops use. Built by [`bayer_mosaic`], the one place these checks live.
+/// panicking (see `is_supported_bayer_layout`), with the area and crop the
+/// superpixel bins. Built by [`bayer_mosaic`], the one place these checks
+/// live, for both the Loupe's `demosaic_cfa` and the native half-size
+/// develop.
 pub(super) struct BayerMosaic {
     pub(super) cfa: rawler::CFA,
     pub(super) colors: rawler::cfa::PlaneColor,
-    /// The active area, trimmed to the sensor's even-sized part:
-    /// `apply_scaling` normalizes whole 2x2 blocks, so an odd sensor's last
-    /// row or column keeps raw sample values, which show as a white edge.
+    /// The active area, or the whole image without one.
     pub(super) area: rawler::imgop::Rect,
-    /// The default crop, in sensor coordinates, when it lies inside `area`.
+    /// The default crop, in sensor coordinates, clamped to `area` as the
+    /// vendored `RawDevelop` clamps it.
     pub(super) crop: Option<rawler::imgop::Rect>,
 }
 
@@ -242,36 +243,20 @@ impl BayerMosaic {
     }
 }
 
-/// `raw`'s active area (or the whole image) trimmed to its even-sized part,
-/// or `None` when that leaves less than a 2x2 block or the area does not
-/// fit the buffer.
-pub(super) fn scaled_area(raw: &rawler::RawImage) -> Option<rawler::imgop::Rect> {
-    use rawler::imgop::{Dim2, Point, Rect};
-    let area = raw.active_area.unwrap_or(Rect::new(
-        Point::new(0, 0),
-        Dim2::new(raw.width, raw.height),
-    ));
-    if !area_fits(area, raw.width, raw.height) {
-        return None;
-    }
-    let right = (area.p.x + area.d.w).min(raw.width & !1);
-    let bottom = (area.p.y + area.d.h).min(raw.height & !1);
-    let (w, h) = (right.checked_sub(area.p.x)?, bottom.checked_sub(area.p.y)?);
-    (w >= 2 && h >= 2).then(|| Rect::new(area.p, Dim2::new(w, h)))
-}
-
-/// `raw`'s default crop when it lies inside `area`. One that does not (bad
-/// metadata) is dropped, and both develops then show the whole area.
+/// `raw`'s default crop clamped to `area`, as the vendored `RawDevelop`
+/// clamps it (`patches/rawler-develop-errors.patch`), or `None` when none
+/// is left.
 pub(super) fn default_crop(
     raw: &rawler::RawImage,
     area: rawler::imgop::Rect,
 ) -> Option<rawler::imgop::Rect> {
+    use rawler::imgop::{Dim2, Point, Rect};
     let crop = raw.crop_area?;
-    let inside = crop.p.x >= area.p.x
-        && crop.p.y >= area.p.y
-        && crop.p.x.checked_add(crop.d.w)? <= area.p.x + area.d.w
-        && crop.p.y.checked_add(crop.d.h)? <= area.p.y + area.d.h;
-    (inside && crop.d.w > 0 && crop.d.h > 0).then_some(crop)
+    let x0 = crop.p.x.max(area.p.x);
+    let y0 = crop.p.y.max(area.p.y);
+    let x1 = crop.p.x.saturating_add(crop.d.w).min(area.p.x + area.d.w);
+    let y1 = crop.p.y.saturating_add(crop.d.h).min(area.p.y + area.d.h);
+    (x1 > x0 && y1 > y0).then(|| Rect::new(Point::new(x0, y0), Dim2::new(x1 - x0, y1 - y0)))
 }
 
 /// `raw` as a [`BayerMosaic`], or `None` for anything else: X-Trans, four
@@ -280,8 +265,22 @@ pub(super) fn bayer_mosaic(raw: &rawler::RawImage) -> Option<BayerMosaic> {
     let rawler::rawimage::RawPhotometricInterpretation::Cfa(config) = &raw.photometric else {
         return None;
     };
-    let area = scaled_area(raw)?;
+    use rawler::imgop::{Dim2, Point, Rect};
+    let area = raw.active_area.unwrap_or(Rect::new(
+        Point::new(0, 0),
+        Dim2::new(raw.width, raw.height),
+    ));
+    let samples = match &raw.data {
+        rawler::RawImageData::Integer(data) => data.len(),
+        rawler::RawImageData::Float(data) => data.len(),
+    };
     if raw.cpp != 1
+        || raw
+            .width
+            .checked_mul(raw.height)
+            .is_none_or(|n| samples < n)
+        || area.d.w < 2
+        || area.d.h < 2
         || config.sensor != rawler::imgop::sensor::SensorType::Bayer
         || !config.cfa.is_rgb()
         || !is_supported_bayer_layout(&config.cfa, &config.colors, area, raw.width, raw.height)
@@ -630,7 +629,7 @@ fn is_supported_bayer_layout(
 // column of a different CFA phase, corrupting color at the bottom and right
 // edges. It only runs for RAF files with no usable embedded image, since
 // `rawler_full_image_from_bytes` handles the common case.
-pub(super) fn is_supported_xtrans_layout(
+fn is_supported_xtrans_layout(
     cfa: &rawler::CFA,
     colors: &rawler::cfa::PlaneColor,
     area: rawler::imgop::Rect,
@@ -654,7 +653,7 @@ fn neutral_if_non_finite(wb: [f32; 4]) -> [f32; 4] {
 /// `area` lies inside a `width * height` buffer. `checked_add` because
 /// `usize` is 32 bits on wasm32, and a garbage active-area tag could wrap a
 /// plain addition back into range.
-pub(super) fn area_fits(area: rawler::imgop::Rect, width: usize, height: usize) -> bool {
+fn area_fits(area: rawler::imgop::Rect, width: usize, height: usize) -> bool {
     area.p.x.checked_add(area.d.w).is_some_and(|x1| x1 <= width)
         && area
             .p
