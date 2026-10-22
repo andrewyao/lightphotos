@@ -33,6 +33,10 @@ pub(crate) struct Session {
     pub(crate) dir: Option<PathBuf>,
     pub(crate) photo: Option<PathBuf>,
     pub(crate) view: SessionView,
+    /// The folder the user had open (`agent.rs`), which a restore puts back
+    /// rather than make the restored folder the anchor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) anchor: Option<super::agent::Anchor>,
 }
 
 /// A session as saved by this build, by the build before catalogs, which
@@ -50,6 +54,8 @@ struct StoredSession {
     photo: Option<PathBuf>,
     #[serde(default)]
     view: SessionView,
+    #[serde(default)]
+    anchor: Option<super::agent::Anchor>,
 }
 
 impl StoredSession {
@@ -69,6 +75,7 @@ impl StoredSession {
             dir,
             photo: self.photo,
             view: self.view,
+            anchor: self.anchor,
         }
     }
 }
@@ -131,6 +138,7 @@ fn to_restore(
         dir: Some(root.clone()),
         photo: None,
         view: SessionView::Grid,
+        anchor: None,
     })
 }
 
@@ -155,6 +163,7 @@ impl App {
             dir: Some(dir),
             photo: self.selected_path(),
             view,
+            anchor: self.folder_anchor.clone(),
         })
     }
 
@@ -204,7 +213,7 @@ impl App {
             return;
         };
         let root = root.to_path_buf();
-        self.open(root);
+        self.open(root.clone());
         let chain = session.folder_chain(self.catalog.folders());
         if let Some(dir) = chain.last().filter(|d| chain.len() > 1 && d.is_dir()) {
             for folder in &chain {
@@ -213,6 +222,7 @@ impl App {
             }
             self.load_folder(dir.clone());
         }
+        self.folder_anchor = self.restored_anchor(session.anchor.as_ref(), &root);
         self.restore_session_view(session);
     }
 
@@ -255,12 +265,16 @@ mod tests {
         root
     }
 
+    /// The session the app saves showing `photo` (or `root`): the folder
+    /// showing is the one the user opened, so it is the anchor too.
     fn session(root: &Path, photo: Option<&str>, view: SessionView) -> Session {
+        let dir = photo.map_or(root.to_path_buf(), |p| {
+            root.join(p).parent().unwrap().to_path_buf()
+        });
         Session {
             legacy_folders: Vec::new(),
-            dir: Some(photo.map_or(root.to_path_buf(), |p| {
-                root.join(p).parent().unwrap().to_path_buf()
-            })),
+            anchor: super::super::agent::Anchor::new(&dir, true),
+            dir: Some(dir),
             photo: photo.map(|p| root.join(p)),
             view,
         }
@@ -343,10 +357,13 @@ mod tests {
         saved.photo = Some(root.join("gone/d.jpg"));
         let mut app = app_listing(&[&root]);
         app.restore_session(&saved);
-        assert_eq!(
-            app.current_session(),
-            Some(session(&root, None, SessionView::Grid))
-        );
+        // The saved anchor was the subfolder; the restore shows the folder
+        // above it, so no anchor: an agent gets nothing the user didn't have.
+        let shown = Session {
+            anchor: None,
+            ..session(&root, None, SessionView::Grid)
+        };
+        assert_eq!(app.current_session(), Some(shown));
     }
 
     fn parse(json: &str) -> Option<Session> {
@@ -510,6 +527,7 @@ mod tests {
             dir: Some(PathBuf::from("/photos/2024/june")),
             photo: None,
             view: SessionView::Grid,
+            anchor: None,
         };
         let roots = vec![PathBuf::from("/photos")];
         assert_eq!(
@@ -607,5 +625,33 @@ mod tests {
             app.current_session(),
             Some(session(&root, None, SessionView::Grid))
         );
+    }
+
+    #[test]
+    fn a_restore_keeps_an_anchor_that_held_only_one_photos_folder() {
+        use crate::command::{Command, OpenFolderParams};
+        let root = tree("anchor-restore");
+        let mut first = App::new(None);
+        first.open_from_user(root.join("a.jpg"));
+        let saved = first.current_session().unwrap();
+
+        let mut next = App::new(None);
+        next.add_root(&root);
+        next.restore_session(&saved);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let open = Command::OpenFolder(OpenFolderParams {
+            path: root.join("sub"),
+        });
+        let request = crate::shell::control::Request {
+            op: crate::shell::control::Op::Run(Box::new(open)),
+            expires: web_time::Instant::now() + std::time::Duration::from_secs(60),
+        };
+        next.answer_control(request, tx);
+        let answer = rx.try_recv().unwrap();
+        assert!(
+            answer.is_err(),
+            "the restored anchor still holds no subfolder"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

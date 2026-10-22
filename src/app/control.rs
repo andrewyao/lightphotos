@@ -45,7 +45,10 @@ impl App {
             Op::State => json(State::of(self)),
             Op::List => json(PhotoList::of(self)),
             #[cfg(not(target_arch = "wasm32"))]
-            Op::Screenshot => return self.control.shots.push(reply),
+            Op::Screenshot => match self.screenshot_shows_outside() {
+                Some(reason) => Err(ChannelError::Failed { reason }.into()),
+                None => return self.control.shots.push(reply),
+            },
             Op::Wait(timeout) => {
                 return self
                     .control
@@ -275,7 +278,8 @@ mod tests {
         let dir = folder("anchor-updown");
         let mut app = user_opened(&dir);
         agent_runs(&mut app, open_folder(&dir.join("sub"))).unwrap();
-        assert_eq!(app.folder_sel.as_deref(), Some(dir.join("sub").as_path()));
+        let sub = dir.join("sub").canonicalize().unwrap();
+        assert_eq!(app.folder_sel.as_deref(), Some(sub.as_path()));
         assert!(agent_runs(&mut app, open_folder(&dir)).is_ok(), "back up");
         let above = dir.parent().unwrap().to_path_buf();
         assert!(refused(&agent_runs(&mut app, open_folder(&above))));
@@ -372,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(unix)]
     fn a_relative_path_the_user_opens_is_made_absolute_without_dot_dot() {
         let dir = folder("anchor-relative");
         let cwd = std::env::current_dir().unwrap();
@@ -393,7 +397,82 @@ mod tests {
             "{}",
             shown.display()
         );
-        assert_eq!(shown, dir);
+        assert_eq!(shown, dir.canonicalize().unwrap());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn opening_one_photo_anchors_only_its_folder() {
+        let dir = folder("anchor-one-photo");
+        let mut app = App::new(None);
+        app.open_from_user(dir.join("a.jpg"));
+        assert!(refused(&agent_runs(
+            &mut app,
+            open_folder(&dir.join("sub"))
+        )));
+        assert!(
+            agent_runs(&mut app, open_folder(&dir)).is_ok(),
+            "its own folder"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_open_loads_the_resolved_folder() {
+        let dir = folder("anchor-resolved");
+        std::os::unix::fs::symlink(dir.join("sub"), dir.join("alias")).unwrap();
+        let mut app = user_opened(&dir);
+        agent_runs(&mut app, open_folder(&dir.join("alias"))).unwrap();
+        let real = dir.join("sub").canonicalize().unwrap();
+        assert_eq!(app.folder_sel.as_deref(), Some(real.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_users_path_through_a_link_opens_where_the_link_goes() {
+        let dir = folder("anchor-link-dotdot");
+        let other = crate::app::test_support::temp_folder("anchor-link-other");
+        std::fs::create_dir_all(other.join("deep")).unwrap();
+        std::fs::write(other.join("o.jpg"), []).unwrap();
+        std::os::unix::fs::symlink(other.join("deep"), dir.join("link")).unwrap();
+        let mut app = App::new(None);
+        // `link/..` is `other`, as the shell and the OS read it, not `dir`.
+        app.open_from_user(dir.join("link/.."));
+        let real = other.canonicalize().unwrap();
+        assert_eq!(app.folder_sel.as_deref(), Some(real.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_cannot_act_on_a_photo_that_links_outside() {
+        use crate::command::{Command, ExportParams, Photos};
+        let dir = folder("anchor-photo-link");
+        let outside = crate::app::test_support::temp_folder("anchor-photo-link-out");
+        std::fs::write(outside.join("secret.jpg"), []).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.jpg"), dir.join("link.jpg")).unwrap();
+        let mut app = user_opened(&dir);
+        let named = || Photos::Named(vec!["link.jpg".into()]);
+        let export = Command::Export(ExportParams {
+            photos: named(),
+            settings: None,
+        });
+        assert!(refused(&agent_runs(&mut app, export)));
+        let rate_of = |name: &str| {
+            Command::parse(&format!(
+                r#"{{"id":"photo.rate","params":{{"stars":3,"photos":["{name}"]}}}}"#
+            ))
+            .unwrap()
+        };
+        let rate = rate_of("link.jpg");
+        assert!(refused(&agent_runs(&mut app, rate)));
+        let rate_own = rate_of("a.jpg");
+        assert!(agent_runs(&mut app, rate_own).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

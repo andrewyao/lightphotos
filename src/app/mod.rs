@@ -745,7 +745,7 @@ pub(crate) struct App {
     folder_sel: Option<PathBuf>,
     /// The folder the user has open, which bounds what an agent may touch
     /// (`agent.rs`). Every folder change moves it except an agent's.
-    folder_anchor: Option<PathBuf>,
+    folder_anchor: Option<agent::Anchor>,
     expanded: HashSet<PathBuf>,
     /// Immediate subdirectories, listed once per folder on demand.
     subdirs: HashMap<PathBuf, Vec<PathBuf>>,
@@ -1152,7 +1152,8 @@ impl App {
                 let parent = parent.to_path_buf();
                 self.add_root(&parent);
                 self.reveal_folder(&parent);
-                self.folder_anchor = Some(parent.clone());
+                // One photo: its folder, not the folders inside it.
+                self.set_anchor(&parent, false);
                 self.folder_sel = Some(parent);
             }
 
@@ -1278,7 +1279,7 @@ impl App {
         self.reset_eyes_filter();
         self.recompute_visible();
         self.clear_selection();
-        self.folder_anchor = Some(dir.clone());
+        self.set_anchor(&dir, true);
         self.folder_sel = Some(dir);
         self.update_window_title();
         // `redraw` syncs textures against `grid_range` before layout updates
