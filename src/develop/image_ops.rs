@@ -7,6 +7,7 @@
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::base::Fields;
 use crate::develop::{self, local, Adjustments, BaseLayer, BaseProbe, Crop, MaskSet, TouchUp};
+use half::f16;
 
 /// Normalized crop (`None` = full frame) to pixel bounds `(x0, y0, x1, y1)`,
 /// at least 1x1.
@@ -152,8 +153,10 @@ struct Source<'a> {
     img: &'a DecodedImage,
     ca: develop::CaScale,
     /// Every texel in linear light, for denoise, which reads each one 25
-    /// times.
-    linear: Option<Vec<[f32; 3]>>,
+    /// times. Half floats keep it at 6 bytes a texel; their 11-bit
+    /// mantissa is finer than any step between two 8-bit sRGB levels, and a
+    /// half-float decode is stored exactly.
+    linear: Option<Vec<[f16; 3]>>,
 }
 
 impl<'a> Source<'a> {
@@ -166,9 +169,13 @@ impl<'a> Source<'a> {
             return None;
         }
         let linear = cache.then(|| {
-            (0..n)
-                .map(|i| pixel_linear(img, (i % w) as u32, (i / w) as u32))
-                .collect()
+            let mut buf = vec![[f16::ZERO; 3]; n];
+            develop::parallel::for_each_row(&mut buf, w, |y, row| {
+                for (x, px) in row.iter_mut().enumerate() {
+                    *px = pixel_linear(img, x as u32, y as u32).map(f16::from_f32);
+                }
+            });
+            buf
         });
         Some(Self { img, ca, linear })
     }
@@ -178,7 +185,7 @@ impl<'a> Source<'a> {
         let (w, h) = (self.img.width as i64, self.img.height as i64);
         let (x, y) = (x.clamp(0, w - 1), y.clamp(0, h - 1));
         match &self.linear {
-            Some(buf) => buf[(y * w + x) as usize],
+            Some(buf) => buf[(y * w + x) as usize].map(f16::to_f32),
             None => pixel_linear(self.img, x as u32, y as u32),
         }
     }
@@ -907,6 +914,46 @@ mod tests {
         });
         assert_eq!(to_srgb8(&img).into_owned(), stored);
         assert_eq!(px_to_srgb8(PixelFormat::TonedF16, &[0; 5]), [0, 0, 0, 255]);
+    }
+
+    /// The half-float cache denoise reads: every 8-bit level, opaque and
+    /// premultiplied, lands within half a half-float step of its f32 value,
+    /// closer than its neighbouring level, and a half-float decode reads back
+    /// exactly.
+    #[test]
+    fn the_linear_cache_keeps_every_level_apart_and_half_floats_exact() {
+        let rgba: Vec<u8> = (0..=255u8)
+            .flat_map(|v| [[v, v, v, 255], [v / 2, v / 2, v / 2, 128]])
+            .flatten()
+            .collect();
+        let img = DecodedImage::new_tracked(DecodedImageFields {
+            width: 512,
+            height: 1,
+            rgba,
+            pixel_format: PixelFormat::Srgb8,
+        });
+        let ca = develop::CaScale::default();
+        let (exact, cached) = (
+            Source::new(&img, ca, false).expect("exact"),
+            Source::new(&img, ca, true).expect("cached"),
+        );
+        let lut = srgb8_to_linear_lut();
+        for x in 0..512 {
+            let (e, c) = (exact.at_px(x, 0)[0], cached.at_px(x, 0)[0]);
+            assert!((e - c).abs() <= e * 2f32.powi(-11), "texel {x}: {e} vs {c}");
+        }
+        for v in 1..256 {
+            let (lo, hi) = (lut[v - 1], lut[v]);
+            let c = cached.at_px(2 * v as i64, 0)[0];
+            assert!((c - hi).abs() < (hi - lo) / 2.0, "level {v}: {c} vs {hi}");
+        }
+
+        let img = f16_gray(0.3, PixelFormat::TonedF16);
+        let (exact, cached) = (
+            Source::new(&img, ca, false).expect("exact"),
+            Source::new(&img, ca, true).expect("cached"),
+        );
+        assert_eq!(exact.at_px(1, 1), cached.at_px(1, 1));
     }
 
     fn f16_gray(v: f32, format: PixelFormat) -> DecodedImage {
