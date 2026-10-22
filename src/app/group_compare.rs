@@ -256,6 +256,16 @@ pub(super) fn sync_full_crops(
             in_flight -= 1;
         }
     }
+    // Held until each tile crops its full, so a full that lands beside
+    // another in one drain is never evicted before the tile reads it.
+    loader.hold_fulls(
+        tiles
+            .members
+            .iter()
+            .flatten()
+            .filter(|t| matches!(t.full, Full::Waiting))
+            .map(|t| t.path.clone()),
+    );
 }
 
 /// Free every crop, for leaving Full.
@@ -443,7 +453,10 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         match self.group_compare.fidelity {
             TileFidelity::Full => sync_full_crops(tiles, square, loader, r),
-            TileFidelity::Speed => drop_full_crops(tiles, r),
+            TileFidelity::Speed => {
+                drop_full_crops(tiles, r);
+                loader.hold_fulls([]);
+            }
         }
         if !tiles.reported && tiles.members.iter().all(Option::is_some) {
             tiles.reported = true;

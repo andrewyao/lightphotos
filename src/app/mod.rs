@@ -479,6 +479,9 @@ pub(crate) struct App {
     /// Path we want shown in the loupe (may still be decoding).
     want: Option<PathBuf>,
     shown: Shown,
+    /// The mode `sync_loupe_tiers` last saw, so leaving the Loupe is acted on
+    /// once, whichever of the many paths changed `mode`.
+    tiers_mode: ViewMode,
     /// Where `shown`'s pixels came from.
     shown_origin: crate::jobs::thumbnail::Origin,
     /// A file or folder requested before the window and renderer existed.
@@ -922,6 +925,7 @@ impl App {
             playlist: None,
             want: None,
             shown: Shown::Nothing,
+            tiers_mode: ViewMode::Grid,
             shown_origin: crate::jobs::thumbnail::Origin::Decoded,
             pending_initial: initial,
             session,

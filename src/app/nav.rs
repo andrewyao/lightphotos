@@ -602,6 +602,10 @@ impl App {
             return;
         };
         self.leave_compare_off_group();
+        let loupe_photos = std::iter::once(path.clone()).chain(self.neighbor_paths());
+        if let Some(loader) = &mut self.loader {
+            loader.set_loupe_photos(loupe_photos);
+        }
         // On wasm32 `app/web.rs` decodes the preview and thumbnail instead.
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -611,7 +615,7 @@ impl App {
             if let Some(loader) = &mut self.loader {
                 // Drop queued full decodes of photos stepped past.
                 let keep = |p: &Path| p == path || neighbors.iter().any(|n| n == p);
-                loader.retain_full(path.clone(), keep);
+                loader.retain_full(keep);
                 loader.retain_previews(keep);
                 loader.request_preview(path.clone(), preview_px);
                 loader.request_thumb(path.clone(), px);
@@ -656,12 +660,21 @@ impl App {
         // stepping would land on a soft preview, so prefetch the neighbors'
         // full decodes too. Only once the current photo's own full decode has
         // landed, so they never compete with it, and only when the full tier
-        // holds all three, else each would evict the other and decode again.
-        // The web build keeps one.
+        // holds all three by their sizes, else they would evict one another
+        // and decode again. The web build keeps one.
         #[cfg(not(target_arch = "wasm32"))]
         let fulls = self.full_wanted_at_fit()
             && match (&self.want, self.loader.as_ref()) {
-                (Some(want), Some(loader)) => loader.fulls_fit(want, 1 + paths.len()),
+                (Some(want), Some(loader)) => {
+                    let sized: Vec<_> = paths
+                        .iter()
+                        .map(|p| {
+                            let size = self.exif_cache.get(p).and_then(|m| m.source_size);
+                            (p.clone(), size)
+                        })
+                        .collect();
+                    loader.neighbor_fulls_fit(want, &sized)
+                }
                 _ => false,
             };
         let full_running = match (&self.want, self.loader.as_ref()) {

@@ -89,8 +89,8 @@ impl App {
     /// previous photo's zoom is still set, and the new photo fits only when
     /// its first image uploads.
     pub(super) fn full_wanted(&self) -> bool {
-        // Outside the Loupe, `pump` drops every full decode, so asking for
-        // one would decode it again on every frame.
+        // Full decodes are a Loupe tier, dropped on leaving it. The Grid's
+        // develop page shows the selected photo too, at the preview.
         if self.mode != ViewMode::Loupe
             || self.want.is_none()
             || self.shown.path() != self.want.as_deref()

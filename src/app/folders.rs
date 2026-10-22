@@ -200,11 +200,16 @@ mod tests {
         app.mode = ViewMode::Loupe;
         app.pump();
         assert!(app.loader.as_ref().unwrap().get_full(&photo).is_some());
+        app.shown = crate::app::Shown::Full(photo.clone());
         app.mode = ViewMode::Grid;
         app.pump();
         let loader = app.loader.as_ref().unwrap();
         assert!(loader.get_full(&photo).is_none(), "left the Loupe");
         assert!(loader.get_preview(&photo, 2560).is_some());
+        assert!(
+            !matches!(app.shown, crate::app::Shown::Full(_)),
+            "the full on screen goes too"
+        );
 
         app.open(b);
         let loader = app.loader.as_ref().unwrap();

@@ -481,6 +481,7 @@ impl App {
             pick_pending || listing_pending
         };
 
+        self.sync_loupe_tiers();
         if let Some(loader) = &mut self.loader {
             let jobs::loader::Arrivals {
                 full,
@@ -488,9 +489,6 @@ impl App {
                 metas,
                 exifs,
             } = loader.poll_all();
-            if self.mode != ViewMode::Loupe {
-                loader.drop_fulls();
-            }
             let any = !full.is_empty()
                 || !thumbs.is_empty()
                 || !metas.is_empty()
