@@ -484,3 +484,63 @@ fn an_attached_call_with_no_app_or_no_token_says_how_to_start_it() {
         "{tokenless}"
     );
 }
+
+/// One writer per folder. While LightPhotos has the folder open (here this
+/// test holds the lock as the app does), a headless write is refused with
+/// the `--attach` hint and changes nothing, and reads still work. Once the
+/// app lets go, the same write goes through. A crashed app's lock file,
+/// its line still naming it, blocks no one.
+#[test]
+fn a_headless_write_waits_its_turn_behind_the_app() {
+    let dir = temp_dir("one-writer");
+    let photo = dir.join("a.jpg");
+    write_jpeg(&photo);
+    let folder = dir.to_str().unwrap();
+    let rate = || {
+        call(
+            2,
+            "run_command",
+            json!({ "id": "photo.rate", "params": { "stars": 4, "photos": ["a.jpg"] } }),
+        )
+    };
+
+    let app = sidecar::FolderLock::acquire(&dir, sidecar::Writer::App, sidecar::LOCK_WAIT).unwrap();
+    let refused = session(
+        &["--folder", folder],
+        None,
+        &[call(1, "get_state", json!({})), rate()],
+    );
+    let untouched = sidecar::read_record(&photo).unwrap();
+    drop(app);
+    let allowed = session(&["--folder", folder], None, &[rate()]);
+    let rated = sidecar::read_record(&photo).unwrap();
+
+    // The app crashes: its line stays in the file, its OS lock goes.
+    sidecar::write_record(&photo, &sidecar::ImageRecord::default()).unwrap();
+    let who = dir.join(sidecar::SIDECAR_DIR).join(sidecar::WHO_FILE);
+    std::fs::write(&who, "4000000000 app\n").unwrap();
+    let after_crash = session(&["--folder", folder], None, &[rate()]);
+    let rated_after_crash = sidecar::read_record(&photo).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let read = &reply(&refused, 1)["result"];
+    assert_eq!(read["isError"], false, "reads work");
+    let state: Value = serde_json::from_str(&content_text(read)).unwrap();
+    let read_only = state["read_only"].as_str().unwrap_or_default();
+    assert!(
+        read_only.contains("has this folder open") && read_only.contains("--attach"),
+        "{state}"
+    );
+    let no = &reply(&refused, 2)["result"];
+    assert_eq!(no["isError"], true, "{no}");
+    let why = content_text(no);
+    assert!(why.contains("--attach"), "{why}");
+    assert!(why.contains(&std::process::id().to_string()), "{why}");
+    assert!(why.contains("nothing was changed"), "{why}");
+    assert_eq!(untouched.rating, None, "the sidecar is unchanged");
+
+    assert_eq!(reply(&allowed, 2)["result"]["isError"], false);
+    assert_eq!(rated.rating, Some(4));
+    assert_eq!(reply(&after_crash, 2)["result"]["isError"], false);
+    assert_eq!(rated_after_crash.rating, Some(4));
+}
