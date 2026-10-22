@@ -20,7 +20,7 @@ use crate::sidecar::{SIDECAR_DIR, SIDECAR_EXT};
 
 pub(crate) mod group_file;
 mod writeback;
-pub(crate) use writeback::{LoadMark, Patch};
+pub(crate) use writeback::{changed_onto, LoadMark, Patch};
 use writeback::{WriteOp, Writeback};
 
 /// Records for the active directory, backed by its sidecar files. `images`

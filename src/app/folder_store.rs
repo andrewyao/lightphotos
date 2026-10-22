@@ -941,19 +941,19 @@ impl App {
     /// own sidecar and never to a same-named record here. On the web that
     /// write runs through the handle of the photo's own folder.
     ///
-    /// Adjustments for a photo with an edit not yet saved, such as a slider
-    /// mid-drag, write nothing: the caller has put them in the live edit,
-    /// and the save that ends the drag writes them, never a half-finished
-    /// drag value.
+    /// Adjustments go on as only the sliders the job changed, onto what the
+    /// photo has saved: a slider mid-drag on the same photo is never written
+    /// half-finished, and the result is saved whether the drag is then
+    /// saved, undone or dropped.
     pub(super) fn save_patch(&mut self, path: &Path, patch: Patch) {
-        let editing =
-            self.unsaved_edit.as_deref() == Some(path) || self.unsaved_synced.contains(path);
-        if editing && matches!(patch, Patch::Adjustments(..)) {
-            return;
-        }
         if self.folder_store.holds(path) {
             match patch {
-                Patch::Adjustments(adj, _) => self.folder_store.set_adjustments(path, &adj),
+                // Onto what is saved, not the app's live copy, which can
+                // hold a slider mid-drag.
+                Patch::Adjustments(change) => {
+                    let saved = change.apply(&self.folder_store.adjustments(path));
+                    self.folder_store.set_adjustments(path, &saved);
+                }
                 Patch::Score(s) => self.folder_store.set_score(path, s.score, s.edits),
             }
             return;
@@ -967,6 +967,21 @@ impl App {
                 .folder_store
                 .note_persist_error(format!("no folder handle for {}", path.display())),
         }
+    }
+
+    /// A job result that joined no undo step (a run carried over from an
+    /// earlier visit): set it in every edit the history would put back for
+    /// `path`, so no undo, of a drag it landed in or anything older, takes
+    /// it away.
+    pub(super) fn keep_through_undo(
+        &mut self,
+        path: &Path,
+        before: Adjustments,
+        after: Adjustments,
+    ) {
+        self.history.apply_outside(path, |adj| {
+            crate::persist::folder_store::changed_onto(&before, &after, &adj)
+        });
     }
 
     /// File name the copied settings came from, if any.
@@ -1110,11 +1125,11 @@ mod tests {
     use crate::navigation::Playlist;
 
     /// A measurement that lands on the photo whose slider is mid-drag joins
-    /// the live edit and writes nothing: the drag's own save at release
-    /// writes both, and never a half-finished drag value.
+    /// the live edit and is saved onto the saved edit, never with the
+    /// half-finished drag value; the drag's own save at release writes both.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_measurement_landing_mid_drag_waits_for_the_drags_save() {
+    fn a_measurement_landing_mid_drag_never_saves_the_half_finished_drag() {
         let (mut app, dir, paths) = crate::app::test_support::folder_app("ca-drag", 1);
         let photo = paths[0].clone();
         crate::decode::image_encode::encode_jpeg(
@@ -1157,6 +1172,59 @@ mod tests {
         );
         assert_eq!(released.exposure, 0.7);
         assert!(released.chromatic_aberration.is_some());
+    }
+
+    /// A result from a run carried over from an earlier visit lands while
+    /// the user drags a slider on its photo, and the drag is then undone.
+    /// The result joined no undo step, so it must survive the undo, on
+    /// screen and on disk.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_carried_over_result_survives_an_undo_of_the_drag_it_landed_in() {
+        use crate::app::test_support::{load_folder, temp_folder};
+        let (mut app, dir, paths) = crate::app::test_support::folder_app("ca-drag-undo", 1);
+        let photo = paths[0].clone();
+        crate::decode::image_encode::encode_jpeg(
+            &photo,
+            64,
+            48,
+            &vec![128u8; 64 * 48 * 4],
+            crate::decode::image_encode::JpegQuality::Export,
+        )
+        .unwrap();
+        app.select_single(0);
+        app.set_remove_ca(true);
+        let other = temp_folder("ca-drag-undo-b");
+        load_folder(&mut app, &other);
+        load_folder(&mut app, &dir);
+        // Back in its folder, the run carries on without an undo step, and
+        // the user drags a slider on the photo it is measuring.
+        app.put_edit(
+            &photo,
+            Adjustments {
+                exposure: 0.7,
+                ..Default::default()
+            },
+        );
+        app.unsaved_edit = Some(photo.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.remove_ca_pending() {
+            assert!(std::time::Instant::now() < deadline, "measuring timed out");
+            app.poll_remove_ca();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        app.undo_edit();
+        app.save_edit();
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(10));
+        let shown = app.edits.get(&photo).copied().unwrap_or_default();
+        let saved = crate::sidecar::read_record(&photo).unwrap().adjustments;
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
+        assert_eq!(shown.exposure, 0.0, "the drag is undone");
+        assert!(shown.chromatic_aberration.is_some(), "the result stays");
+        assert_eq!(saved.exposure, 0.0);
+        assert!(saved.chromatic_aberration.is_some(), "and is saved");
     }
 
     #[test]

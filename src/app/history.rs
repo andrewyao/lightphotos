@@ -93,6 +93,23 @@ impl EditHistory {
         &mut step.before[i]
     }
 
+    /// Apply `change` to every edit recorded for `path`, in the open step
+    /// and the done ones: a change made outside the history stays through
+    /// any undo.
+    pub(super) fn apply_outside(
+        &mut self,
+        path: &Path,
+        change: impl Fn(Adjustments) -> Adjustments,
+    ) {
+        for step in self.done.iter_mut().chain(self.open.iter_mut()) {
+            if let Some(&i) = step.index.get(path) {
+                if let Some(before) = step.before.get_mut(i) {
+                    before.adj = change(before.adj);
+                }
+            }
+        }
+    }
+
     /// Holds the open step open while `batch_running`, across frames.
     pub(super) fn hold(&mut self, batch_running: bool) {
         self.held = batch_running;
