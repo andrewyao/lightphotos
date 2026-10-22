@@ -281,7 +281,9 @@ mod tests {
 
     /// A decode that learns it needs more grows its grant ahead of a
     /// request queued after it, instead of giving its bytes back and
-    /// queueing at the back of the line.
+    /// queueing at the back of the line. The queued request doesn't fit
+    /// beside the grown grant, so it can only be admitted once the grower
+    /// lets go, and the order is fixed when the grow goes first.
     #[test]
     fn a_held_grant_grows_ahead_of_new_requests() {
         static BUDGET: DecodeBudget = DecodeBudget::new(100);
@@ -291,7 +293,7 @@ mod tests {
         let queued = {
             let order = Arc::clone(&order);
             std::thread::spawn(move || {
-                let _g = BUDGET.acquire(40);
+                let _g = BUDGET.acquire(50);
                 order.lock().unwrap().push("queued");
             })
         };
@@ -304,10 +306,13 @@ mod tests {
                 let grown = first.grow(60);
                 order.lock().unwrap().push("grown");
                 assert_eq!(grown.bytes(), 60);
-                std::thread::sleep(Duration::from_millis(20));
             })
         };
-        std::thread::sleep(Duration::from_millis(30));
+        // Free `other` only once the grower is waiting, or the queued
+        // request would fit first and rightly go ahead.
+        while !BUDGET.state.lock().unwrap().growing {
+            std::thread::yield_now();
+        }
         drop(other);
         grower.join().unwrap();
         queued.join().unwrap();
