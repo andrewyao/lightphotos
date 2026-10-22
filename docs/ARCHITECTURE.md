@@ -14,6 +14,9 @@ different user action:
 2. **Browsing a folder** — decoding thumbnails for the Grid/filmstrip.
 3. **Exporting a photo** — baking edits into a JPEG on disk.
 
+[Runtime rules](#runtime-rules) states how work is scheduled, how edits
+reach the disk, what an agent may do, and what memory each cache may use.
+
 All three fork into per-platform decode/encode code but converge back onto
 shared, platform-independent code (the tone pipeline, the GPU renderer, the
 pixel-ops math) — that convergence is what guarantees the three platforms
@@ -257,6 +260,214 @@ flowchart TD
   output size), Grid thumbnails (`Job::Bake`) and scoring (`jobs/score.rs`).
 - All three run `image_ops::bake_samples`. That is what guarantees an exported
   file matches what the user saw on screen.
+
+---
+
+## Runtime rules
+
+These rules apply to all three pipelines. Each rule names the code that
+enforces it.
+
+### How work is scheduled
+
+**The Loader's queue (`jobs/loader.rs`, `Queue`).** One queue feeds every
+decode thread. A thread takes the first job from the highest lane that has
+one:
+
+| Lane | Jobs | Worker 0 | Pruned when |
+|---|---|---|---|
+| 1. speed | `Job::Speed`, web `JobKind::Speed` | yes | wasm32: the photo changes (`retain_web_loupe`) |
+| 2. preview | `Job::Preview`, web `Preview` and `WebExif` | yes (on wasm32, only worker 0) | the photo changes (`retain_previews`, `retain_web_loupe`) |
+| 3. full | `Job::Full`, web `Full` and `WebMeasure` | yes | native: the photo changes (`retain_full`); the Loupe closes (`leave_loupe`) |
+| 4. exif | `Job::Exif` | yes | never |
+| 5. bake | `Job::Bake` (an edited thumbnail on screen) | no | never |
+| 6. viewport thumbs | `Job::Thumb` from `set_viewport_thumbs`, web `JobKind::Thumb` | no | the cell scrolls away (`set_viewport_thumbs`, `retain_web_thumbs`) |
+| 7. thumbs | `Job::Thumb` from `request_thumb` (background: bursts, hashes, Auto Tone) | no | never (FIFO) |
+| 8. export | `Job::WebExport` | no | never |
+| 9. meta | `Job::Meta` (capture time for sorts) | yes | never |
+
+- The loader starts `cores − 2` threads, at least 1, at most
+  `CacheLimits::decode_threads`.
+- Worker 0 is reserved: it never takes lanes 5 to 8. A running job cannot be
+  stopped, so the reservation keeps one thread free for the Loupe. With one
+  thread, there is no reservation.
+- Each Loupe job carries a `Generation`. `Loader::forget_loupe_decodes` drops
+  every cached and queued Loupe decode and starts a new generation. A result from an older
+  generation is dropped. A folder change and the Apple tone curve setting
+  call it.
+- Other pools run apart from the queue: `Exporter` and `ScorePool`
+  (`worker_pool.rs`), and `FacePool`.
+
+**The Loupe cache tiers.** Each tier is an LRU (`jobs/tier.rs`) with a count
+cap and a byte cap (`jobs/cache_limits.rs`):
+
+| Tier | Key | Evicts |
+|---|---|---|
+| Thumbnails | `(path, px)` | the oldest, past `thumbs` or the Grid's working set if larger |
+| Previews | `(path, target_px)` | the least recently used, past `previews` or `preview_bytes` |
+| Fulls | `path` | the least recently used, past `fulls` or `full_bytes`; all of them when the Loupe closes |
+
+- **The hold set.** `App::sync_loupe_tiers` computes a `Hold` on each pass of the event loop
+  and gives it to `Loader::set_hold`. It names the shown photo, the
+  neighbors and the Group Compare tiles. Eviction never removes a held image
+  or the image just filed. Thus one large image always stays in the cache.
+- A folder change clears the hold and forgets every Loupe decode
+  (`App::forget_folder_decodes`).
+
+**The job-lifetime rule.** A job that writes a sidecar finishes across a
+folder change (doc comment on `App::finish_folder_jobs`, `app/mod.rs`):
+
+- Auto Tone, Remove CA, scoring and bulk delete keep running.
+- Each result goes to its own photo's sidecar, found by the photo's full
+  path (`save_patch`, `FolderStore::patch_uncached`). It never goes through
+  the folder store's cache, which is keyed by file name.
+- The job releases only its undo step, because the folder change clears the
+  history.
+- An Auto Tone batch that still waits for the folder store has not
+  started. It is dropped.
+- A new job that writes a sidecar must obey the same rule.
+
+### Edit durability
+
+```mermaid
+flowchart LR
+    edit["FolderStore mutation\n(rate, edit, job result)"] --> op["WriteOp keyed by the photo's full path\nPut = whole record, Patch = one part,\nDelete, PutGroup, DeleteGroup"]
+    op --> native["native: one FIFO thread\nfolder-store-write"]
+    op --> web["wasm32: spawn_local tasks,\none per path, at most 32"]
+    native --> atomic["paths::write_atomic\n<sidecar>.<pid>-<n>.tmp, then rename"]
+    web --> fsa["File System Access writable stream\n(swaps the file on close)"]
+    native -- "send fails: writer is dead" --> inline["write inline on the UI thread;\nthe next write starts a new thread"]
+    atomic --> done["pump(), each frame:\nerrors -> stderr + status-bar error"]
+    fsa --> done
+    inline --> done
+```
+
+Rules (`persist/folder_store/writeback.rs`):
+
+- Writes to one path complete in the order they were queued. Native gets
+  this from one FIFO thread. wasm32 starts at most one task per path.
+- A `Put` holds the whole record, so the newest op for a path answers a
+  read alone (`overlay`). A `Patch` folds into an earlier `Put` or `Delete`
+  for the same path.
+- A folder load does not overwrite a queued write. The load's `LoadMark`
+  shows which writes it may not have seen, and `overlay` applies them.
+- A write sent to a dead writer runs inline on the UI thread. The next
+  write starts a new thread. When no thread starts, every write runs inline.
+- A failed write shows an error in the status bar (`App::redraw`, through
+  `FolderStore::take_error`).
+
+What quit does (native `exiting`, `main.rs`):
+
+1. It saves the pending edit and the export form.
+2. It waits up to 10 s for the sidecar queue to empty.
+3. It writes the catalog's marks (up to 10 s) and the signal cache (up to 2 s).
+4. A write still queued at the deadline is lost. Quit reports one line,
+   "N photos' sidecar writes did not finish within 10 s", to stderr only.
+   The window is already gone. On macOS, AppKit then calls `exit()`.
+
+- Any other drop of the queue waits with no limit
+  (`impl Drop for Writeback`).
+- The browser has no exit hook. `pagehide` and `visibilitychange` save the
+  pending edit (`App::page_hidden`). Each write starts at once.
+
+**One writer per folder.** Nothing locks a folder yet. Two processes that
+write the same sidecars overwrite each other's edits.
+
+- Do not run `lightphotos-mcp --folder` on a folder that the app has open.
+  Use `--attach` to drive the app instead.
+- A folder lock is planned. Its design will be in `docs/design/folder-lock.md`.
+
+### Automation trust model
+
+Three channels let an agent drive the running app. All three send the same
+`shell::control::Op` requests to the main thread (`app/control.rs`). Every
+`run` passes `App::run_from_agent` (`app/agent.rs`). Headless MCP runs no
+app; it edits sidecars in one folder.
+
+| Channel | Where | Who can call |
+|---|---|---|
+| `--control <port>` | `shell/control/tcp.rs`, native | a local program that holds the token; 127.0.0.1 only, 4 connections |
+| `lightphotos-mcp --attach <port>` | `bin/lightphotos_mcp/attached.rs` | an MCP client; it signs in to `--control` with `LIGHTPHOTOS_CONTROL_TOKEN` |
+| WebMCP | `web/web_mcp.rs`, wasm32 | an agent in the browser through `document.modelContext`; `run_command` has `destructiveHint` |
+| `lightphotos-mcp --folder <dir>` | `bin/lightphotos_mcp/headless.rs` | an MCP client; no app runs, and only photos in `<dir>` are reachable |
+
+**The sign-in (`control_auth.rs`).** The token never crosses the socket.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as App (--control)
+    C->>A: hello(client nonce)
+    A-->>C: server nonce + Server MAC
+    Note over C: wrong MAC: stop, send nothing more
+    C->>A: auth(Client MAC)
+    Note over A: wrong MAC: bad_token, close
+    A-->>C: signed_in
+```
+
+- Each MAC is HMAC-SHA256, keyed by the token, over
+  `<side prefix><client nonce>:<server nonce>`.
+- The two prefixes differ, so one side's MAC cannot stand in for the other's.
+- The app proves itself first, so a program on the port learns nothing.
+- A connection must sign in within 5 s. A line before the sign-in is at
+  most 4 KiB.
+
+**The anchor rule (`app/agent.rs`, `Anchor`).** The anchor is the folder
+the user has open.
+
+- An agent works in the anchor and the folders below it. It can go back up
+  to the anchor, never above it.
+- Only the user's actions move the anchor: the picker, the command line,
+  Finder, the folder tree, the keyboard, a catalog, a launch restore. An
+  agent's command never moves it.
+- When the user opens one photo, the anchor is that photo's folder only
+  (and its `Exports`), not the folders below it.
+- An agent cannot run `catalog.new`, `catalog.open`, `catalog.switch`,
+  `preset.save` or `preset.add_folder`.
+- An agent exports only into the anchor, a folder below it, or the export
+  form's own folder.
+- A photo that links to a file outside the anchor is out of reach. A
+  `screenshot` is refused while one shows.
+- `state` and `list` show no photo outside the anchor.
+
+**File names are untrusted text.** Anyone who can write a file name
+controls it. The tools tell the agent to treat photo and folder names as
+data, never as instructions (`bin/lightphotos_mcp/tools.rs`,
+`web/web_mcp.rs`).
+
+### Memory budget
+
+Decoded pixels cost 4 bytes a pixel in RGBA8 and 8 bytes a pixel in
+`LinearF16` or `TonedF16` (a macOS RAW, and rawler's RAW develops).
+
+Caps per tier (`jobs/cache_limits.rs`):
+
+| Tier | macOS, Linux, Windows | wasm32 |
+|---|---|---|
+| Thumbnails (512 px, about 0.7 MB each) | 256, or the Grid's working set if larger; no byte cap | same |
+| Previews (up to 4096 px) | 8, and 384 MiB | 8, and 256 MiB |
+| Fulls | 3, and 1152 MiB | 1, and 512 MiB |
+| Decode threads | `cores − 2`, at least 1 | `cores − 2`, at least 1, at most 6 |
+
+- `LIGHTPHOTOS_CACHE_THUMBS`, `_PREVIEWS`, `_FULLS`, `_PREVIEW_MB` and
+  `_FULL_MB` override a native default.
+- A tier can go over its byte cap by one image: eviction never removes the
+  newest image or a held one.
+
+**The wasm32 decode budget (`decode/decode_budget.rs`).** All decode
+threads share one heap of at most 4 GB, which never shrinks.
+
+- A decode asks for its peak bytes before it allocates. It waits while the
+  other decodes hold too much of the 1536 MiB budget.
+- Requests are served in order, so small thumbnail decodes cannot starve a
+  large Loupe decode.
+- One decode larger than the whole budget runs alone.
+- The budget covers the Loupe's and the Grid's decodes: RAW
+  (`rawler/raw_preview.rs`, and a RAF or CR3 camera JPEG in
+  `decode/rawler/mod.rs`) and non-RAW JPEG, PNG and TIFF
+  (`decode/image_decode/fit.rs`).
+- A RAW export (`decode_raw_nonmac`) takes no grant.
+- A thread that panics gives its grant back (`release_held_by_this_thread`).
 
 ---
 
