@@ -6,3 +6,4 @@ pub(crate) mod cache_limits;
 pub(crate) mod loader;
 pub(crate) mod score;
 pub(crate) mod thumbnail;
+pub(crate) mod tier;

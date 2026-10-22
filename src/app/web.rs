@@ -980,6 +980,7 @@ impl App {
             return false;
         };
         let pool = loader.web_decoder();
+        let generation = loader.loupe_generation();
         let exif_needed = !self.exif_cache.contains_key(&path) && loader.begin_web_exif(&path);
         if quality_needed {
             self.web.preview_inflight.insert(key.clone());
@@ -1009,10 +1010,17 @@ impl App {
                         });
                     }
                     if speed_needed {
-                        pool.submit(path.clone(), target, bytes.clone(), is_raw, JobKind::Speed);
+                        pool.submit(
+                            path.clone(),
+                            target,
+                            bytes.clone(),
+                            is_raw,
+                            JobKind::Speed,
+                            generation,
+                        );
                     }
                     if quality_needed {
-                        pool.submit(path, target, bytes, is_raw, JobKind::Preview);
+                        pool.submit(path, target, bytes, is_raw, JobKind::Preview, generation);
                     }
                 }
                 Err(e) => {
@@ -1023,10 +1031,11 @@ impl App {
                         pool.finish_exif(path.clone(), meta);
                     }
                     if quality_needed {
-                        pool.fail(path.clone(), target, JobKind::Preview, None, e.clone());
+                        let failed = JobKind::Preview;
+                        pool.fail(path.clone(), target, failed, Some(generation), e.clone());
                     }
                     if speed_needed {
-                        pool.fail(path, target, JobKind::Speed, None, e);
+                        pool.fail(path, target, JobKind::Speed, Some(generation), e);
                     }
                 }
             }
@@ -1122,16 +1131,27 @@ impl App {
     pub(crate) fn poll_web_preview(&mut self) -> bool {
         let mut landed = false;
         let pending = std::mem::take(&mut self.web.preview_pending);
+        let current = self.loader.as_ref().map(|l| l.loupe_generation());
         for crate::web::web_decode::PoolResult {
             kind,
             path,
             target,
             result,
             origin,
+            generation,
             ..
         } in pending
         {
             let key = (path.clone(), target);
+            // Asked for before a folder change or a decode setting: it would
+            // evict the new folder's previews, or show the old settings.
+            if generation != current {
+                match kind {
+                    JobKind::Speed => self.web.speed_inflight.remove(&key),
+                    _ => self.web.preview_inflight.remove(&key),
+                };
+                continue;
+            }
             match kind {
                 JobKind::Speed => {
                     self.web.speed_inflight.remove(&key);
@@ -1300,7 +1320,11 @@ impl App {
         let Some(handle) = self.web.file_handles.get(&path).cloned() else {
             return false;
         };
-        let Some(pool) = self.loader.as_ref().map(|l| l.web_decoder()) else {
+        let Some((pool, generation)) = self
+            .loader
+            .as_ref()
+            .map(|l| (l.web_decoder(), l.loupe_generation()))
+        else {
             return false;
         };
         self.web.full_inflight.insert(key);
@@ -1317,12 +1341,13 @@ impl App {
                     std::sync::Arc::new(bytes),
                     is_raw,
                     JobKind::Full,
+                    generation,
                 ),
                 Err(e) => {
                     web_sys::console::error_1(
                         &format!("[web] reading bytes failed for {}: {e}", path.display()).into(),
                     );
-                    pool.fail(path, target, JobKind::Full, None, e);
+                    pool.fail(path, target, JobKind::Full, Some(generation), e);
                 }
             }
         });
@@ -1334,16 +1359,25 @@ impl App {
     pub(crate) fn poll_web_full(&mut self) -> bool {
         let mut landed = false;
         let pending = std::mem::take(&mut self.web.full_pending);
+        let (current, open) = self.loader.as_ref().map_or((None, false), |l| {
+            (Some(l.loupe_generation()), l.fulls_open())
+        });
         for crate::web::web_decode::PoolResult {
             path,
             target,
             result,
             origin,
+            generation,
             ..
         } in pending
         {
             let key = (path.clone(), target);
             self.web.full_inflight.remove(&key);
+            // Asked for before a folder change or a decode setting, or landed
+            // after the Loupe closed: the Loupe no longer wants it.
+            if generation != current || !open {
+                continue;
+            }
             match result {
                 Ok(img) => {
                     self.web.full_retries.remove(&key);

@@ -22,6 +22,29 @@ impl App {
         }
     }
 
+    /// Acts on leaving the Loupe, once: the loader frees its full decodes,
+    /// and a full on screen goes too, CPU and GPU copies both, so the
+    /// Grid's develop page (or the next Loupe visit) uploads the preview.
+    /// `pump` calls this every frame; it compares against the mode it last
+    /// saw, so every path that changes `mode` is covered.
+    pub(crate) fn sync_loupe_tiers(&mut self) {
+        let left = self.tiers_mode == ViewMode::Loupe && self.mode != ViewMode::Loupe;
+        self.tiers_mode = self.mode;
+        if !left {
+            return;
+        }
+        if let Some(loader) = &mut self.loader {
+            loader.leave_loupe();
+        }
+        if matches!(self.shown, Shown::Full(_)) {
+            self.shown = Shown::Nothing;
+            if let Some(r) = &mut self.renderer {
+                r.clear_image();
+            }
+            self.try_show();
+        }
+    }
+
     /// Show `want` at the best tier available: full resolution, then the
     /// preview, then the thumbnail as a placeholder. Runs every frame.
     pub(crate) fn try_show(&mut self) {
