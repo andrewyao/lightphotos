@@ -23,8 +23,8 @@ pub(super) const EXPORT_REFUSED: &str = "an agent can export only into the folde
                                          has open, a folder inside it, or the export form's \
                                          own folder";
 
-const USER_ONLY: &str = "an agent can't make, open or switch catalogs, or add preset folders; \
-                         the user does that in the app";
+const USER_ONLY: &str = "an agent can't make, open or switch catalogs, or save presets or add \
+                         preset folders; the user does that in the app";
 
 /// The folder the user has open, resolved once when it is set.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -252,15 +252,96 @@ impl App {
         None
     }
 
-    /// Why a screenshot would show an agent a photo from outside the
-    /// anchor: the open folder lists one that links out of it.
+    /// Why a screenshot would show an agent what it may not see: there is
+    /// no anchor, the open folder is outside it, or the folder lists a
+    /// photo that links out of it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn screenshot_shows_outside(&self) -> Option<String> {
+        let open_and_unheld = self.folder_sel.is_some() && !self.folder_held();
+        if self.folder_anchor.is_none() || open_and_unheld {
+            return Some("no screenshot for an agent: the user has no folder open for it".into());
+        }
         let outside = self.link_outside()?;
         Some(format!(
             "no screenshot for an agent: {} links outside the folder the user has open",
             outside.display()
         ))
+    }
+
+    /// Whether the open folder is the anchor or inside it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn folder_held(&self) -> bool {
+        let anchor = self.folder_anchor.as_ref();
+        self.folder_sel
+            .as_deref()
+            .is_some_and(|dir| anchor.is_some_and(|a| a.holds(dir)))
+    }
+
+    /// Whether `photo`, one the open folder lists, is in reach: it is no
+    /// link, or links inside the anchor.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn photo_held(&self, photo: &Path) -> bool {
+        let link = self
+            .playlist
+            .as_ref()
+            .is_some_and(|pl| pl.links().contains(photo));
+        !link
+            || self
+                .folder_anchor
+                .as_ref()
+                .is_some_and(|a| a.holds_photo(photo))
+    }
+
+    /// The `state` an agent gets.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn agent_state(&self) -> super::State {
+        let roots = match &self.folder_anchor {
+            Some(anchor) => self
+                .folder_roots()
+                .iter()
+                .filter(|root| anchor.holds(root))
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        let photo_held = self
+            .selected_path()
+            .is_none_or(|photo| self.photo_held(&photo));
+        super::State::of(self).for_agent(roots, self.folder_held(), photo_held)
+    }
+
+    /// The `list` an agent gets.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn agent_list(&self) -> super::PhotoList {
+        super::PhotoList::for_agent(self, self.folder_held(), |photo| !self.photo_held(photo))
+    }
+
+    /// The `commands` listing an agent gets: the shown photo's develop
+    /// values only when that photo is in reach.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn agent_listing(&self) -> crate::command::Listing {
+        let shown_held =
+            self.folder_held() && self.shown.path().is_none_or(|photo| self.photo_held(photo));
+        match shown_held {
+            true => self.listing(),
+            false => crate::command::listing(None),
+        }
+    }
+
+    /// In the browser no path policy applies; an agent sees what the app does.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn agent_state(&self) -> super::State {
+        super::State::of(self)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn agent_list(&self) -> super::PhotoList {
+        super::PhotoList::for_agent(self, true, |_| false)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn agent_listing(&self) -> crate::command::Listing {
+        self.listing()
     }
 
     /// Runs a command an agent sent, once it passes the checks here. The
@@ -274,7 +355,8 @@ impl App {
             Command::NewCatalog(_)
             | Command::OpenCatalog(_)
             | Command::SwitchCatalog(_)
-            | Command::AddPresetFolder(_) => return Err(refuse(USER_ONLY)),
+            | Command::AddPresetFolder(_)
+            | Command::SavePreset(_) => return Err(refuse(USER_ONLY)),
             Command::OpenFolder(p) => {
                 let real = resolve(&p.path).filter(|real| {
                     self.folder_anchor
@@ -341,7 +423,6 @@ impl App {
             | Command::CopySettings(_)
             | Command::PasteSettings(_)
             | Command::Preset(_)
-            | Command::SavePreset(_)
             | Command::Undo => {}
         }
         if let Some(why) = self.photos_outside_anchor(&cmd) {

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use web_time::Instant;
 
-use super::{App, PhotoList, State};
+use super::App;
 use crate::shell::control::{Answer, ChannelError, Op, Payload, Reply, Request};
 
 /// Requests the frame loop answers later.
@@ -41,9 +41,9 @@ impl App {
         self.request_redraw();
         let answer = match op {
             Op::Run(cmd) => self.run_from_agent(*cmd).map_err(Into::into).and_then(json),
-            Op::Commands => json(self.listing()),
-            Op::State => json(State::of(self)),
-            Op::List => json(PhotoList::of(self)),
+            Op::Commands => json(self.agent_listing()),
+            Op::State => json(self.agent_state()),
+            Op::List => json(self.agent_list()),
             #[cfg(not(target_arch = "wasm32"))]
             Op::Screenshot => return self.control.shots.push(reply),
             Op::Wait(timeout) => {
@@ -76,7 +76,7 @@ impl App {
         let now = Instant::now();
         for (reply, deadline) in std::mem::take(&mut self.control.waits) {
             if settled {
-                let _ = reply.send(json(State::of(self)));
+                let _ = reply.send(json(self.agent_state()));
             } else if now >= deadline {
                 let _ = reply.send(Err(ChannelError::Timeout.into()));
             } else {
@@ -159,8 +159,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn a_screenshot_without_a_window_is_an_error() {
-        let mut app = App::new(None);
+        let dir = folder("shot-no-window");
+        let mut app = user_opened(&dir);
         let (tx, rx) = mpsc::channel();
         app.answer_control(live(Op::Screenshot), tx);
         assert!(rx.try_recv().is_err());
@@ -578,6 +580,82 @@ mod tests {
         let mut app = user_opened(&dir);
         agent_runs(&mut app, open_folder(&dir.join("sub"))).unwrap();
         assert_eq!(app.screenshot_shows_outside(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn agent_asks(app: &mut App, op: Op) -> Result<serde_json::Value, String> {
+        let (tx, rx) = mpsc::channel();
+        app.answer_control(live(op), tx);
+        app.poll_control();
+        json_of(rx.try_recv().unwrap())
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_agent_cannot_save_presets() {
+        let dir = folder("anchor-preset-save");
+        let mut app = user_opened(&dir);
+        let save = crate::command::Command::parse(r#"{"id":"preset.save","params":{"name":"x"}}"#);
+        let out = agent_runs(&mut app, save.unwrap());
+        assert!(
+            out.as_ref().is_err_and(|e| e.contains("in the app")),
+            "{out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_sees_nothing_outside_the_anchor_in_state_list_or_commands() {
+        let dir = folder("anchor-reads");
+        let other = folder("anchor-reads-other");
+        let outside = crate::app::test_support::temp_folder("anchor-reads-out");
+        std::fs::write(outside.join("secret.jpg"), []).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.jpg"), dir.join("link.jpg")).unwrap();
+        let mut app = App::new(None);
+        app.open(other.clone());
+        app.open(dir.clone());
+        let link = dir.join("link.jpg");
+        app.set_rating_of(link.clone(), 5);
+        let pos = app
+            .playlist
+            .as_ref()
+            .and_then(|pl| pl.entries().iter().position(|p| *p == link))
+            .unwrap();
+        app.select_single(pos);
+
+        let state = agent_asks(&mut app, Op::State).unwrap();
+        assert_eq!(state["folder_roots"], serde_json::json!([dir]), "{state}");
+        assert_eq!(state["rating"], serde_json::Value::Null, "{state}");
+        let list = agent_asks(&mut app, Op::List).unwrap();
+        let shown = list["photos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "link.jpg")
+            .cloned()
+            .unwrap();
+        assert_eq!(shown["rating"], 0, "{shown}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn with_no_anchor_an_agent_reads_no_photos() {
+        let dir = folder("anchor-none-reads");
+        let mut app = user_opened(&dir);
+        app.select_single(0);
+        app.folder_anchor = None;
+        let list = agent_asks(&mut app, Op::List).unwrap();
+        assert_eq!(list["photos"], serde_json::json!([]), "{list}");
+        let state = agent_asks(&mut app, Op::State).unwrap();
+        assert_eq!(state["photo"], serde_json::Value::Null, "{state}");
+        assert_eq!(state["folder"], serde_json::Value::Null, "{state}");
+        let shot = agent_asks(&mut app, Op::Screenshot).unwrap_err();
+        assert!(shot.contains("no screenshot for an agent"), "{shot}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
