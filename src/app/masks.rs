@@ -300,7 +300,13 @@ impl App {
         if self.coverage.read_only_photo(path) {
             return;
         }
-        self.folder_store.set_detection(path, target, id);
+        // A job result like any other: through the cache when the folder
+        // takes edits, else parked for the photo's sidecar (save_patch).
+        let at = crate::sidecar::unix_now();
+        self.save_patch(
+            path,
+            crate::persist::folder_store::Patch::Detection { target, id, at },
+        );
         let entry = self.detections.entry(path.to_path_buf()).or_default();
         entry.set(target, id);
         if entry.is_empty() {
@@ -1300,5 +1306,27 @@ mod tests {
         assert_eq!(app.add_mask(radial()), None);
         assert_eq!(app.current_masks().len(), MAX_MASKS);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review 3.7 round 4: a detection result while the folder isn't
+    /// editable yet (its lock held, its sidecars still loading) is a field
+    /// change that lands on the sidecar, not one dropped.
+    #[test]
+    fn a_detection_before_the_load_lands_is_saved() {
+        let dir = temp_folder("detect-before-load");
+        let photo = dir.join("a.jpg");
+        std::fs::write(&photo, b"").unwrap();
+        let mut app = App::new(None);
+        app.load_playlist(crate::navigation::Playlist::from_dir(&dir), dir.clone());
+        let opening = app.folder_store.opening();
+        let id: RasterId = "00000000000000ab".parse().unwrap();
+        app.record_detection(&photo, DetectTarget::Sky, Some(id));
+        wait_for_folder_store(&mut app);
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(5));
+        let on_disk = crate::sidecar::read_record(&photo).unwrap().detections.sky;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(opening);
+        assert_eq!(on_disk, Some(id));
     }
 }

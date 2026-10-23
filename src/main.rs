@@ -611,31 +611,33 @@ impl App {
         // needs the tight interval on wasm, where `pump` is the scheduler; on
         // native the worker drains on its own and only the toast needs
         // refreshing.
-        // An undecided visit tries its lock again each poll, for about 100 ms
-        // (or while an app that is quitting holds it).
-        let poll_ms = if image_pending
-            || thumbs_pending
-            || self.bulk_delete_running()
-            || self.folder_store.opening()
-        {
-            Some(16)
-        } else if self.export_running()
-            || self.folder_store.backlog() > 0
-            || self.catalog.backlog() > 0
-            || immich_connecting
-            || vision_pending
-            || scoring
-            || detecting
-            || scanning_presets
-        {
-            Some(if cfg!(target_arch = "wasm32") {
-                16
+        // An undecided lock is tried again each poll, for about 100 ms (or
+        // while an app that is quitting holds it). The sidecar load itself is
+        // in `image_pending`.
+        #[cfg(not(target_arch = "wasm32"))]
+        let lock_undecided = self.folder_store.lock_undecided();
+        #[cfg(target_arch = "wasm32")]
+        let lock_undecided = false;
+        let poll_ms =
+            if image_pending || thumbs_pending || self.bulk_delete_running() || lock_undecided {
+                Some(16)
+            } else if self.export_running()
+                || self.folder_store.backlog() > 0
+                || self.catalog.backlog() > 0
+                || immich_connecting
+                || vision_pending
+                || scoring
+                || detecting
+                || scanning_presets
+            {
+                Some(if cfg!(target_arch = "wasm32") {
+                    16
+                } else {
+                    100
+                })
             } else {
-                100
-            })
-        } else {
-            None
-        };
+                None
+            };
         poll_ms.map(std::time::Duration::from_millis)
     }
 }

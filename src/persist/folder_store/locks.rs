@@ -45,6 +45,20 @@ pub(super) struct Shared {
     writer: HashMap<FolderKey, FolderLock>,
     /// Folders on volumes without file locks.
     lockless: HashSet<FolderKey>,
+    /// Folders whose lock couldn't be made for the writer, and how many
+    /// tries in a row. See [`SaveLocks::write_in`].
+    unavailable: HashMap<FolderKey, u32>,
+    /// Notices for the user, taken by [`take_notices`].
+    notices: Vec<String>,
+}
+
+/// Tries in a row (about 0.5 s apart, about 3 s in all) after which a lock that can't be made
+/// is reported to the user, while its writes stay parked.
+const UNAVAILABLE_NOTICE: u32 = 6;
+
+/// The notices the writer left for the user since the last call.
+pub(super) fn take_notices(shared: &SharedLocks) -> Vec<String> {
+    std::mem::take(&mut lock(shared).notices)
 }
 
 pub(super) type SharedLocks = Arc<Mutex<Shared>>;
@@ -327,7 +341,11 @@ impl SaveLocks {
         }
         match FolderLock::try_acquire(key.path(), Writer::AppSave) {
             Ok(taken) => {
-                lock(&self.shared).writer.insert(key.clone(), taken);
+                {
+                    let mut shared = lock(&self.shared);
+                    shared.writer.insert(key.clone(), taken);
+                    shared.unavailable.remove(key);
+                }
                 Saved::Done(write())
             }
             Err(LockError::Busy(_)) => Saved::Parked,
@@ -335,13 +353,23 @@ impl SaveLocks {
                 lock(&self.shared).lockless.insert(key.clone());
                 Saved::Done(write())
             }
-            // The lock can't be made (a read-only volume, `.lightphotos`
-            // a file): the write fails with that reason rather than land in
-            // the folder without its lock.
-            Err(e @ LockError::Unavailable(_)) => Saved::Done(Err(format!(
-                "could not save in {}: {e}",
-                key.path().display()
-            ))),
+            // The lock can't be made just now (a disk or network fault,
+            // too many open files): parked and tried again like a busy one,
+            // so an accepted write never fails because of the lock. The
+            // user hears if it goes on.
+            Err(e @ LockError::Unavailable(_)) => {
+                let mut shared = lock(&self.shared);
+                let tries = shared.unavailable.entry(key.clone()).or_insert(0);
+                *tries = tries.saturating_add(1);
+                if *tries == UNAVAILABLE_NOTICE {
+                    let notice = format!(
+                        "could not lock {} to save ({e}); still trying",
+                        key.path().display()
+                    );
+                    shared.notices.push(notice);
+                }
+                Saved::Parked
+            }
         }
     }
 

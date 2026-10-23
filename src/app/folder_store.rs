@@ -1059,15 +1059,9 @@ impl App {
     /// saved, undone or dropped.
     pub(super) fn save_patch(&mut self, path: &Path, patch: Patch) {
         if self.folder_store.holds(path) {
-            match patch {
-                // Onto what is saved, not the app's live copy, which can
-                // hold a slider mid-drag.
-                Patch::Adjustments(change) => {
-                    let saved = change.apply(&self.folder_store.adjustments(path));
-                    self.folder_store.set_adjustments(path, &saved);
-                }
-                Patch::Score(s) => self.folder_store.set_score(path, s.score, s.edits),
-            }
+            // Onto what is saved, not the app's live copy, which can hold a
+            // slider mid-drag.
+            self.folder_store.change(path, patch);
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
