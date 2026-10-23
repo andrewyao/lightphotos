@@ -457,7 +457,7 @@ mod writer {
         if crate::paths::create_sidecar_dir(dir).is_err() {
             return;
         }
-        let _ = crate::paths::write_atomic(path, bytes);
+        let _ = crate::paths::write_atomic(path, bytes, None);
     }
 }
 

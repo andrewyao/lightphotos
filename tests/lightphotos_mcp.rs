@@ -3,6 +3,10 @@
 //! Scripted stdio sessions against the built `lightphotos-mcp` binary.
 
 #![cfg(not(target_arch = "wasm32"))]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests write their fixtures directly; clippy.toml says why the app may not"
+)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;

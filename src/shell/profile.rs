@@ -507,7 +507,7 @@ impl Run {
             .iter()
             .filter_map(|p| p.file_name())
             .map(|name| scratch.join(name))
-            .filter(|p| std::fs::write(p, []).is_ok())
+            .filter(|p| crate::paths::write_atomic(p, &[], None).is_ok())
             .collect();
         {
             let mut cache = crate::persist::signalcache::SignalCache::load(&scratch);

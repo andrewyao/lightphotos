@@ -10,6 +10,9 @@
     clippy::unreachable,
     clippy::undocumented_unsafe_blocks
 )]
+// Tests write their fixtures with `std::fs::write`; clippy.toml says why
+// non-test code may not.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 //! LightPhotos' decode, encode, develop and scoring layer: everything that
 //! turns a file into pixels, an edit, a JPEG or a score without a window. The
 //! app in `main.rs` and the probes in `src/bin/` share it, so none of these

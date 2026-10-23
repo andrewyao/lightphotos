@@ -4,3 +4,11 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
+
+# Files are written through `paths::write_atomic`: a temp file and a rename,
+# so a crash, a full disk or a second instance never leaves a partial file.
+# Tests may write fixtures directly; each crate root allows it under
+# `cfg(test)`.
+disallowed-methods = [
+    { path = "std::fs::write", reason = "a crash or a second instance can leave a partial file; use paths::write_atomic" },
+]

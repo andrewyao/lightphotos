@@ -10,6 +10,9 @@
     clippy::unreachable,
     clippy::undocumented_unsafe_blocks
 )]
+// Tests write their fixtures with `std::fs::write`; clippy.toml says why
+// non-test code may not.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 //! `face_probe`: prints Vision face landmarks and eye-openness scores so a
 //! person can check `facequality.rs` against real open-eyed and blinking

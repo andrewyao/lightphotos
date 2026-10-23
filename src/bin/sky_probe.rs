@@ -10,6 +10,9 @@
     clippy::unreachable,
     clippy::undocumented_unsafe_blocks
 )]
+// Tests write their fixtures with `std::fs::write`; clippy.toml says why
+// non-test code may not.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 //! `sky_probe`: writes `scoring/sky.rs`'s sky coverage as images so a person
 //! can check it on real photos. Each input is decoded at most 1024 px on its
