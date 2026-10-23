@@ -92,9 +92,13 @@ pub enum LockError {
     /// writer for all of the wait. Names the holder as its lock file does,
     /// when it can be read.
     Busy(Option<Holder>),
-    /// The lock file could not be made or opened just now, such as on a
-    /// read-only volume, a full disk or a folder that is gone. It can pass.
+    /// The lock file could not be made or opened just now: a disk or
+    /// network fault, too many open files. It can pass.
     Unavailable(String),
+    /// The lock file can't be made here and won't be: a read-only volume,
+    /// no permission, the folder (or `.lightphotos`) gone or not a folder,
+    /// a planted link.
+    Refused(String),
     /// The volume has no file locks (`ENOTSUP`, `ENOLCK`), such as some
     /// network shares. It won't pass while the folder is there.
     Unsupported(String),
@@ -113,7 +117,9 @@ impl std::fmt::Display for LockError {
                 writer.as_str()
             ),
             LockError::Busy(None) => write!(f, "another program is saving this folder's edits"),
-            LockError::Unavailable(e) => write!(f, "cannot lock the folder's edits: {e}"),
+            LockError::Unavailable(e) | LockError::Refused(e) => {
+                write!(f, "cannot lock the folder's edits: {e}")
+            }
             LockError::Unsupported(e) => write!(f, "this volume can't lock files: {e}"),
         }
     }
@@ -215,6 +221,21 @@ impl Drop for FolderLock {
 /// `ENOTSUP`, `ENOLCK` (no lock manager, as on some NFS mounts) and `EINVAL`
 /// (the file system can't lock this kind of file) mean that. `EIO` and the
 /// rest can pass, so they make the lock unavailable for this try only.
+/// Whether an error making or opening the lock file will be there next
+/// time too, so a write waiting for the lock should fail rather than wait.
+pub fn lasting(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind as K;
+    matches!(
+        kind,
+        K::PermissionDenied
+            | K::ReadOnlyFilesystem
+            | K::NotADirectory
+            | K::IsADirectory
+            | K::NotFound
+            | K::InvalidFilename
+    )
+}
+
 fn is_unsupported(e: &std::io::Error) -> bool {
     // ENOLCK and EINVAL have no `ErrorKind` of their own.
     #[cfg(target_os = "macos")]
@@ -255,15 +276,22 @@ impl FolderLock {
     /// `wait` for a brief writer. Creates `dir/.lightphotos/` if needed, but
     /// never `dir` itself: a folder deleted outside the app stays deleted.
     pub fn acquire(dir: &Path, who: Writer, wait: Duration) -> Result<FolderLock, LockError> {
-        let unavailable = |e: std::io::Error| LockError::Unavailable(e.to_string());
+        let unavailable = |e: std::io::Error| {
+            if lasting(e.kind()) {
+                LockError::Refused(e.to_string())
+            } else {
+                LockError::Unavailable(e.to_string())
+            }
+        };
+        let refused = |e: std::io::Error| LockError::Refused(e.to_string());
         if !dir.is_dir() {
-            return Err(LockError::Unavailable(format!(
+            return Err(LockError::Refused(format!(
                 "{} is not a folder",
                 dir.display()
             )));
         }
         let sidecars = dir.join(SIDECAR_DIR);
-        crate::paths::refuse_linked_sidecar_dir(&sidecars).map_err(unavailable)?;
+        crate::paths::refuse_linked_sidecar_dir(&sidecars).map_err(refused)?;
         match std::fs::create_dir(&sidecars) {
             Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(unavailable(e)),
             _ => {}
@@ -287,7 +315,7 @@ impl FolderLock {
         // A folder someone else supplied can plant a link here. Writing the
         // holder through it would overwrite whatever it points at, so the
         // file opened must be the regular file at this name.
-        refuse_unless_same_file(&path, &file).map_err(unavailable)?;
+        refuse_unless_same_file(&path, &file).map_err(refused)?;
         let deadline = Instant::now() + wait;
         loop {
             match file.try_lock() {
@@ -527,7 +555,7 @@ mod tests {
         let taken = FolderLock::acquire(&gone, Writer::App, Duration::ZERO);
         let made = gone.exists();
         std::fs::remove_dir_all(&parent).unwrap();
-        assert!(matches!(taken, Err(LockError::Unavailable(_))));
+        assert!(matches!(taken, Err(LockError::Refused(_))));
         assert!(!made, "the deleted folder stays deleted");
     }
 
@@ -542,7 +570,45 @@ mod tests {
         let taken = FolderLock::acquire(&dir, Writer::App, Duration::ZERO);
         let kept = std::fs::read(&target).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(matches!(taken, Err(LockError::Unavailable(_))));
+        assert!(matches!(taken, Err(LockError::Refused(_))));
         assert_eq!(kept, b"keep me");
+    }
+
+    /// Review 3.7 round 5 #2: what can't pass fails a write at once; what
+    /// may pass parks it.
+    #[test]
+    fn lasting_errors_are_told_from_passing_ones() {
+        use std::io::ErrorKind as K;
+        for kind in [
+            K::PermissionDenied,
+            K::ReadOnlyFilesystem,
+            K::NotADirectory,
+            K::NotFound,
+        ] {
+            assert!(lasting(kind), "{kind:?}");
+        }
+        for kind in [
+            K::Other,
+            K::Interrupted,
+            K::WouldBlock,
+            K::TimedOut,
+            K::OutOfMemory,
+        ] {
+            assert!(!lasting(kind), "{kind:?}");
+        }
+    }
+
+    /// Review 3.7 round 5 #2: `.lightphotos` a file is a lasting refusal.
+    #[test]
+    fn a_sidecar_folder_that_is_a_file_refuses_the_lock() {
+        let dir = temp_folder("sidecar-file");
+        std::fs::write(dir.join(SIDECAR_DIR), b"not a folder").unwrap();
+        let taken = FolderLock::acquire(&dir, Writer::App, Duration::ZERO);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            matches!(taken, Err(LockError::Refused(_))),
+            "{:?}",
+            taken.err()
+        );
     }
 }

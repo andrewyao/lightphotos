@@ -448,6 +448,40 @@ pub fn read_record(photo: &Path) -> Result<ImageRecord, String> {
     }
 }
 
+/// Why a sidecar couldn't be read.
+#[derive(Debug)]
+pub enum ReadError {
+    /// Opening or reading the file failed; it may pass.
+    Io(String),
+    /// It read, but isn't a record this build understands: it doesn't parse,
+    /// or is over [`MAX_SIDECAR_BYTES`].
+    Unreadable(String),
+}
+
+/// [`read_record`], telling an I/O failure from a file that read but isn't
+/// a record.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_record_checked(photo: &Path) -> Result<ImageRecord, ReadError> {
+    use std::io::Read;
+    let sidecar =
+        sidecar_path(photo).ok_or_else(|| ReadError::Io("cannot determine sidecar path".into()))?;
+    let file = match std::fs::File::open(&sidecar) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ImageRecord::default()),
+        Err(e) => return Err(ReadError::Io(format!("{}: {e}", sidecar.display()))),
+    };
+    let mut bytes = Vec::new();
+    (&file)
+        .take(MAX_SIDECAR_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ReadError::Io(format!("{}: {e}", sidecar.display())))?;
+    parse_record(&bytes, || {
+        let saved = file.metadata().ok()?.modified().ok()?;
+        Some(saved.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs())
+    })
+    .map_err(ReadError::Unreadable)
+}
+
 /// Save `rec` as `photo`'s sidecar, atomically, creating `.lightphotos/` if
 /// needed. An empty record deletes the sidecar instead.
 #[cfg(not(target_arch = "wasm32"))]

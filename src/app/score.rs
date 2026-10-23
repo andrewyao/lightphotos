@@ -480,7 +480,13 @@ mod tests {
     fn without_a_scoring_pool_no_score_or_quality_sort_shows() {
         let (mut app, _dir, paths) = folder_app(2);
         let unedited = crate::sidecar::ImageRecord::default().edit_signature();
-        app.folder_store.set_score(&paths[0], scored(80), unedited);
+        app.folder_store.update(
+            &paths[0],
+            crate::persist::folder_store::Patch::Score(crate::sidecar::StoredScore {
+                score: scored(80),
+                edits: unedited,
+            }),
+        );
         app.select_single(0);
         assert!(app.score_pool.is_none());
 
@@ -497,9 +503,27 @@ mod tests {
         let (mut app, dir, paths) = folder_app(4);
         app.score_pool = ScorePool::with_runner(2, slow_fixed);
         let unedited = crate::sidecar::ImageRecord::default().edit_signature();
-        app.folder_store.set_score(&paths[1], scored(30), unedited);
-        app.folder_store.set_score(&paths[2], scored(80), unedited);
-        app.folder_store.set_score(&paths[3], scored(30), unedited);
+        app.folder_store.update(
+            &paths[1],
+            crate::persist::folder_store::Patch::Score(crate::sidecar::StoredScore {
+                score: scored(30),
+                edits: unedited,
+            }),
+        );
+        app.folder_store.update(
+            &paths[2],
+            crate::persist::folder_store::Patch::Score(crate::sidecar::StoredScore {
+                score: scored(80),
+                edits: unedited,
+            }),
+        );
+        app.folder_store.update(
+            &paths[3],
+            crate::persist::folder_store::Patch::Score(crate::sidecar::StoredScore {
+                score: scored(30),
+                edits: unedited,
+            }),
+        );
         app.select_single(2);
         assert_eq!(app.selected_path().as_ref(), Some(&paths[2]));
 

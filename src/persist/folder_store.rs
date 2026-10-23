@@ -41,6 +41,9 @@ pub struct FolderStore {
     /// The latest persist failure, drained by [`FolderStore::take_error`] into a
     /// toast.
     last_error: Option<String>,
+    /// The latest notice from the writes that isn't a failure (a sidecar
+    /// kept aside, a lock still being tried): [`FolderStore::take_notice`].
+    last_notice: Option<String>,
     /// See [`FolderStore::sort_revision`].
     sort_revision: u64,
     /// See [`FolderStore::marks_revision`].
@@ -73,6 +76,9 @@ pub struct FolderStore {
     read_only_folders: HashSet<crate::sidecar::FolderKey>,
     /// See [`FolderStore::take_lockless_notice`].
     lockless_notice: bool,
+    /// The browser couldn't reach the folder: see `fail_open`.
+    #[cfg(target_arch = "wasm32")]
+    no_access: bool,
     /// See [`FolderStore::take_refused`].
     refused: Vec<PathBuf>,
 
@@ -93,6 +99,7 @@ impl FolderStore {
             dirty: HashSet::new(),
             dir: None,
             last_error: None,
+            last_notice: None,
             sort_revision: 0,
             marks_revision: 0,
             #[cfg(not(target_arch = "wasm32"))]
@@ -112,6 +119,8 @@ impl FolderStore {
             #[cfg(not(target_arch = "wasm32"))]
             read_only_folders: HashSet::new(),
             lockless_notice: false,
+            #[cfg(target_arch = "wasm32")]
+            no_access: false,
             refused: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             wasm_dir_handle: None,
@@ -124,6 +133,10 @@ impl FolderStore {
     pub(crate) fn pump(&mut self) {
         for e in self.writeback.pump() {
             self.note_persist_error(e);
+        }
+        if let Some(n) = self.writeback.take_notices().pop() {
+            eprintln!("[folder store] {n}");
+            self.last_notice = Some(n);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -148,6 +161,10 @@ impl FolderStore {
     pub(crate) fn flush_blocking(&mut self, timeout: std::time::Duration) {
         for e in self.writeback.flush_blocking(timeout) {
             self.note_persist_error(e);
+        }
+        if let Some(n) = self.writeback.take_notices().pop() {
+            eprintln!("[folder store] {n}");
+            self.last_notice = Some(n);
         }
     }
 
@@ -223,6 +240,10 @@ impl FolderStore {
             self.open_key = key;
             self.set_visit(visit);
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.no_access = false;
+        }
         self.dir = Some(dir.to_path_buf());
         self.images.clear();
         self.groups = None;
@@ -271,7 +292,14 @@ impl FolderStore {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn fail_open(&mut self) {
         self.locks.leave();
-        self.set_visit(locks::Visit::ReadOnly(HeldBy::Unlockable));
+        self.set_visit(locks::Visit::ReadOnly(HeldBy::NoAccess));
+    }
+
+    /// The folder's sidecars can't be loaded (in the browser, no handle for
+    /// the folder): the visit is decided, read-only, and says so.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn fail_open(&mut self) {
+        self.no_access = true;
     }
 
     /// Whether no derived file is written into the open folder now: its
@@ -318,7 +346,7 @@ impl FolderStore {
     /// have loaded.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn editable(&self) -> bool {
-        self.dir.is_some() && self.groups.is_some()
+        self.dir.is_some() && self.groups.is_some() && !self.no_access
     }
 
     /// Whether the open folder's lock is still being tried, once a frame.
@@ -336,7 +364,7 @@ impl FolderStore {
 
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn opening(&self) -> bool {
-        self.dir.is_some() && self.groups.is_none()
+        self.dir.is_some() && self.groups.is_none() && !self.no_access
     }
 
     /// Every folder opened read-only this session and not since writable.
@@ -368,10 +396,11 @@ impl FolderStore {
         }
     }
 
-    /// The browser build has no locks.
+    /// The browser build has no locks; only a folder it can't read is
+    /// read-only.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn read_only(&self) -> Option<HeldBy> {
-        None
+        self.no_access.then_some(HeldBy::NoAccess)
     }
 
     /// Whether the folder just opened can't be locked, so a headless MCP
@@ -434,8 +463,8 @@ impl FolderStore {
 
     /// Give back a mark whose load was never started, so the write history it
     /// was holding open can be dropped.
-    pub(crate) fn abandon_load(&mut self) {
-        self.writeback.end_load();
+    pub(crate) fn abandon_load(&mut self, mark: LoadMark) {
+        self.writeback.end_load(mark);
     }
 
     /// Whether `dir` is the directory represented by the in-memory cache.
@@ -487,7 +516,7 @@ impl FolderStore {
                 .overlay(dir, mark, &mut self.images, &mut groups);
             self.groups = Some(groups);
         }
-        self.writeback.end_load();
+        self.writeback.end_load(mark);
     }
 
     pub(crate) fn groups(&self) -> Option<&Groups> {
@@ -522,6 +551,11 @@ impl FolderStore {
             self.enqueue(&group_file::path(&dir, &id), op);
         }
         Ok(())
+    }
+
+    /// Take the pending notice. Each is returned once.
+    pub(crate) fn take_notice(&mut self) -> Option<String> {
+        self.last_notice.take()
     }
 
     /// Take the pending persist error's cause. Each failure is returned once.
@@ -623,15 +657,6 @@ impl FolderStore {
         self.update(path, Patch::adjustments(before, *adj));
     }
 
-    /// Whether the cache holds `path`'s record to edit: the photo is in the
-    /// active directory and that directory's load has landed. Natively the
-    /// visit must also take edits ([`FolderStore::editable`]); a job result
-    /// for a photo this is false for goes to [`FolderStore::patch_uncached`].
-    /// A folder the user left is never held.
-    pub(crate) fn holds(&self, path: &Path) -> bool {
-        self.editable() && self.cache_key(path).is_some()
-    }
-
     /// Change one part of a photo's record whose record the cache does not
     /// hold, such as one in a folder the user has left. The write reads the
     /// photo's sidecar when it runs and changes only that part, so its other
@@ -644,8 +669,7 @@ impl FolderStore {
     /// under it; it never lands while another program holds the folder.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn patch_uncached(&mut self, path: &Path, patch: Patch) {
-        self.writeback
-            .enqueue(path, WriteOp::Patch(Box::new(patch)));
+        self.writeback.enqueue(path, WriteOp::patch(patch, None));
     }
 
     /// As on native, through the handle of the photo's own folder.
@@ -657,7 +681,7 @@ impl FolderStore {
         dir_handle: &web_sys::FileSystemDirectoryHandle,
     ) {
         self.writeback
-            .enqueue(path, WriteOp::Patch(Box::new(patch)), dir_handle.clone());
+            .enqueue(path, WriteOp::patch(patch, None), dir_handle.clone());
     }
 
     pub fn touchups(&self, path: &Path) -> Vec<TouchUp> {
@@ -717,20 +741,12 @@ impl FolderStore {
         Some((stored, stored.edits != rec.edit_signature()))
     }
 
-    /// Store `score` as measured on the photo's edits as of `edits`. The
-    /// app saves a score through `App::save_patch`.
-    #[cfg(test)]
-    pub fn set_score(
-        &mut self,
-        path: &Path,
-        score: crate::scoring::quality::QualityScore,
-        edits: u64,
-    ) {
-        self.update(path, Patch::Score(StoredScore { score, edits }));
-    }
-
     /// The one entry point for photos that left the folder, such as trashed
-    /// ones. Each loses its record and its sidecar, which skips the Trash
+    /// ones. A delete the user starts is refused in a read-only visit before
+    /// it gets here (`App::start_delete`); one a job finishes later, as a
+    /// bulk delete does, is parked like any job result until the app holds
+    /// the folder.
+    /// Each loses its record and its sidecar, which skips the Trash
     /// since it is useless apart from its photo, and leaves its group. A
     /// group that loses its representative promotes its first survivor, and
     /// one left with a single photo is deleted with its file.
@@ -741,10 +757,6 @@ impl FolderStore {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn forget_photos(&mut self, paths: &[PathBuf]) {
         for path in paths {
-            // A read-only visit writes nothing into its folder from the user.
-            if self.read_only().is_some() && self.in_open_folder(path) {
-                continue;
-            }
             if let Some(name) = self.cache_key(path).map(OsStr::to_os_string) {
                 self.images.remove(&name);
                 self.dirty.insert(name);
@@ -780,10 +792,6 @@ impl FolderStore {
 
     /// Apply a job's change to a photo the cache holds ([`FolderStore::holds`]),
     /// as any edit is applied.
-    pub(crate) fn change(&mut self, path: &Path, patch: Patch) {
-        self.update(path, patch);
-    }
-
     /// Apply `patch` to the cache's record for `path`, and queue the same
     /// change for its sidecar, where it is applied to the record on disk
     /// when it runs. The cache is changed from the change, never the other
@@ -792,19 +800,58 @@ impl FolderStore {
     /// Refused for a photo outside the active directory, and, before
     /// anything changes, while the open folder takes no edit: read-only, or
     /// not loaded yet (on every target).
-    fn update(&mut self, path: &Path, patch: Patch) {
+    pub(crate) fn update(&mut self, path: &Path, patch: Patch) {
         if self.refuse(path) {
             return;
         }
+        self.apply_change(path, patch);
+    }
+
+    /// Whether a job's result for `path` goes through the cache: the photo
+    /// is the open folder's, its sidecars have loaded, and the visit is not
+    /// read-only. Its lock may still be undecided: the write then parks
+    /// until the app holds the folder.
+    pub(crate) fn takes_result(&self, path: &Path) -> bool {
+        self.cache_key(path).is_some() && self.groups.is_some() && self.visit_open()
+    }
+
+    /// A job's result for a photo [`FolderStore::takes_result`] is true for:
+    /// into the cache and queued, as an edit, whatever the lock's state.
+    pub(crate) fn apply_result(&mut self, path: &Path, patch: Patch) {
+        if self.takes_result(path) {
+            self.apply_change(path, patch);
+        }
+    }
+
+    /// Whether a folder is open in this visit and not read-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn visit_open(&self) -> bool {
+        self.open_key.is_some() && self.read_only().is_none()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn visit_open(&self) -> bool {
+        self.dir.is_some() && self.read_only().is_none()
+    }
+
+    fn apply_change(&mut self, path: &Path, patch: Patch) {
         let Some(name) = self.cache_key(path).map(OsStr::to_os_string) else {
             self.note_persist_error(format!("{} is not in the open folder", path.display()));
             return;
         };
         self.dirty.insert(name.clone());
-        let mut rec = self.images.remove(&name).unwrap_or_default();
+        let before = self.images.remove(&name).unwrap_or_default();
+        let mut rec = before.clone();
         let sorted_by = (rec.rating, rec.edited);
         let marked = PhotoMarks::of(&rec);
-        patch.apply(&mut rec);
+        if let Err(e) = patch.apply(&mut rec) {
+            self.note_persist_error(format!("could not change {}: {e}", path.display()));
+            self.dirty.remove(&name);
+            if !before.is_empty() {
+                self.images.insert(name, before);
+            }
+            return;
+        }
         if (rec.rating, rec.edited) != sorted_by {
             self.sort_revision += 1;
         }
@@ -814,7 +861,9 @@ impl FolderStore {
         if !rec.is_empty() {
             self.images.insert(name, rec);
         }
-        self.enqueue(path, WriteOp::Patch(Box::new(patch)));
+        // The cache's copy before the change goes along, for a sidecar on
+        // disk that turns out unreadable (see `writeback::perform`).
+        self.enqueue(path, WriteOp::patch(patch, Some(before)));
     }
 
     /// Every write goes to the writeback, which lands it under its folder's
@@ -899,7 +948,10 @@ impl std::fmt::Display for GroupWriteRefused {
 /// Why a folder opened read-only: who holds it, or that it can't be locked.
 #[cfg_attr(
     target_arch = "wasm32",
-    allow(dead_code, reason = "the browser build has no folder locks")
+    allow(
+        dead_code,
+        reason = "the browser build has no folder locks, so only NoAccess is made there"
+    )
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeldBy {
@@ -912,6 +964,9 @@ pub(crate) enum HeldBy {
     /// No one: the lock couldn't be made (a read-only volume, no
     /// permission), so nothing would stop another writer.
     Unlockable,
+    /// The folder's sidecars couldn't be read at open (the browser has no
+    /// access to it, or the load couldn't start).
+    NoAccess,
 }
 
 impl HeldBy {
@@ -923,6 +978,7 @@ impl HeldBy {
             HeldBy::Mcp(pid) => (t.held_by_mcp)(pid),
             HeldBy::Other => t.held_by_other.to_string(),
             HeldBy::Unlockable => return t.folder_cant_lock.to_string(),
+            HeldBy::NoAccess => return t.folder_no_access.to_string(),
         };
         (t.folder_read_only)(&who)
     }
@@ -1331,6 +1387,47 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Review 3.7 round 5 #7: how long rating 20 000 photos takes to reach
+    /// the disk, fresh and over existing sidecars. Run with
+    /// `cargo test --release drain_20k -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a timing, not a check"]
+    fn drain_20k() {
+        let dir = temp_folder("folder-store-bench");
+        std::fs::write(dir.join("photo.jpg"), b"").unwrap();
+        let photos: Vec<PathBuf> = (0..20_000)
+            .map(|i| dir.join(format!("p{i:05}.jpg")))
+            .collect();
+        for (label, stars) in [("fresh", 3u8), ("over existing", 4)] {
+            let mut cat = FolderStore::with_dir(dir.clone());
+            let t = std::time::Instant::now();
+            for p in &photos {
+                cat.set(p, stars);
+            }
+            let queued = t.elapsed();
+            let errors = cat
+                .writeback
+                .flush_blocking(std::time::Duration::from_secs(120));
+            let drained = t.elapsed();
+            assert!(errors.is_empty(), "{errors:?}");
+            eprintln!("drain_20k {label}: queued in {queued:?}, on disk after {drained:?}");
+        }
+        // 20 000 changes to one photo in a row, as a slider scrub sends.
+        let mut cat = FolderStore::with_dir(dir.clone());
+        let t = std::time::Instant::now();
+        for i in 0..20_000u32 {
+            cat.set(&photos[0], u8::try_from(i % 5).unwrap_or(0) + 1);
+        }
+        let errors = cat
+            .writeback
+            .flush_blocking(std::time::Duration::from_secs(120));
+        assert!(errors.is_empty(), "{errors:?}");
+        eprintln!("drain_20k one photo: on disk after {:?}", t.elapsed());
+        let check = crate::sidecar::read_record(&photos[19_999]).unwrap().rating;
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(check, Some(4));
+    }
+
     /// Review 3.7 round 4 (the root cause): every write is a field change
     /// applied to the record on disk. A field the cache doesn't know (here
     /// written to the sidecar behind its back, as a parked job result or a
@@ -1366,10 +1463,12 @@ mod tests {
         assert_eq!(on_disk.rotation, 1);
     }
 
-    /// Review 3.7 round 4: a user delete reaching a read-only open folder is
-    /// refused before anything is queued.
+    /// Review 3.7 round 5 #4: a delete a job finishes in a read-only visit
+    /// (a bulk delete started while the folder was writable) is parked like
+    /// any job result, and lands once the app can hold the folder. Only a
+    /// delete the user starts is refused there (`App::start_delete`).
     #[test]
-    fn a_delete_in_a_read_only_visit_queues_nothing() {
+    fn a_job_delete_in_a_read_only_visit_parks_and_lands_once_free() {
         use crate::sidecar::{FolderLock, Writer};
         let dir = temp_folder("folder-store-test");
         let photo = dir.join("photo.jpg");
@@ -1383,44 +1482,152 @@ mod tests {
         let mut cat = FolderStore::with_dir(dir.clone());
         let read_only = cat.read_only().is_some();
         cat.forget_photos(std::slice::from_ref(&photo));
+        cat.writeback
+            .flush_blocking(std::time::Duration::from_millis(300));
+        let while_held = crate::sidecar::read_record(&photo).unwrap().rating;
         let queued = cat.backlog();
         drop(other);
         flush(&mut cat);
-        let kept = crate::sidecar::read_record(&photo).unwrap().rating;
+        let after = crate::sidecar::read_record(&photo).unwrap().rating;
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(read_only);
-        assert_eq!(queued, 0, "nothing queued");
-        assert_eq!(kept, Some(3), "and nothing lands later");
+        assert_eq!((while_held, queued), (Some(3), 1), "parked while held");
+        assert_eq!(after, None, "lands once free");
     }
 
+    /// Review 3.7 round 5 #2: a folder whose lock can never be made (here
+    /// `.lightphotos` is a file) fails the write at once, with the reason,
+    /// once; nothing waits.
     #[test]
-    fn a_write_whose_lock_cant_be_made_is_kept_and_reported_once() {
-        // A file named .lightphotos makes the lock, and every write, fail.
-        // The write stays parked (review 3.7 round 4: an accepted write never
-        // fails because of the lock), and the user hears why, once.
+    fn a_write_whose_lock_can_never_be_made_fails_at_once() {
         let dir = temp_folder("folder-store-test");
         std::fs::write(dir.join(SIDECAR_DIR), b"not a dir").unwrap();
-
         let mut cat = FolderStore::with_dir(dir.clone());
         assert!(cat.take_error().is_none(), "no error before any write");
-
         cat.set(&dir.join("photo.jpg"), 3);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut msg = None;
-        while msg.is_none() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            cat.pump();
-            msg = cat.take_error();
-        }
-        let msg = msg.expect("a write that can't lock should be reported");
-        assert!(
-            msg.contains("os error"),
-            "error should carry the OS cause, got: {msg}"
-        );
-        assert_eq!(cat.backlog(), 1, "kept, not dropped");
-        cat.pump();
-        assert!(cat.take_error().is_none(), "reported only once");
+        let started = std::time::Instant::now();
+        flush(&mut cat);
+        let took = started.elapsed();
+        let msg = cat.take_error().expect("the failed save is reported");
         std::fs::remove_dir_all(&dir).unwrap();
+        assert!(msg.contains("os error"), "the OS cause, got: {msg}");
+        assert!(cat.take_error().is_none(), "reported once");
+        assert_eq!(cat.backlog(), 0, "not parked");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "no wait: {took:?}"
+        );
+    }
+
+    /// Review 3.7 round 5 #1: a sidecar that reads but isn't a record (bad
+    /// JSON, or over the size cap) is moved aside, never deleted, and the
+    /// edit goes onto the cache's copy, which is saved; the user hears once.
+    #[test]
+    fn an_unreadable_sidecar_is_moved_aside_and_the_edit_saved() {
+        for (tag, bytes) in [
+            ("bad-json", b"{not json".to_vec()),
+            (
+                "too-big",
+                vec![b' '; crate::sidecar::MAX_SIDECAR_BYTES + 10],
+            ),
+        ] {
+            let dir = temp_folder("folder-store-test");
+            let photo = dir.join("photo.jpg");
+            std::fs::write(&photo, b"").unwrap();
+            {
+                let mut seed = FolderStore::with_dir(dir.clone());
+                seed.set(&photo, 3);
+                flush(&mut seed);
+            }
+            let mut cat = FolderStore::with_dir(dir.clone());
+            let sidecar = crate::sidecar::sidecar_path(&photo).unwrap();
+            std::fs::write(&sidecar, &bytes).unwrap();
+            cat.set_label(&photo, Some(ColorLabel::Red));
+            flush(&mut cat);
+            cat.pump();
+            let msg = cat.take_notice().unwrap_or_default();
+            let failed = cat.take_error();
+            let mut aside = sidecar.as_os_str().to_os_string();
+            aside.push(".unreadable-1");
+            let kept = std::fs::read(&aside).unwrap_or_default();
+            let saved = crate::sidecar::read_record(&photo).unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert_eq!(kept, bytes, "{tag}: moved aside whole");
+            assert_eq!(saved.rating, Some(3), "{tag}: onto the cache's copy");
+            assert_eq!(saved.label, Some(ColorLabel::Red), "{tag}: the edit saved");
+            assert!(
+                msg.contains("photo.jpg"),
+                "{tag}: told, naming the photo: {msg}"
+            );
+            assert!(failed.is_none(), "{tag}: not a failure: {failed:?}");
+        }
+    }
+
+    /// Review 3.7 round 5 #1: a sidecar that can't be read just now (here a
+    /// folder where the file should be, so reading fails) parks the edit,
+    /// moves nothing aside, and the edit lands once it reads.
+    #[test]
+    fn a_sidecar_that_cant_be_read_now_parks_the_edit() {
+        let dir = temp_folder("folder-store-test");
+        let photo = dir.join("photo.jpg");
+        std::fs::write(&photo, b"").unwrap();
+        let mut cat = FolderStore::with_dir(dir.clone());
+        let sidecar = crate::sidecar::sidecar_path(&photo).unwrap();
+        std::fs::create_dir_all(&sidecar).unwrap();
+        cat.set(&photo, 4);
+        cat.writeback
+            .flush_blocking(std::time::Duration::from_millis(400));
+        let parked = cat.backlog();
+        let mut aside = sidecar.as_os_str().to_os_string();
+        aside.push(".unreadable-1");
+        let moved = std::path::Path::new(&aside).exists();
+        std::fs::remove_dir(&sidecar).unwrap();
+        flush(&mut cat);
+        let saved = crate::sidecar::read_record(&photo).unwrap().rating;
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(parked, 1, "parked, not failed");
+        assert!(!moved, "nothing moved aside");
+        assert_eq!(saved, Some(4));
+    }
+
+    /// Review 3.7 round 5 #6: a change that can't apply fails its write
+    /// with an error, and nothing stale goes over the sidecar.
+    #[test]
+    fn a_change_that_cant_apply_fails_and_writes_nothing() {
+        let dir = temp_folder("folder-store-test");
+        let photo = dir.join("photo.jpg");
+        std::fs::write(&photo, b"").unwrap();
+        let mut cat = FolderStore::with_dir(dir.clone());
+        cat.set(&photo, 2);
+        flush(&mut cat);
+        cat.update(&photo, Patch::Fail);
+        let cache_error = cat.take_error();
+        cat.patch_uncached(&photo, Patch::Fail);
+        flush(&mut cat);
+        let write_error = cat.take_error();
+        let saved = crate::sidecar::read_record(&photo).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(cache_error.is_some() && write_error.is_some());
+        assert_eq!(cat.get(&photo), Some(2), "the cache is as it was");
+        assert_eq!(saved.rating, Some(2), "the sidecar is as it was");
+    }
+
+    /// Review 3.7 round 5 #3: a folder whose sidecars can't be loaded is a
+    /// decided, read-only visit that says so, not one opening for ever.
+    #[test]
+    fn a_folder_that_cant_load_is_read_only_not_opening() {
+        let dir = temp_folder("folder-store-test");
+        std::fs::write(dir.join("photo.jpg"), b"").unwrap();
+        let mut cat = FolderStore::new();
+        let mark = cat.switch_dir(&dir, true);
+        cat.fail_open();
+        cat.abandon_load(mark);
+        let opening = cat.opening();
+        let by = cat.read_only();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!opening);
+        assert_eq!(by, Some(HeldBy::NoAccess));
+        assert!(HeldBy::NoAccess.read_only_text().contains("no access"));
     }
 
     #[test]
@@ -1526,7 +1733,13 @@ mod tests {
         let p = dir.join("photo.jpg");
         let mut cat = FolderStore::with_dir(dir.clone());
         let edits = ImageRecord::default().edit_signature();
-        cat.set_score(&p, sample_score(), edits);
+        cat.update(
+            &p,
+            crate::persist::folder_store::Patch::Score(crate::sidecar::StoredScore {
+                score: sample_score(),
+                edits,
+            }),
+        );
         flush(&mut cat);
         assert!(sidecar_for(&dir, "photo.jpg").exists());
 
@@ -1543,7 +1756,13 @@ mod tests {
         let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
         let mut cat = FolderStore::with_dir(dir.clone());
-        cat.set_score(&p, sample_score(), ImageRecord::default().edit_signature());
+        cat.update(
+            &p,
+            crate::persist::folder_store::Patch::Score(crate::sidecar::StoredScore {
+                score: sample_score(),
+                edits: ImageRecord::default().edit_signature(),
+            }),
+        );
         cat.set(&p, 4);
         assert_eq!(
             cat.score(&p).map(|(_, stale)| stale),
@@ -1925,8 +2144,8 @@ mod tests {
         let mut cat = FolderStore::with_dir(dir.clone());
         let stale = load_sidecars(&dir);
         cat.set(&p, 5);
-        let _ = cat.switch_dir(&elsewhere, true);
-        cat.abandon_load();
+        let away = cat.switch_dir(&elsewhere, true);
+        cat.abandon_load(away);
         let mark = cat.switch_dir(&dir, true);
         flush(&mut cat);
         cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
@@ -2019,7 +2238,13 @@ mod tests {
         cat.set_adjustments(&p, &rec.adjustments);
         cat.set_touchups(&p, &rec.touchups);
         cat.set_rotation(&p, rec.rotation);
-        cat.set_score(&p, sample_score(), 9);
+        cat.update(
+            &p,
+            crate::persist::folder_store::Patch::Score(crate::sidecar::StoredScore {
+                score: sample_score(),
+                edits: 9,
+            }),
+        );
         flush(&mut cat);
 
         let read = crate::sidecar::read_record(&p).unwrap();
@@ -2403,8 +2628,8 @@ mod tests {
             .unwrap()
             .create(group.clone(), std::time::SystemTime::now());
         cat.apply_group_writes(writes).unwrap();
-        let _ = cat.switch_dir(&elsewhere, true);
-        cat.abandon_load();
+        let away = cat.switch_dir(&elsewhere, true);
+        cat.abandon_load(away);
         let mark = cat.switch_dir(&dir, true);
         flush(&mut cat);
         cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
@@ -2436,8 +2661,8 @@ mod tests {
         assert!(cat.groups().unwrap().is_empty());
         assert!(!groups_dir(&dir).exists());
 
-        let _ = cat.switch_dir(&dir, true);
-        cat.abandon_load();
+        let unused = cat.switch_dir(&dir, true);
+        cat.abandon_load(unused);
         assert_eq!(
             cat.apply_group_writes(writes),
             Err(GroupWriteRefused::LoadPending),
@@ -2471,8 +2696,8 @@ mod tests {
             &group_file::path(&dir, &first),
             WriteOp::PutGroup(second_group.clone()),
         );
-        let _ = cat.switch_dir(&elsewhere, true);
-        cat.abandon_load();
+        let away = cat.switch_dir(&elsewhere, true);
+        cat.abandon_load(away);
         let mark = cat.switch_dir(&dir, true);
         flush(&mut cat);
         cat.apply_loaded(&dir, mark, stale, &images_in(&dir));

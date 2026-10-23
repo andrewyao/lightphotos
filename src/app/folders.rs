@@ -1164,7 +1164,7 @@ mod tests {
         let mut app = App::new(None);
         crate::app::test_support::load_folder(&mut app, &dir);
         app.close_folder();
-        let held = app.folder_store.holds(&photo);
+        let held = app.folder_store.takes_result(&photo);
         let editable = app.folder_store.editable();
         app.save_patch(&photo, exposure_patch());
         app.folder_store
@@ -1176,5 +1176,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!held && !editable);
         assert_eq!(after, 1.0);
+    }
+
+    /// Review 3.7 round 5 #5: once the sidecars have loaded, a job result
+    /// goes into the cache even while the lock is still undecided; its
+    /// write parks until the app holds the folder.
+    #[test]
+    fn a_result_after_the_load_reaches_the_cache_while_the_lock_waits() {
+        let (dir, photo, old) = quitting_holder("lock-result-cache");
+        let mut app = App::new(None);
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        while app.poll_folder_store_load() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let undecided = app.folder_store.lock_undecided();
+        app.save_patch(&photo, exposure_patch());
+        let cached = app.folder_store.adjustments(&photo).exposure;
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_millis(600));
+        let on_disk_early = crate::sidecar::read_record(&photo)
+            .unwrap()
+            .adjustments
+            .exposure;
+        drop(old);
+        settle_visit(&mut app);
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(5));
+        let on_disk = crate::sidecar::read_record(&photo)
+            .unwrap()
+            .adjustments
+            .exposure;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(undecided);
+        assert_eq!(cached, 1.0, "in the cache at once");
+        assert_eq!(on_disk_early, 0.0, "parked while the lock waits");
+        assert_eq!(on_disk, 1.0);
     }
 }

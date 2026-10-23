@@ -219,27 +219,76 @@ async fn read_record(file_handle: &FileSystemFileHandle) -> Result<ImageRecord, 
 }
 
 /// Apply `change` to the record in `root/.lightphotos/<filename>.xmp`, or to
-/// an empty one when there is none, and save the result. A sidecar that is
-/// there but cannot be read is an error, so its record is never written over.
+/// an empty one when there is none, and save the result.
+///
+/// A sidecar that can't be opened or read is an error, so its record is
+/// never written over. One that reads but isn't a record we understand (it
+/// doesn't parse, or is too large) is copied aside to
+/// `<sidecar>.unreadable-<n>`, never deleted, and `change` goes onto
+/// `fallback`, the cache's copy (or an empty record). That returns the
+/// notice to give the user.
 pub(crate) async fn update_sidecar(
     root: &FileSystemDirectoryHandle,
     filename: &OsStr,
-    change: impl FnOnce(&mut ImageRecord),
-) -> Result<(), String> {
+    fallback: Option<ImageRecord>,
+    change: impl FnOnce(&mut ImageRecord) -> Result<(), String>,
+) -> Result<Option<String>, String> {
     let mut rec = ImageRecord::default();
+    let mut notice = None;
     if let Some(dir) = sidecar_dir(root, false).await? {
-        match JsFuture::from(dir.get_file_handle(&xmp_name(filename))).await {
-            Ok(handle) => rec = read_record(&handle.unchecked_into()).await?,
+        let name = xmp_name(filename);
+        match JsFuture::from(dir.get_file_handle(&name)).await {
+            Ok(handle) => {
+                let handle: FileSystemFileHandle = handle.unchecked_into();
+                let file = crate::web::web_fs::stat(&handle).await?;
+                let bytes = crate::web::web_fs::file_bytes(&file).await?;
+                // Milliseconds; `as` saturates, so a bad value can't wrap.
+                let saved_at = || Some((file.last_modified() / 1000.0) as u64);
+                match crate::sidecar::parse_record(&bytes, saved_at) {
+                    Ok(read) => rec = read,
+                    Err(why) => {
+                        let aside = keep_aside(&dir, &name, &bytes).await?;
+                        rec = fallback.unwrap_or_default();
+                        notice = Some(format!(
+                            "{}'s sidecar could not be read ({why}); it was kept as {aside} and saved anew",
+                            filename.to_string_lossy()
+                        ));
+                    }
+                }
+            }
             Err(e) if is_not_found(&e) => {}
             Err(e) => return Err(js_error_string(&e)),
         }
     }
-    change(&mut rec);
+    change(&mut rec)?;
     if rec.is_empty() {
-        return delete_sidecar(root, filename).await;
+        delete_sidecar(root, filename).await?;
+    } else {
+        let bytes = serde_json::to_vec_pretty(&rec).map_err(|e| e.to_string())?;
+        write_sidecar(root, filename, &bytes).await?;
     }
-    let bytes = serde_json::to_vec_pretty(&rec).map_err(|e| e.to_string())?;
-    write_sidecar(root, filename, &bytes).await
+    Ok(notice)
+}
+
+/// Copy `bytes`, an unreadable sidecar `name`, to the first free
+/// `<name>.unreadable-<n>` in `dir`, and return that name.
+async fn keep_aside(
+    dir: &FileSystemDirectoryHandle,
+    name: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
+    for n in 1..=1000u32 {
+        let aside = format!("{name}.unreadable-{n}");
+        match JsFuture::from(dir.get_file_handle(&aside)).await {
+            Ok(_) => continue,
+            Err(e) if is_not_found(&e) => {
+                write_file(dir, &aside, bytes).await?;
+                return Ok(aside);
+            }
+            Err(e) => return Err(js_error_string(&e)),
+        }
+    }
+    Err(format!("could not keep {name} aside: no free name"))
 }
 
 /// Write `bytes` to `root/.lightphotos/<filename>.xmp`, creating the
