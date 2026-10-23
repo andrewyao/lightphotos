@@ -533,7 +533,7 @@ pub struct Strings {
     pub balance: &'static str,
     pub mix_hue: &'static str,
     pub mix_luminance: &'static str,
-    /// The Color Mixer's bands, in `develop::Band::ALL` order.
+    /// The Color Mixer's bands, in `develop::Band` order.
     pub bands: [&'static str; 8],
     pub remove_ca: &'static str,
     pub remove_ca_tip: &'static str,

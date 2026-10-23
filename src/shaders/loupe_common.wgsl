@@ -507,7 +507,7 @@ fn localTone(uv: vec2<f32>) -> LocalTone {
 }
 
 // Gamma-space tone ops, per channel, with `l`'s sliders. Must match the
-// `tone` closure in `apply_linear` in develop/mod.rs.
+// `tone` closure in `apply_linear_impl` in develop/mod.rs.
 fn tone(v: f32, l: LocalTone) -> f32 {
     var x = v;
 
@@ -801,7 +801,7 @@ fn outsidePhoto(canvasUv: vec2<f32>, uv: vec2<f32>) -> bool {
 
 // The develop steps before the working gamma, on a linear texel: denoise,
 // touch-ups, local edits, white balance and exposure. Returns linear light.
-// Must match `apply_linear` and `apply_raw_display` in develop/mod.rs.
+// Must match `apply_linear_impl` in develop/mod.rs.
 fn developLinear(uv: vec2<f32>, texel: vec3<f32>, l: LocalTone) -> vec3<f32> {
     var rgb = texel;
 

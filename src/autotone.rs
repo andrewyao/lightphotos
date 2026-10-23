@@ -8,7 +8,7 @@
 //! off the wall, then Highlights and Shadows fix what that move did.
 //!
 //! Slider values are solved by bisection against our real tone pipeline
-//! ([`develop::apply_linear`], or `apply_raw_display` for RAW), so results
+//! ([`develop::Develop`], or `apply_raw_display` for RAW), so results
 //! match what the shader draws.
 
 use crate::decode::image_decode::PixelFormat;
@@ -793,9 +793,10 @@ mod tests {
     /// Display luma at percentile `p`, measured over every pixel instead of the
     /// histogram's stand-ins.
     fn percentile_under(samples: &[[f32; 3]], adj: &Adjustments, p: f32) -> f32 {
+        let dev = develop::Develop::new(adj);
         let mut out: Vec<f32> = samples
             .iter()
-            .map(|&px| luma(develop::apply_linear(adj, px).map(develop::srgb_encode)))
+            .map(|&px| luma(dev.linear_at(px, 0.0, 0.0).map(develop::srgb_encode)))
             .collect();
         out.sort_by(|a, b| a.partial_cmp(b).unwrap());
         out[((out.len() as f32 * p) as usize).min(out.len() - 1)]

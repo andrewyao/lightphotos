@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The edit model. [`Adjustments`] is what the folder store stores, [`GpuAdjust`]
-//! is its uniform-buffer copy, and [`apply_linear`] is the CPU tone pipeline
+//! is its uniform-buffer copy, and [`Develop`] is the CPU tone pipeline
 //! used for export, edited thumbnails, and the histogram. The Loupe runs the
 //! same math in `shader.wgsl`; the two must stay in sync.
 
@@ -22,8 +22,8 @@ pub mod sharpen;
 
 use serde::{Deserialize, Serialize};
 
-pub use base::{BaseLayer, BaseProbe, BaseTexel, Grid};
-pub use color::{Band, BandShift, ColorAxis, ColorMixer, ColorOps, GrayMix};
+pub use base::{BaseLayer, BaseProbe, Grid};
+pub use color::{Band, ColorAxis, ColorMixer, ColorOps, GrayMix};
 pub use coverage::{Coverage, CoverageError, Detections, RasterId};
 pub use effects::{Effects, Grain, Vignette};
 pub use grade::{ColorGrade, GradeOps, Wheel, Zone};
@@ -1256,24 +1256,16 @@ pub fn apply_raw_preview_boost(srgb: f32) -> f32 {
     RAW_LOOK_KNOTS[i] + (RAW_LOOK_KNOTS[i + 1] - RAW_LOOK_KNOTS[i]) * t
 }
 
-/// Apply every edit to one linear-light pixel. Input may exceed 1.0; output is
-/// linear RGB clamped to 0..1.
-///
-/// Must match `fs_main` in shader.wgsl. Keep it simple so the two stay in sync.
+/// [`Develop::linear_at`] as raw_shader.wgsl runs it, for an unframed pixel.
 /// Bakes the tone curve on every call, so a loop over pixels uses
-/// [`Develop`] instead.
-pub fn apply_linear(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
-    Develop::new(adj).linear(rgb)
-}
-
-/// `apply_linear` as raw_shader.wgsl runs it. Returns display values, not
+/// [`Develop::raw_display`] instead. Returns display values, not
 /// linear, because the RAW shader's render target is not an sRGB surface.
 pub fn apply_raw_display(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
     Develop::new(adj).raw_display(rgb)
 }
 
-/// [`apply_linear`] and [`apply_raw_display`] for one image, with the tone
-/// curve baked once instead of per pixel. Without a frame
+/// Every edit, applied to the pixels of one image, with the tone curve
+/// baked once instead of per pixel. Without a frame
 /// ([`Develop::framed`]) it leaves out Vignette and Grain, which depend on
 /// where a pixel sits; Auto Tone measures tone without them.
 pub struct Develop<'a> {
@@ -1316,15 +1308,14 @@ impl<'a> Develop<'a> {
         }
     }
 
-    pub fn linear(&self, rgb: [f32; 3]) -> [f32; 3] {
-        apply_linear_impl(self, rgb, None, false, None)
-    }
-
     pub fn raw_display(&self, rgb: [f32; 3]) -> [f32; 3] {
         apply_linear_impl(self, rgb, None, true, None)
     }
 
-    /// [`Develop::linear`] for the pixel at canvas UV `(u, v)`.
+    /// Every edit applied to one linear-light pixel at canvas UV `(u, v)`,
+    /// which only a framed render reads. Input may exceed 1.0; output is
+    /// linear RGB clamped to 0..1. Must match `fs_main` in shader.wgsl. Keep it
+    /// simple so the two stay in sync.
     pub fn linear_at(&self, rgb: [f32; 3], u: f32, v: f32) -> [f32; 3] {
         let at = self.frame.as_ref().map(|f| (f, u, v));
         apply_linear_impl(self, rgb, at, false, None)
@@ -1478,7 +1469,7 @@ fn apply_linear_impl(
 }
 
 /// The `(temp, tint)` that turn an unedited linear-light pixel gray, by
-/// inverting the white-balance gains in [`apply_linear`]:
+/// inverting the white-balance gains in [`Develop::linear_at`]:
 ///
 /// ```text
 /// r*(1+0.3t)  = b*(1-0.3t)        =>  t  = (b - r) / (0.3*(r + b))
@@ -1575,6 +1566,11 @@ pub(crate) fn denoise_linear_rgb_pixel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One unframed pixel through the whole pipeline.
+    fn apply_linear(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
+        Develop::new(adj).linear_at(rgb, 0.0, 0.0)
+    }
 
     #[test]
     fn every_slider_name_parses_back_to_its_own_slider() {
@@ -1684,7 +1680,7 @@ mod tests {
                 dev.display_at(PixelFormat::TonedF16, px, 0.5, 0.5, None),
                 srgb
             );
-            assert_eq!(srgb, dev.linear(px).map(srgb_encode));
+            assert_eq!(srgb, dev.linear_at(px, 0.0, 0.0).map(srgb_encode));
             assert_eq!(
                 dev.display_at(PixelFormat::LinearF16, px, 0.5, 0.5, None),
                 dev.raw_display(px)
@@ -2249,7 +2245,7 @@ mod tests {
         let plain = edit_signature(&a, 0);
         a.mixer.green.hue = 20.0;
         let hue = edit_signature(&a, 0);
-        a.mixer.green = BandShift {
+        a.mixer.green = color::BandShift {
             luminance: 20.0,
             ..Default::default()
         };
@@ -2407,7 +2403,7 @@ mod tests {
         adj.curve.red = Curve::STRONG_CONTRAST;
         let px = [0.6, 0.6, 0.6];
         let plain = apply_linear(&Adjustments::default(), px);
-        let out = Develop::new(&adj).linear(px);
+        let out = Develop::new(&adj).linear_at(px, 0.0, 0.0);
         assert!(out[0] > plain[0]);
         assert!((out[1] - plain[1]).abs() < 1e-5);
         assert!((out[2] - plain[2]).abs() < 1e-5);

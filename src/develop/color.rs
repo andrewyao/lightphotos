@@ -31,19 +31,6 @@ pub enum Band {
     Magenta,
 }
 
-impl Band {
-    pub const ALL: [Band; 8] = [
-        Band::Red,
-        Band::Orange,
-        Band::Yellow,
-        Band::Green,
-        Band::Aqua,
-        Band::Blue,
-        Band::Purple,
-        Band::Magenta,
-    ];
-}
-
 /// Which of hue, saturation and luminance a Color Mixer or Color Grading
 /// slider moves.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -102,7 +89,7 @@ impl ColorMixer {
         *self == Self::default()
     }
 
-    /// The bands in [`Band::ALL`] order.
+    /// The bands in [`Band`] order, red first.
     pub fn bands(&self) -> [BandShift; 8] {
         [
             self.red,
@@ -145,7 +132,7 @@ impl GrayMix {
         *self == Self::default()
     }
 
-    /// The bands in [`Band::ALL`] order.
+    /// The bands in [`Band`] order, red first.
     pub fn bands(&self) -> [f32; 8] {
         [
             self.red,

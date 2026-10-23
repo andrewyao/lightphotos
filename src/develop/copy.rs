@@ -416,7 +416,7 @@ mod tests {
             exposure: 1.0,
             clarity: 30.0,
             mixer: crate::develop::ColorMixer {
-                blue: crate::develop::BandShift {
+                blue: crate::develop::color::BandShift {
                     saturation: -40.0,
                     ..Default::default()
                 },

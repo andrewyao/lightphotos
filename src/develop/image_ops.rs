@@ -283,7 +283,7 @@ pub fn bilinear_sampler(
 /// Burn edits into an opaque sRGB8 RGBA buffer: crop, then touch-ups and tone
 /// per pixel, then rotate by `rot` 90-degree clockwise steps. Returns
 /// `(w, h, rgba)`. Each pixel reads the source the way `fs_main` in
-/// shader.wgsl does, and tone uses `develop::apply_linear`, which matches the
+/// shader.wgsl does, and tone uses `develop::Develop`, which matches the
 /// shader, or for a `LinearF16` RAW `develop::apply_raw_display`, which
 /// matches raw_shader.wgsl. Where the turned photo leaves the frame the shader draws
 /// background but this clamps to the edge, so an export never shows grey.

@@ -243,7 +243,7 @@ flowchart TD
     exportbtn --> submit["app/export.rs submits one ExportJob per photo\n(native; wasm32 has its own start_export that bakes on the\nloader's threads and writes via File System Access)"]
     submit --> pool["Exporter, export/mod.rs\nruns on the generic worker_pool.rs pool"]
     pool --> decode["export::export_file\nimage_decode::decode_for_export(src, decode_px)\ndecodes only as large as the output size needs\nImageIO (CIRAWFilter for RAW) on macOS, image crate or\ndecode/rawler/ on Linux/Windows"]
-    decode --> bake["export::render -> image_ops::bake_edited_as\n(8-bit, or 16-bit for TIFF)\ncrop -> develop::apply_linear (tone) -> rotate"]
+    decode --> bake["export::render -> image_ops::bake_edited_as\n(8-bit, or 16-bit for TIFF)\ncrop -> develop::Develop (tone) -> rotate"]
     bake --> encode["image_encode\nJPEG, PNG, 16-bit TIFF, WebP or AVIF\n(JPEG: ImageIO on macOS, mozjpeg-rs elsewhere)"]
     encode --> write["paths::write_atomic: write <dest>.<pid>-<n>.tmp\n(create_new, so it never follows a planted link),\nthen rename it onto the destination"]
     write --> outcome["ExportOutcome, drained once per frame\nby the UI thread (app/export.rs)"]
@@ -791,7 +791,7 @@ already keeps handles for.
 | `renderer/mod.rs` | GPU upload + draw of the currently-shown image | all (wgpu → Metal / Vulkan-GL / WebGPU) |
 | `shaders/base.wgsl` | Builds the base layer (Clarity, Dehaze, Texture) on the GPU; `develop/base.rs` is its CPU twin | all |
 | `shaders/mipgen.wgsl` | Builds the Loupe texture's mip chain | all |
-| `develop/mod.rs` | The tone pipeline (`apply_linear`), shared by the GPU shader and the CPU histogram/bake path | all |
+| `develop/mod.rs` | The tone pipeline (`Develop`), shared by the GPU shader and the CPU histogram/bake path | all |
 | `develop/image_ops.rs` | Pure pixel math (crop/rotate/bake) shared by export and thumbnail baking | all |
 | `export/mod.rs` | `Exporter`: decodes, bakes, and encodes an export (JPEG, PNG, 16-bit TIFF, WebP or AVIF) on a `worker_pool.rs` pool. `export_file` (native) and `bake_export_from_shared_vec` (off macOS, for wasm32's bytes) share `render` | native pool is native-only, wasm32 runs the same bake on the loader's threads |
 | `worker_pool.rs` | Generic thread pool behind `Exporter` and `ScorePool` | builds everywhere; no thread starts on wasm32, so the pools run native only |
