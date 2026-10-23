@@ -370,12 +370,18 @@ What quit does (native `exiting`, `main.rs`):
 - The browser has no exit hook. `pagehide` and `visibilitychange` save the
   pending edit (`App::page_hidden`). Each write starts at once.
 
-**One writer per folder.** Nothing locks a folder yet. Two processes that
-write the same sidecars overwrite each other's edits.
+**One writer per folder.** Only one process writes a folder's sidecars at a
+time. The design is in [docs/design/folder-lock.md](design/folder-lock.md).
 
-- Do not run `lightphotos-mcp --folder` on a folder that the app has open.
-  Use `--attach` to drive the app instead.
-- A folder lock is planned. Its design will be in `docs/design/folder-lock.md`.
+- The app holds the OS lock on `.lightphotos/.lock` while a folder with
+  photos is open. It keeps the lock until the folder's queued writes land.
+- `lightphotos-mcp --folder` holds the lock for each command that writes.
+  While the app has the folder open, it refuses the command, names the
+  app, and tells the agent to use `--attach`.
+- A second app window on the folder opens it read-only. All edit controls
+  are off, and a line under the folder name says who holds it.
+- The OS releases the lock of a process that stops or crashes. The browser
+  build has no locks.
 
 ### Automation trust model
 
