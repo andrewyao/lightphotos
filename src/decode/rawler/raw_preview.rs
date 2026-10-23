@@ -53,30 +53,25 @@ fn to_srgb_u8(v: f32) -> u8 {
     lut[idx]
 }
 
-/// Decodes RAW bytes to the `Fast` sRGB8 preview, Lanczos3-resized to fit
-/// `max_px`. The `decode_probe` golden-hash tests call it by name.
+/// Decodes RAW bytes to the `mode` preview, resized to fit `max_px`: `Fast`
+/// is sRGB8, `Quality` is linear `LinearF16`. The bound matters: the Loupe
+/// keeps its `zoom` when a sharper tier of the same photo lands
+/// (`app/thumbs.rs::upload_shown`), so a much larger `Quality` image would
+/// suddenly appear zoomed in. `decode_probe` and its golden-hash tests call it.
 #[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
-pub fn decode_raw_fast_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedImage, String> {
+pub fn decode_raw_from_bytes(
+    bytes: &[u8],
+    max_px: u32,
+    mode: DemosaicMode,
+) -> Result<DecodedImage, String> {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
-    decode_raw_preview(source, max_px, DemosaicMode::Fast)
+    decode_raw_preview(source, max_px, mode)
 }
 
-/// Decodes RAW bytes to the `Quality` preview: linear `LinearF16`, resized to
-/// fit `max_px`. The bound matters: the Loupe keeps its `zoom` when a sharper
-/// tier of the same photo lands (`app/thumbs.rs::upload_shown`), so a much
-/// larger `Quality` image would suddenly appear zoomed in.
-#[cfg(not(target_os = "macos"))]
-#[hotpath::measure]
-pub fn decode_raw_quality_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedImage, String> {
-    let source = rawler::rawsource::RawSource::new_from_slice(bytes);
-    decode_raw_preview(source, max_px, DemosaicMode::Quality)
-}
-
-/// [`decode_raw_quality_from_bytes`] or, without `quality`,
-/// [`decode_raw_fast_from_bytes`], over bytes the caller already shares. The
-/// slice versions copy the whole file for rawler, and the copy lives as long
-/// as the decode.
+/// [`decode_raw_from_bytes`] over bytes the caller already shares, `Quality`
+/// or, without `quality`, `Fast`. The slice version copies the whole file for
+/// rawler, and the copy lives as long as the decode.
 #[cfg(target_arch = "wasm32")]
 pub fn decode_raw_from_shared_vec(
     bytes: std::sync::Arc<Vec<u8>>,
@@ -95,8 +90,8 @@ pub fn decode_raw_from_shared_vec(
     )
 }
 
-/// Shared body of [`decode_raw_fast_from_bytes`] and
-/// [`decode_raw_quality_from_bytes`].
+/// Shared body of [`decode_raw_from_bytes`] and
+/// [`decode_raw_from_shared_vec`].
 #[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
 fn decode_raw_preview(
