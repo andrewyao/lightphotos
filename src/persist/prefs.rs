@@ -97,9 +97,7 @@ fn load_at(path: &Path) -> Option<String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn save_at(path: &Path, value: &str) -> Result<(), String> {
-    path.parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(path, value))
+    crate::paths::write_atomic_in_dir(path, value.as_bytes())
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
