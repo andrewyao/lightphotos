@@ -45,9 +45,10 @@ pub(super) struct Shared {
     writer: HashMap<FolderKey, FolderLock>,
     /// Folders on volumes without file locks.
     lockless: HashSet<FolderKey>,
-    /// Folders whose lock couldn't be made for the writer, and how many
-    /// tries in a row. See [`SaveLocks::write_in`].
-    unavailable: HashMap<FolderKey, u32>,
+    /// Writes that couldn't run just now (a lock that couldn't be made, a
+    /// sidecar that couldn't be read), and how many tries in a row, by what
+    /// they were for. See [`transient`].
+    transient: HashMap<String, u32>,
     /// Notices for the user, taken by [`take_notices`].
     notices: Vec<String>,
 }
@@ -59,6 +60,27 @@ const UNAVAILABLE_NOTICE: u32 = 6;
 /// The notices the writer left for the user since the last call.
 pub(super) fn take_notices(shared: &SharedLocks) -> Vec<String> {
     std::mem::take(&mut lock(shared).notices)
+}
+
+/// Leave the user a notice.
+pub(super) fn notice(shared: &SharedLocks, text: String) {
+    lock(shared).notices.push(text);
+}
+
+/// One more try in a row failed just now for `what`; after
+/// [`UNAVAILABLE_NOTICE`] of them the user is told, once.
+pub(super) fn transient(shared: &SharedLocks, what: &str, text: impl FnOnce() -> String) {
+    let mut shared = lock(shared);
+    let tries = shared.transient.entry(what.to_string()).or_insert(0);
+    *tries = tries.saturating_add(1);
+    if *tries == UNAVAILABLE_NOTICE {
+        shared.notices.push(text());
+    }
+}
+
+/// `what` went through: its count of failed tries starts again.
+pub(super) fn settled(shared: &SharedLocks, what: &str) {
+    lock(shared).transient.remove(what);
 }
 
 pub(super) type SharedLocks = Arc<Mutex<Shared>>;
@@ -211,7 +233,7 @@ impl Locks {
             }
             // Without the lock another program could take the folder and
             // the app's edits would go unsaved.
-            Err(e @ LockError::Unavailable(_)) => {
+            Err(e @ (LockError::Unavailable(_) | LockError::Refused(_))) => {
                 eprintln!("[folder store] {e}; opening read-only");
                 Ok(Visit::ReadOnly(HeldBy::Unlockable))
             }
@@ -313,21 +335,44 @@ pub(super) enum Saved {
 /// The writer thread's locks.
 pub(super) struct SaveLocks {
     shared: SharedLocks,
+    /// The last folder written and its key, kept for [`KEY_FRESH`], so a
+    /// run of writes into one folder resolves it once, not once a write.
+    recent: Option<(std::path::PathBuf, FolderKey, std::time::Instant)>,
 }
+
+/// How long a folder's key, once worked out, serves the writer's next
+/// writes into that folder.
+const KEY_FRESH: Duration = Duration::from_secs(1);
 
 impl SaveLocks {
     pub(super) fn new(shared: SharedLocks) -> SaveLocks {
-        SaveLocks { shared }
+        SaveLocks {
+            shared,
+            recent: None,
+        }
+    }
+
+    /// `dir`'s key, worked out at most once every [`KEY_FRESH`] for a run
+    /// of writes into it. `None` for a folder that is gone.
+    pub(super) fn key_of(&mut self, dir: &Path) -> Option<FolderKey> {
+        if let Some((d, key, at)) = &self.recent {
+            if d == dir && at.elapsed() < KEY_FRESH {
+                return Some(key.clone());
+            }
+        }
+        let key = FolderKey::of(dir)?;
+        self.recent = Some((dir.to_path_buf(), key.clone(), std::time::Instant::now()));
+        Some(key)
+    }
+
+    pub(super) fn shared(&self) -> SharedLocks {
+        self.shared.clone()
     }
 
     /// Run `write` into the folder `key`: as it is where the app already
     /// holds the lock or the volume has none, else after taking the lock
     /// (once, no wait). A lock another program holds parks the write.
-    pub(super) fn write_in(
-        &mut self,
-        key: &FolderKey,
-        write: impl FnOnce() -> Result<(), String>,
-    ) -> Saved {
+    pub(super) fn write_in(&mut self, key: &FolderKey, write: impl FnOnce() -> Saved) -> Saved {
         self.release_except(Some(key));
         {
             let shared = lock(&self.shared);
@@ -336,7 +381,7 @@ impl SaveLocks {
                 || shared.lockless.contains(key)
             {
                 drop(shared);
-                return Saved::Done(write());
+                return write();
             }
         }
         match FolderLock::try_acquire(key.path(), Writer::AppSave) {
@@ -344,30 +389,30 @@ impl SaveLocks {
                 {
                     let mut shared = lock(&self.shared);
                     shared.writer.insert(key.clone(), taken);
-                    shared.unavailable.remove(key);
+                    shared.transient.remove(&key.path().display().to_string());
                 }
-                Saved::Done(write())
+                write()
             }
             Err(LockError::Busy(_)) => Saved::Parked,
             Err(LockError::Unsupported(_)) => {
                 lock(&self.shared).lockless.insert(key.clone());
-                Saved::Done(write())
+                write()
             }
+            // It can't pass (a read-only volume, no permission, the folder
+            // or `.lightphotos` not a folder): the write fails at once.
+            Err(e @ LockError::Refused(_)) => Saved::Done(Err(format!(
+                "could not save in {}: {e}",
+                key.path().display()
+            ))),
             // The lock can't be made just now (a disk or network fault,
             // too many open files): parked and tried again like a busy one,
             // so an accepted write never fails because of the lock. The
             // user hears if it goes on.
             Err(e @ LockError::Unavailable(_)) => {
-                let mut shared = lock(&self.shared);
-                let tries = shared.unavailable.entry(key.clone()).or_insert(0);
-                *tries = tries.saturating_add(1);
-                if *tries == UNAVAILABLE_NOTICE {
-                    let notice = format!(
-                        "could not lock {} to save ({e}); still trying",
-                        key.path().display()
-                    );
-                    shared.notices.push(notice);
-                }
+                let what = key.path().display().to_string();
+                transient(&self.shared, &what, || {
+                    format!("could not lock {what} to save ({e}); still trying")
+                });
                 Saved::Parked
             }
         }
@@ -416,7 +461,7 @@ mod tests {
         let (dir, key) = folder("takeover");
         let mut locks = Locks::default();
         let mut save = SaveLocks::new(locks.shared());
-        let wrote = save.write_in(&key, || Ok(()));
+        let wrote = save.write_in(&key, || Saved::Done(Ok(())));
         let (_, visit) = locks.open(&dir, true);
         save.release_except(None);
         let still_held = !free(&dir);
@@ -434,9 +479,9 @@ mod tests {
         let (a, ka) = folder("move-a");
         let (b, kb) = folder("move-b");
         let mut save = SaveLocks::new(SharedLocks::default());
-        let _ = save.write_in(&ka, || Ok(()));
+        let _ = save.write_in(&ka, || Saved::Done(Ok(())));
         let a_held = !free(&a);
-        let _ = save.write_in(&kb, || Ok(()));
+        let _ = save.write_in(&kb, || Saved::Done(Ok(())));
         let a_free = free(&a);
         save.release_except(None);
         let _ = std::fs::remove_dir_all(&a);
@@ -453,7 +498,7 @@ mod tests {
         let mut ran = false;
         let saved = save.write_in(&key, || {
             ran = true;
-            Ok(())
+            Saved::Done(Ok(()))
         });
         drop(other);
         let _ = std::fs::remove_dir_all(&dir);

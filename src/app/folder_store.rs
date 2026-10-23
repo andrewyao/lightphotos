@@ -223,7 +223,7 @@ impl App {
                     // user's edits. Switching folders again retries.
                     self.folder_store
                         .note_persist_error(format!("could not load {}: {e}", dir.display()));
-                    self.folder_store.abandon_load();
+                    self.folder_store.abandon_load(mark);
                     self.folder_store_load.pending = Some((dir, token));
                 }
             }
@@ -259,7 +259,10 @@ impl App {
                 self.folder_store_load.pending = Some((dir, token));
             }
             None => {
-                self.folder_store.abandon_load();
+                // No access to the folder: a decided, read-only visit that
+                // says so, not one opening for ever.
+                self.folder_store.fail_open();
+                self.folder_store.abandon_load(mark);
                 self.folder_store_load.pending = None;
             }
         }
@@ -1058,10 +1061,12 @@ impl App {
     /// half-finished, and the result is saved whether the drag is then
     /// saved, undone or dropped.
     pub(super) fn save_patch(&mut self, path: &Path, patch: Patch) {
-        if self.folder_store.holds(path) {
+        if self.folder_store.takes_result(path) {
             // Onto what is saved, not the app's live copy, which can hold a
-            // slider mid-drag.
-            self.folder_store.change(path, patch);
+            // slider mid-drag. Into the cache as soon as it holds the photo,
+            // whatever the lock's state: the write parks until the app holds
+            // the folder.
+            self.folder_store.apply_result(path, patch);
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -1086,7 +1091,8 @@ impl App {
         after: Adjustments,
     ) {
         self.history.apply_outside(path, |adj| {
-            crate::persist::folder_store::changed_onto(&before, &after, &adj)
+            // A change that can't be merged leaves that copy as it was.
+            crate::persist::folder_store::changed_onto(&before, &after, &adj).unwrap_or(adj)
         });
     }
 

@@ -1412,6 +1412,9 @@ impl App {
         if self.folder_store.take_lockless_notice() {
             self.set_status(StatusKind::Info, crate::i18n::t().folder_lockless.into());
         }
+        if let Some(notice) = self.folder_store.take_notice() {
+            self.set_status(StatusKind::Info, notice);
+        }
         if let Some(cause) = self.folder_store.take_error() {
             self.set_status(
                 StatusKind::Error,

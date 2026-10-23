@@ -157,7 +157,9 @@ impl Folder {
                  Reading (get_state, render) still works here.",
                 self.root.display()
             )),
-            Err(e @ (LockError::Unavailable(_) | LockError::Unsupported(_))) => {
+            Err(
+                e @ (LockError::Unavailable(_) | LockError::Refused(_) | LockError::Unsupported(_)),
+            ) => {
                 eprintln!("lightphotos-mcp: {e}; saving without a lock");
                 Ok(None)
             }

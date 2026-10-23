@@ -846,6 +846,8 @@ pub struct Strings {
     pub folder_read_only: fn(&str) -> String,
     /// A folder whose lock couldn't be made, so it opened read-only.
     pub folder_cant_lock: &'static str,
+    /// A folder whose sidecars couldn't be read at open.
+    pub folder_no_access: &'static str,
     /// A folder on a volume without file locks.
     pub folder_lockless: &'static str,
     /// An edit while the folder is still opening.
@@ -1897,6 +1899,7 @@ pub static EN: Strings = Strings {
         format!("Read-only: {who} has this folder open. Changes here are not saved. Close it there, then open this folder again.")
     },
     folder_cant_lock: "Read-only: this folder can't be locked for saving, so changes here are not saved. It may be read-only or need permission. Open it again to try again.",
+    folder_no_access: "Read-only: LightPhotos has no access to this folder, so changes here are not saved. Open it again.",
     folder_lockless: "This folder can't be locked, so don't let a headless lightphotos-mcp change it while it is open here.",
     folder_opening: "This folder is still opening. Try again in a moment.",
     presets_load_failed: |e| format!("Could not read your presets: {e}"),
@@ -2776,6 +2779,7 @@ pub static ZH: Strings = Strings {
         format!("只读：{who} 已打开此文件夹，在此的更改不会保存。请在那里关闭它，然后重新打开此文件夹。")
     },
     folder_cant_lock: "只读：无法锁定此文件夹，因此在此的更改不会保存。请重新打开此文件夹。",
+    folder_no_access: "只读：LightPhotos 无法访问此文件夹，因此在此的更改不会保存。请重新打开此文件夹。",
     folder_lockless: "无法锁定此文件夹。在此打开期间，请不要用 lightphotos-mcp 修改它。",
     folder_opening: "此文件夹仍在打开，请稍后再试。",
     presets_load_failed: |e| format!("无法读取预设：{e}"),

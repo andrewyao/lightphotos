@@ -70,6 +70,18 @@ before the lock) survives every edit.
   one of our writes landed gets every change since its mark applied again,
   in order.
 * Undo is a change too: it sets the fields back as any edit does.
+* Changes to one photo queued back to back are one read and one write.
+* A change that can't apply (adjustments that can't be merged) fails its
+  write with an error; nothing is written whole instead.
+* Reading the sidecar can fail two ways. An I/O error may pass: the write
+  parks and is tried again, and the user hears after about 3 s. A file
+  that read but isn't a record we understand (it doesn't parse, or is over
+  the size cap) is moved aside to `<sidecar>.unreadable-<n>`, never
+  deleted; the change goes onto the cache's copy of the record (or an
+  empty one) and is written. The user hears once, with the photo's name.
+* A job result for a photo the cache holds goes into the cache at once,
+  whatever the lock's state; its write parks until the app holds the
+  folder.
 * The browser applies the same change to the record it reads in the same
   task. It refuses an edit until the folder's sidecars have loaded, as
   native does.
@@ -110,7 +122,7 @@ so its lock is gone; a holder line naming a dead pid is ignored.
 | After a leave or close | the left visit is neither editable nor held: job results go the left-folder way |
 | Open folder without photos | none taken; nothing written |
 | Leave / close | kept until every queued write for the folder has landed |
-| Write into a folder the app has left | the writer thread takes the folder's lock once (no wait). It lets go as soon as the next write is for another folder, or the queue is empty. If another program holds it, the write is **parked and tried again** about every 0.5 s, and at quit (not dropped: rule 1). Later writes for that folder wait behind it, so the order stays. A write done inline (no writer thread) parks the same way. Parked writes live in state shared with the writer, so they outlive a writer thread that dies; `pump` and the quit flush notice a writer that has ended and try them inline every 0.5 s. A write that panics fails with an error the user sees, alone. A lock that can't be made just now (`EIO`, too many open files, a network blip) parks the write like a busy one; after about 3 s of tries the user is told, and it keeps trying. Writes still in a dead writer's channel are drained and done inline |
+| Write into a folder the app has left | the writer thread takes the folder's lock once (no wait). It lets go as soon as the next write is for another folder, or the queue is empty. If another program holds it, the write is **parked and tried again** about every 0.5 s, and at quit (not dropped: rule 1). Later writes for that folder wait behind it, so the order stays. A write done inline (no writer thread) parks the same way. Parked writes live in state shared with the writer, so they outlive a writer thread that dies; `pump` and the quit flush notice a writer that has ended and try them inline every 0.5 s. A write that panics fails with an error the user sees, alone. A lock that can't be made just now (`EIO`, too many open files, a network blip) parks the write like a busy one; after about 3 s of tries the user is told, and it keeps trying. A lock that can never be made (a read-only volume, no permission, the folder or `.lightphotos` gone or not a folder, a planted link) fails the write at once, with the reason. The quit flush reports writes that are only parked and returns, rather than wait out its timeout. Writes still in a dead writer's channel are drained and done inline |
 | Job result for a folder not editable (opening, or read-only) | the same path: queued, landed under the lock, or parked (rule 5) |
 | Quit | the app first marks its holder lines `app-quitting`; queued writes flush; then it lets go of every folder whose writes have all landed, before the catalog and signal flushes. A folder with a write left keeps its lock until the process ends |
 | Relaunch while the old process still exits | a holder line `app-quitting`: the visit is opening, and each frame tries again while that holder lives, up to about 15 s |
@@ -139,7 +151,8 @@ and a lock our process holds is never "busy" to our own process.
 | signal cache (kept in memory) | signal cache entries (no orphan sweep) |
 
 Job results carried over into the folder are parked, not dropped (rule 5).
-A delete from the user (a photo trashed) queues nothing for the folder.
+A delete the user starts is refused. One a job finishes there (a bulk
+delete started while the folder was writable) is parked like any result.
 
 Read-only applies to the photos of that folder only (by `FolderKey`). The
 coverage store and the thumbnail cache keep a set of every folder opened
@@ -178,7 +191,8 @@ Reopen the folder to try again (there is no "Try again" button).
 | No lock support (`ENOTSUP`, `ENOLCK`, some SMB/NFS) | Lockless visit: app writes, one notice "don't run headless MCP here" |
 | Lock file this user can't write (another user's `.lock`, mode 0444) | opened read-only; the OS lock works on a read-only handle, so the visit is normal |
 | `EINVAL` from the lock call (the file system can't lock this file) | Lockless visit, like `ENOLCK` |
-| `EIO` or another error (a disk or network fault, may pass) | ReadOnly visit, reason "can't be locked"; reopen to try again |
+| `EIO` or another error (a disk or network fault, may pass) | ReadOnly visit, reason "can't be locked"; reopen to try again. A write that meets it later parks and retries |
+| Browser, no access to the folder (no directory handle) | ReadOnly visit, reason "no access to this folder"; open it again |
 | Read-only volume / no permission for the folder | ReadOnly visit, reason "can't be locked" |
 | Windows | `LockFileEx`; holder line in the separate file. Verified only on CI |
 | Browser | no locks; unchanged |
@@ -252,6 +266,13 @@ Reopen the folder to try again (there is no "Try again" button).
 | 63 | A dead writer's channel loses the writes still in it | they are drained and done inline |
 | 64 | A user delete reaching a read-only open folder lands later | refused before anything is queued |
 | 65 | The event loop wakes every 16 ms for the whole sidecar load | 16 ms only while the lock is undecided; the load keeps its own wake |
+| 66 | An unreadable, unparseable or oversized sidecar fails every later edit for good | I/O errors park; a file that isn't a record is moved aside and the edit saved onto the cache's copy (§2a) |
+| 67 | A lock that can never be made parks writes for ever, and the quit flush waits out its timeout | such writes fail at once; the flush reports parked writes and returns |
+| 68 | In the browser, a folder with no handle opens for ever | a read-only visit, "no access" |
+| 69 | A bulk delete that finishes after the folder reopened read-only drops its sidecar deletes | job deletes park like other results |
+| 70 | A job result after the load but before the lock is decided reaches the disk but not the cache | it goes into the cache too |
+| 71 | Adjustments that can't be merged are written whole | the write fails with an error |
+| 72 | Many changes to one photo are a read-modify-write each, and the write history grows | queued changes coalesce; the history keeps only what a load in flight can replay |
 
 ## 10. Decisions
 

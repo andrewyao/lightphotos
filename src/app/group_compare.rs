@@ -1781,7 +1781,13 @@ mod tests {
             base: None,
             deductions: Vec::new(),
         };
-        app.folder_store.set_score(path, score, 0);
+        app.folder_store.update(
+            path,
+            crate::persist::folder_store::Patch::Score(crate::sidecar::StoredScore {
+                score,
+                edits: 0,
+            }),
+        );
     }
 
     #[test]

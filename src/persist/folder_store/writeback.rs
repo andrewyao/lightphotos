@@ -32,10 +32,26 @@ use crate::sidecar::{ColorLabel, Flag, ImageRecord, StoredScore};
 /// the app's alone and is written whole.
 #[derive(Clone)]
 pub(super) enum WriteOp {
-    Patch(Box<Patch>),
+    Patch(Box<PatchOp>),
     Delete,
     PutGroup(Group),
     DeleteGroup,
+}
+
+/// A field change on its way to a photo's sidecar.
+#[derive(Clone)]
+pub(super) struct PatchOp {
+    pub(super) patch: Patch,
+    /// The cache's copy of the record before the change, if the cache held
+    /// it: what the change goes onto if the sidecar on disk turns out not
+    /// to be a record we can read (it is moved aside, never deleted).
+    pub(super) fallback: Option<ImageRecord>,
+}
+
+impl WriteOp {
+    pub(super) fn patch(patch: Patch, fallback: Option<ImageRecord>) -> WriteOp {
+        WriteOp::Patch(Box::new(PatchOp { patch, fallback }))
+    }
 }
 
 /// The fields of a record one write changes. Everything else in the
@@ -67,6 +83,9 @@ pub(crate) enum Patch {
     /// The edit time, as tests set it.
     #[cfg(test)]
     Edited(u64),
+    /// Tests: a change that can't apply.
+    #[cfg(test)]
+    Fail,
 }
 
 /// A job's result, as the app's copy of a photo's adjustments before and
@@ -82,19 +101,20 @@ pub(crate) struct AdjustmentsChange {
 
 impl AdjustmentsChange {
     /// `onto` with the sliders this change moved set as it set them.
-    pub(crate) fn apply(&self, onto: &Adjustments) -> Adjustments {
+    pub(crate) fn apply(&self, onto: &Adjustments) -> Result<Adjustments, String> {
         changed_onto(&self.before, &self.after, onto)
     }
 }
 
 /// `onto` with every field that differs between `before` and `after` set to
 /// `after`'s, compared on the JSON form, where a field left out is its
-/// default. Falls back to `after` whole if that form can't be read back.
+/// default. An error if that form can't be read back: writing `after` whole
+/// instead would put stale sliders over newer ones.
 pub(crate) fn changed_onto(
     before: &Adjustments,
     after: &Adjustments,
     onto: &Adjustments,
-) -> Adjustments {
+) -> Result<Adjustments, String> {
     use serde_json::Value;
     let json = |a: &Adjustments| match serde_json::to_value(a) {
         Ok(Value::Object(fields)) => fields,
@@ -114,7 +134,8 @@ pub(crate) fn changed_onto(
             }
         }
     }
-    serde_json::from_value(Value::Object(out)).unwrap_or(*after)
+    serde_json::from_value(Value::Object(out))
+        .map_err(|e| format!("the adjustments could not be merged: {e}"))
 }
 
 impl Patch {
@@ -129,14 +150,15 @@ impl Patch {
 
     /// Apply the change to `rec`, as the write does to the record on disk
     /// and the cache does to its copy.
-    pub(super) fn apply(&self, rec: &mut ImageRecord) {
+    pub(super) fn apply(&self, rec: &mut ImageRecord) -> Result<(), String> {
         match self {
             Patch::Rating(rating) => rec.rating = *rating,
             Patch::Flag(flag) => rec.flag = *flag,
             Patch::Label(label) => rec.label = *label,
-            Patch::Adjustments(change) => rec.edit(change.at, |rec| {
-                rec.adjustments = change.apply(&rec.adjustments)
-            }),
+            Patch::Adjustments(change) => {
+                let merged = change.apply(&rec.adjustments)?;
+                rec.edit(change.at, |rec| rec.adjustments = merged);
+            }
             Patch::Touchups { touchups, at } => {
                 rec.edit(*at, |rec| rec.touchups = touchups.clone())
             }
@@ -148,7 +170,10 @@ impl Patch {
             Patch::Score(score) => rec.score = Some(score.clone()),
             #[cfg(test)]
             Patch::Edited(secs) => rec.edited = Some(*secs),
+            #[cfg(test)]
+            Patch::Fail => return Err("this change can't apply".to_string()),
         }
+        Ok(())
     }
 }
 
@@ -208,9 +233,12 @@ pub(super) struct Writeback {
     /// Bumped once per enqueue. Orders writes against load requests.
     writes: u64,
     outstanding: std::collections::BTreeSet<u64>,
-    authored: HashMap<PathBuf, Vec<Authored>>,
+    authored: HashMap<PathBuf, std::collections::VecDeque<Authored>>,
     /// Loads requested and not yet applied or abandoned.
     loads: usize,
+    /// The marks of those loads, counted: no op older than the oldest is
+    /// ever replayed, so `authored` keeps none.
+    load_marks: std::collections::BTreeMap<u64, usize>,
     /// The folder locks this store holds. See [`super::locks`].
     #[cfg(not(target_arch = "wasm32"))]
     locks: super::locks::SharedLocks,
@@ -238,6 +266,11 @@ pub(super) struct Writeback {
     pending_folders: HashMap<crate::sidecar::FolderKey, u32>,
 
     done_tx: Sender<Done>,
+    /// Notices from browser writes (a sidecar kept aside), for the user.
+    #[cfg(target_arch = "wasm32")]
+    notice_tx: Sender<String>,
+    #[cfg(target_arch = "wasm32")]
+    notice_rx: Receiver<String>,
     done_rx: Receiver<Done>,
 
     /// `None` until the first write. Browsing a folder spawns no thread.
@@ -249,6 +282,9 @@ pub(super) struct Writeback {
     /// channel when a writer dies are drained and done inline, not lost.
     #[cfg(not(target_arch = "wasm32"))]
     queue_rx: Option<SharedQueue>,
+    /// Tests: run every write inline, as with no writer thread.
+    #[cfg(test)]
+    inline_only: bool,
 
     /// Accepted but not yet spawned. wasm has no worker thread, so `pump` is
     /// the scheduler.
@@ -263,12 +299,15 @@ impl Writeback {
         #[cfg(not(target_arch = "wasm32"))] locks: super::locks::SharedLocks,
     ) -> Writeback {
         let (done_tx, done_rx) = channel();
+        #[cfg(target_arch = "wasm32")]
+        let (notice_tx, notice_rx) = channel();
         Writeback {
             pending: HashMap::new(),
             writes: 0,
             outstanding: std::collections::BTreeSet::new(),
             authored: HashMap::new(),
             loads: 0,
+            load_marks: std::collections::BTreeMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             locks,
             #[cfg(not(target_arch = "wasm32"))]
@@ -282,6 +321,10 @@ impl Writeback {
             #[cfg(not(target_arch = "wasm32"))]
             pending_folders: HashMap::new(),
             done_tx,
+            #[cfg(target_arch = "wasm32")]
+            notice_tx,
+            #[cfg(target_arch = "wasm32")]
+            notice_rx,
             done_rx,
             #[cfg(not(target_arch = "wasm32"))]
             tx: None,
@@ -289,6 +332,8 @@ impl Writeback {
             worker: None,
             #[cfg(not(target_arch = "wasm32"))]
             queue_rx: None,
+            #[cfg(test)]
+            inline_only: false,
             #[cfg(target_arch = "wasm32")]
             queue: std::collections::VecDeque::new(),
             #[cfg(target_arch = "wasm32")]
@@ -310,18 +355,37 @@ impl Writeback {
     /// call outrank the load.
     pub(super) fn begin_load(&mut self) -> LoadMark {
         self.loads += 1;
-        LoadMark(self.outstanding.first().copied().unwrap_or(self.writes + 1))
+        let mark = self.outstanding.first().copied().unwrap_or(self.writes + 1);
+        *self.load_marks.entry(mark).or_insert(0) += 1;
+        LoadMark(mark)
     }
 
     /// Retire a load, whether its result arrived or it was never started.
-    pub(super) fn end_load(&mut self) {
+    pub(super) fn end_load(&mut self, mark: LoadMark) {
         self.loads = self.loads.saturating_sub(1);
-        if self.loads == 0 {
-            // No surviving load can disagree with the disk about a write that
-            // already landed, so only the queue itself is worth remembering.
-            self.authored
-                .retain(|path, _| self.pending.contains_key(path));
+        if let Some(n) = self.load_marks.get_mut(&mark.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                self.load_marks.remove(&mark.0);
+            }
         }
+        // Keep only what a load still in flight, or a later one, could
+        // replay: the queue itself, and ops at or after the oldest mark.
+        let floor = self.replay_floor();
+        let outstanding = &self.outstanding;
+        self.authored.retain(|_, ops| {
+            ops.retain(|a| a.seq >= floor || outstanding.contains(&a.seq));
+            !ops.is_empty()
+        });
+    }
+
+    /// The oldest op a load in flight may replay; past every op with none.
+    fn replay_floor(&self) -> u64 {
+        self.load_marks
+            .keys()
+            .next()
+            .copied()
+            .unwrap_or(self.writes.saturating_add(1))
     }
 
     /// Replace every record in `images`, and every group in `groups`, that
@@ -375,7 +439,11 @@ impl Writeback {
                 let mut rec = images.remove(name).unwrap_or_default();
                 for a in ops {
                     match &a.op {
-                        WriteOp::Patch(patch) => patch.apply(&mut rec),
+                        // A change that can't apply fails its write, which
+                        // says so; the load's record stands.
+                        WriteOp::Patch(op) => {
+                            let _ = op.patch.apply(&mut rec);
+                        }
                         WriteOp::Delete => rec = ImageRecord::default(),
                         WriteOp::PutGroup(_) | WriteOp::DeleteGroup => {}
                     }
@@ -424,7 +492,7 @@ impl Writeback {
         self.authored
             .entry(path.to_path_buf())
             .or_default()
-            .push(Authored {
+            .push_back(Authored {
                 seq,
                 op: op.clone(),
             });
@@ -446,9 +514,28 @@ impl Writeback {
             *inflight -= 1;
             if *inflight == 0 {
                 self.pending.remove(path);
-                if self.loads == 0 {
-                    self.authored.remove(path);
+            }
+        }
+        // This op has landed; no load in flight replays one older than its
+        // mark, so the path's history shrinks as its writes land.
+        let floor = self.replay_floor();
+        let outstanding = &self.outstanding;
+        if let Some(ops) = self.authored.get_mut(path) {
+            // Ops are in seq order: the landed one goes if no load needs it,
+            // and so does every landed one before the floor at the front.
+            if seq < floor {
+                if let Ok(i) = ops.binary_search_by_key(&seq, |a| a.seq) {
+                    ops.remove(i);
                 }
+            }
+            while ops
+                .front()
+                .is_some_and(|a| a.seq < floor && !outstanding.contains(&a.seq))
+            {
+                ops.pop_front();
+            }
+            if ops.is_empty() {
+                self.authored.remove(path);
             }
         }
     }
@@ -471,18 +558,10 @@ impl Writeback {
         let seq = self.accept(path, &op);
         self.reap_dead_writer();
         match self.sender() {
+            // The store holds the receiver too (`queue_rx`), so the send
+            // can't fail; a writer that dies leaves it for `reap_dead_writer`.
             Some(tx) => {
-                // A worker that died hands the op back. Retire it and write
-                // inline, and the next enqueue starts a fresh worker.
-                if let Err(std::sync::mpsc::SendError((path, seq, op))) =
-                    tx.send((path.to_path_buf(), seq, op))
-                {
-                    self.tx = None;
-                    if let Some(handle) = self.worker.take() {
-                        let _ = handle.join();
-                    }
-                    self.perform_inline(&path, seq, &op);
-                }
+                let _ = tx.send((path.to_path_buf(), seq, op));
             }
             // Without a worker the write still has to happen, or the edit is
             // lost with no way for the user to find out.
@@ -498,7 +577,7 @@ impl Writeback {
         let mut parked = lock_parked(&self.parked);
         retry_parked(&mut parked, &mut locks, &self.done_tx);
         if !behind_parked(&parked, path, op) {
-            match guarded(path, || perform_locked(&mut locks, path, op)) {
+            match guarded(path, || perform_locked(&mut locks, path, &[op])) {
                 Saved::Done(result) => {
                     let _ = self.done_tx.send((path.to_path_buf(), seq, result.err()));
                 }
@@ -579,6 +658,10 @@ impl Writeback {
     }
 
     fn sender(&mut self) -> Option<&Sender<(PathBuf, u64, WriteOp)>> {
+        #[cfg(test)]
+        if self.inline_only {
+            return None;
+        }
         if self.tx.is_none() {
             let (tx, rx) = channel::<(PathBuf, u64, WriteOp)>();
             let queue: SharedQueue = std::sync::Arc::new(std::sync::Mutex::new(rx));
@@ -611,9 +694,15 @@ impl Writeback {
         self.tx.as_ref()
     }
 
+    /// What the writes have to tell the user that isn't a failure: a
+    /// sidecar kept aside, a lock or file still being tried.
+    pub(super) fn take_notices(&mut self) -> Vec<String> {
+        super::locks::take_notices(&self.locks)
+    }
+
     /// Drain finished writes, returning the failures for the caller to report.
     pub(super) fn pump(&mut self) -> Vec<String> {
-        let mut errors = super::locks::take_notices(&self.locks);
+        let mut errors = Vec::new();
         self.drain_completions(&mut errors);
         self.reap_dead_writer();
         // With no writer thread, parked writes are tried here, as often as
@@ -635,10 +724,23 @@ impl Writeback {
         let deadline = std::time::Instant::now() + timeout;
         let mut errors = Vec::new();
         self.drain_completions(&mut errors);
+        let started = std::time::Instant::now();
         while !self.pending.is_empty() {
             let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
                 break;
             };
+            // Everything left is parked (another program holds its folder,
+            // or its lock can't be made just now): after a round of tries,
+            // say so rather than wait out the timeout.
+            if started.elapsed() >= PARKED_RETRY * 3
+                && self.outstanding.len() <= lock_parked(&self.parked).len()
+            {
+                errors.push(format!(
+                    "{} photos' changes wait for a folder another program holds, or one that can't be locked now; they were not saved",
+                    self.pending.len()
+                ));
+                return errors;
+            }
             // A writer that has died is noticed here, and its parked
             // writes are then tried inline, so nothing waits on it.
             self.reap_dead_writer();
@@ -705,28 +807,34 @@ fn write_loop(
     shared: &Parked,
 ) {
     use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
+    // Writes taken off the queue early, to coalesce with the one before.
+    let mut ahead: std::collections::VecDeque<(PathBuf, u64, WriteOp)> =
+        std::collections::VecDeque::new();
     loop {
         let waiting = !lock_parked(shared).is_empty();
-        let next = match rx.try_recv() {
-            Ok(next) => Some(next),
-            Err(TryRecvError::Disconnected) => None,
-            Err(TryRecvError::Empty) => {
-                // Idle: a left folder's lock goes now, so the other
-                // program can get in.
-                locks.release_except(None);
-                if waiting {
-                    match rx.recv_timeout(PARKED_RETRY) {
-                        Ok(next) => Some(next),
-                        Err(RecvTimeoutError::Timeout) => {
-                            retry_parked(&mut lock_parked(shared), &mut locks, done_tx);
-                            continue;
+        let next = match ahead.pop_front() {
+            Some(next) => Some(next),
+            None => match rx.try_recv() {
+                Ok(next) => Some(next),
+                Err(TryRecvError::Disconnected) => None,
+                Err(TryRecvError::Empty) => {
+                    // Idle: a left folder's lock goes now, so the other
+                    // program can get in.
+                    locks.release_except(None);
+                    if waiting {
+                        match rx.recv_timeout(PARKED_RETRY) {
+                            Ok(next) => Some(next),
+                            Err(RecvTimeoutError::Timeout) => {
+                                retry_parked(&mut lock_parked(shared), &mut locks, done_tx);
+                                continue;
+                            }
+                            Err(RecvTimeoutError::Disconnected) => None,
                         }
-                        Err(RecvTimeoutError::Disconnected) => None,
+                    } else {
+                        rx.recv().ok()
                     }
-                } else {
-                    rx.recv().ok()
                 }
-            }
+            },
         };
         let mut parked = lock_parked(shared);
         retry_parked(&mut parked, &mut locks, done_tx);
@@ -735,17 +843,54 @@ fn write_loop(
             locks.release_except(None);
             return;
         };
-        if behind_parked(&parked, &path, &op) {
-            parked.push_back((path, seq, op));
+        // Changes to this photo queued right behind this one go in the same
+        // read-modify-write.
+        let room = COALESCE_AHEAD.saturating_sub(ahead.len());
+        ahead.extend(rx.try_iter().take(room));
+        let mut group = vec![(seq, op)];
+        while let Some((p, _, o)) = ahead.front() {
+            if *p != path || !photo_op(o) || !group.iter().all(|(_, g)| photo_op(g)) {
+                break;
+            }
+            if let Some((_, s, o)) = ahead.pop_front() {
+                group.push((s, o));
+            }
+        }
+        let first_behind = group
+            .first()
+            .is_some_and(|(_, o)| behind_parked(&parked, &path, o));
+        if first_behind {
+            for (s, o) in group {
+                parked.push_back((path.clone(), s, o));
+            }
             continue;
         }
-        match guarded(&path, || perform_locked(&mut locks, &path, &op)) {
+        let ops: Vec<&WriteOp> = group.iter().map(|(_, o)| o).collect();
+        match guarded(&path, || perform_locked(&mut locks, &path, &ops)) {
             Saved::Done(result) => {
-                let _ = done_tx.send((path, seq, result.err()));
+                let err = result.err();
+                for (s, _) in &group {
+                    let _ = done_tx.send((path.clone(), *s, err.clone()));
+                }
             }
-            Saved::Parked => parked.push_back((path, seq, op)),
+            Saved::Parked => {
+                for (s, o) in group {
+                    parked.push_back((path.clone(), s, o));
+                }
+            }
         }
     }
+}
+
+/// How many queued writes the writer looks at ahead, to coalesce changes
+/// to one photo.
+#[cfg(not(target_arch = "wasm32"))]
+const COALESCE_AHEAD: usize = 256;
+
+/// A write to a photo's own sidecar, which coalesces.
+#[cfg(not(target_arch = "wasm32"))]
+fn photo_op(op: &WriteOp) -> bool {
+    matches!(op, WriteOp::Patch(_) | WriteOp::Delete)
 }
 
 /// The receiving end of the writer's queue, shared with the store.
@@ -793,7 +938,9 @@ fn retry_parked(
     locks: &mut super::locks::SaveLocks,
     done_tx: &Sender<Done>,
 ) {
-    retry_parked_with(parked, done_tx, |path, op| perform_locked(locks, path, op));
+    retry_parked_with(parked, done_tx, |path, op| {
+        perform_locked(locks, path, &[op])
+    });
 }
 
 /// A write that panics (it should not) fails with an error the user sees,
@@ -854,25 +1001,32 @@ fn op_key(path: &Path, op: &WriteOp) -> Option<crate::sidecar::FolderKey> {
     crate::sidecar::FolderKey::of(op_folder(path, op)?)
 }
 
-/// Run `op` under its folder's lock: see [`super::locks::SaveLocks`]. A
-/// delete where nothing was ever saved locks nothing, and makes no
-/// `.lightphotos/` to lock it; a folder that is gone isn't made again.
+/// Run `ops`, writes to one path in order, under its folder's lock: see
+/// [`super::locks::SaveLocks`]. A delete where nothing was ever saved locks
+/// nothing, and makes no `.lightphotos/` to lock it; a folder that is gone
+/// isn't made again.
 #[cfg(not(target_arch = "wasm32"))]
-fn perform_locked(locks: &mut super::locks::SaveLocks, path: &Path, op: &WriteOp) -> Saved {
-    let Some(dir) = op_folder(path, op) else {
-        return Saved::Done(perform(path, op));
+fn perform_locked(locks: &mut super::locks::SaveLocks, path: &Path, ops: &[&WriteOp]) -> Saved {
+    let shared = locks.shared();
+    let Some(first) = ops.first() else {
+        return Saved::Done(Ok(()));
     };
-    let deletes = matches!(op, WriteOp::Delete | WriteOp::DeleteGroup);
+    let Some(dir) = op_folder(path, first) else {
+        return perform(&shared, path, ops);
+    };
+    let deletes = ops
+        .iter()
+        .all(|op| matches!(op, WriteOp::Delete | WriteOp::DeleteGroup));
     if deletes && !dir.join(crate::sidecar::SIDECAR_DIR).is_dir() {
-        return Saved::Done(perform(path, op));
+        return perform(&shared, path, ops);
     }
-    let Some(key) = crate::sidecar::FolderKey::of(dir) else {
+    let Some(key) = locks.key_of(dir) else {
         return Saved::Done(Err(format!(
             "could not save {}: its folder is gone",
             path.display()
         )));
     };
-    locks.write_in(&key, || perform(path, op))
+    locks.write_in(&key, || perform(&shared, path, ops))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -911,20 +1065,136 @@ fn photo_folder(path: &Path) -> Option<&Path> {
 #[cfg(not(target_arch = "wasm32"))]
 use super::locks::Saved;
 
+/// Do `ops`, writes to one path in order. A photo's changes are applied to
+/// the record read from disk once, and written once.
+///
+/// Reading the sidecar can fail two ways. An I/O error may pass, so the
+/// writes park and are tried again. A file that read but is not a record
+/// we understand (it doesn't parse, or is over the size cap) is moved aside
+/// to `<sidecar>.unreadable-<n>`, never deleted, and the changes go onto the
+/// cache's copy of the record (or an empty one). The user hears once.
 #[cfg(not(target_arch = "wasm32"))]
-fn perform(path: &Path, op: &WriteOp) -> Result<(), String> {
+fn perform(shared: &super::locks::SharedLocks, path: &Path, ops: &[&WriteOp]) -> Saved {
     use crate::paths::{remove_if_present, write_atomic_in_dir};
-    match op {
-        WriteOp::Patch(patch) => {
-            let mut rec = crate::sidecar::read_record(path)?;
-            patch.apply(&mut rec);
-            crate::sidecar::write_record(path, &rec)
+    let mut photo_ops = Vec::new();
+    for op in ops {
+        match op {
+            WriteOp::Patch(_) | WriteOp::Delete => photo_ops.push(*op),
+            WriteOp::PutGroup(group) => {
+                let wrote = super::group_file::to_bytes(group)
+                    .and_then(|b| write_atomic_in_dir(path, &b).map_err(|e| e.to_string()));
+                if let Err(e) = wrote {
+                    return Saved::Done(Err(e));
+                }
+            }
+            WriteOp::DeleteGroup => {
+                if let Err(e) = remove_if_present(path) {
+                    return Saved::Done(Err(e.to_string()));
+                }
+            }
         }
-        WriteOp::Delete => crate::sidecar::delete_record(path),
-        WriteOp::PutGroup(group) => write_atomic_in_dir(path, &super::group_file::to_bytes(group)?)
-            .map_err(|e| e.to_string()),
-        WriteOp::DeleteGroup => remove_if_present(path).map_err(|e| e.to_string()),
     }
+    if photo_ops.is_empty() {
+        return Saved::Done(Ok(()));
+    }
+    // After the last delete the record starts empty, and the disk needn't
+    // be read.
+    let last_delete = photo_ops
+        .iter()
+        .rposition(|op| matches!(op, WriteOp::Delete));
+    let (start, rest) = match last_delete {
+        Some(i) => (
+            Start::Empty,
+            photo_ops.get(i.saturating_add(1)..).unwrap_or(&[]),
+        ),
+        None => (Start::Disk, &photo_ops[..]),
+    };
+    if rest.is_empty() {
+        return Saved::Done(crate::sidecar::delete_record(path));
+    }
+    let fallback = rest.iter().find_map(|op| match op {
+        WriteOp::Patch(p) => Some(p.fallback.clone().unwrap_or_default()),
+        _ => None,
+    });
+    let changed = |mut rec: ImageRecord| -> Result<ImageRecord, String> {
+        for op in rest {
+            if let WriteOp::Patch(p) = op {
+                p.patch.apply(&mut rec)?;
+            }
+        }
+        Ok(rec)
+    };
+    let key = path.display().to_string();
+    let rec = match start {
+        Start::Empty => changed(ImageRecord::default()),
+        Start::Disk => match crate::sidecar::read_record_checked(path) {
+            Ok(on_disk) => {
+                super::locks::settled(shared, &key);
+                match changed(on_disk) {
+                    Ok(rec) => Ok(rec),
+                    // Onto the cache's copy it applies: the disk record is
+                    // the problem.
+                    Err(e) => match fallback.clone().map(changed) {
+                        Some(Ok(rec)) => move_aside(shared, path, &e).map(|()| rec),
+                        _ => Err(e),
+                    },
+                }
+            }
+            Err(crate::sidecar::ReadError::Io(e)) => {
+                super::locks::transient(shared, &key, || {
+                    format!(
+                        "could not read {} to save it ({e}); still trying",
+                        path.display()
+                    )
+                });
+                return Saved::Parked;
+            }
+            Err(crate::sidecar::ReadError::Unreadable(why)) => {
+                super::locks::settled(shared, &key);
+                move_aside(shared, path, &why)
+                    .and_then(|()| changed(fallback.clone().unwrap_or_default()))
+            }
+        },
+    };
+    Saved::Done(rec.and_then(|rec| crate::sidecar::write_record(path, &rec)))
+}
+
+/// Where a photo's changes start from.
+#[cfg(not(target_arch = "wasm32"))]
+enum Start {
+    Disk,
+    Empty,
+}
+
+/// Move `path`'s sidecar aside to the first free `<sidecar>.unreadable-<n>`,
+/// and tell the user once.
+#[cfg(not(target_arch = "wasm32"))]
+fn move_aside(shared: &super::locks::SharedLocks, path: &Path, why: &str) -> Result<(), String> {
+    let sidecar = crate::sidecar::sidecar_path(path).ok_or("cannot determine sidecar path")?;
+    for n in 1..=1000u32 {
+        let mut name = sidecar.as_os_str().to_os_string();
+        name.push(format!(".unreadable-{n}"));
+        let aside = PathBuf::from(name);
+        if aside.exists() {
+            continue;
+        }
+        std::fs::rename(&sidecar, &aside)
+            .map_err(|e| format!("could not move {} aside: {e}", sidecar.display()))?;
+        let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
+        super::locks::notice(
+            shared,
+            format!(
+                "{}'s sidecar could not be read ({why}); it was kept as {} and saved anew",
+                name(path).unwrap_or_else(|| path.display().to_string()),
+                name(&aside).unwrap_or_else(|| aside.display().to_string())
+            ),
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "could not move {} aside: no free name",
+        sidecar.display()
+    ))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -942,6 +1212,11 @@ impl Writeback {
         self.queue
             .push_back((path.to_path_buf(), seq, op, dir_handle));
         self.admit();
+    }
+
+    /// What the writes have to tell the user that isn't a failure.
+    pub(super) fn take_notices(&mut self) -> Vec<String> {
+        self.notice_rx.try_iter().collect()
     }
 
     /// Drain finished writes and start as many queued ones as the window
@@ -989,11 +1264,24 @@ impl Writeback {
             };
             self.in_flight.insert(path.clone());
             let done_tx = self.done_tx.clone();
+            let notice_tx = self.notice_tx.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 use crate::web::web_folder_store_fs as fs;
                 let result = match (&op, is_group, body) {
-                    (WriteOp::Patch(patch), _, _) => {
-                        fs::update_sidecar(&dir_handle, &name, |rec| patch.apply(rec)).await
+                    (WriteOp::Patch(op), _, _) => {
+                        let fallback = op.fallback.clone();
+                        match fs::update_sidecar(&dir_handle, &name, fallback, |rec| {
+                            op.patch.apply(rec)
+                        })
+                        .await
+                        {
+                            Ok(Some(notice)) => {
+                                let _ = notice_tx.send(notice);
+                                Ok(())
+                            }
+                            Ok(None) => Ok(()),
+                            Err(e) => Err(e),
+                        }
                     }
                     (_, false, Some(bytes)) => fs::write_sidecar(&dir_handle, &name, &bytes).await,
                     (_, false, None) => fs::delete_sidecar(&dir_handle, &name).await,
@@ -1055,11 +1343,14 @@ mod tests {
         let queued = PathBuf::from("/photos/a.jpg");
         wb.enqueue(&queued, rated(1));
         let patch = || {
-            WriteOp::Patch(Box::new(Patch::Adjustments(Box::new(AdjustmentsChange {
-                before: Adjustments::default(),
-                after: exposed,
-                at: 7,
-            }))))
+            WriteOp::patch(
+                Patch::Adjustments(Box::new(AdjustmentsChange {
+                    before: Adjustments::default(),
+                    after: exposed,
+                    at: 7,
+                })),
+                None,
+            )
         };
         wb.enqueue(&queued, patch());
         wb.enqueue(Path::new("/photos/b.jpg"), patch());
@@ -1201,7 +1492,7 @@ mod tests {
     }
 
     fn rated(stars: u8) -> WriteOp {
-        WriteOp::Patch(Box::new(Patch::Rating(Some(stars))))
+        WriteOp::patch(Patch::Rating(Some(stars)), None)
     }
 
     /// Review 3.7 #3: with no writer thread, a write into a folder another
@@ -1214,9 +1505,7 @@ mod tests {
         let path = dir.join("a.jpg");
         let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
         let mut wb = new_wb();
-        let (tx, rx) = channel();
-        drop(rx);
-        wb.tx = Some(tx);
+        wb.inline_only = true;
         wb.enqueue(&path, rated(3));
         let while_held = crate::sidecar::read_record(&path).unwrap().rating;
         drop(other);
@@ -1334,9 +1623,7 @@ mod tests {
         let path = dir.join("a.jpg");
         let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
         let mut wb = new_wb();
-        let (tx, rx) = channel();
-        drop(rx);
-        wb.tx = Some(tx);
+        wb.inline_only = true;
         wb.enqueue(&path, rated(3));
         drop(other);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1403,17 +1690,15 @@ mod tests {
         assert_eq!(wb.backlog(), 0);
     }
 
-    /// A worker that has died must not swallow the edits sent to it.
+    /// With no writer thread, an edit is still written, inline.
     #[test]
-    fn a_write_to_a_dead_worker_still_reaches_the_disk() {
+    fn a_write_with_no_writer_thread_still_reaches_the_disk() {
         let dir =
             std::env::temp_dir().join(format!("lightphotos-writeback-dead-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a.jpg");
         let mut wb = new_wb();
-        let (tx, rx) = channel();
-        drop(rx);
-        wb.tx = Some(tx);
+        wb.inline_only = true;
         wb.enqueue(&path, rated(3));
         let errors = wb.flush_blocking(std::time::Duration::from_secs(1));
 
@@ -1452,5 +1737,53 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(after, Some(5));
         assert_eq!(wb.backlog(), 0);
+    }
+
+    /// Review 3.7 round 5 #2: at quit, writes only parked behind another
+    /// program's lock are reported at once, not waited for to the timeout.
+    #[test]
+    fn the_quit_flush_does_not_wait_out_parked_writes() {
+        use crate::sidecar::{FolderLock, Writer};
+        let dir = temp("flush-parked");
+        let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
+        let mut wb = new_wb();
+        wb.enqueue(&dir.join("a.jpg"), rated(2));
+        let started = std::time::Instant::now();
+        let errors = wb.flush_blocking(std::time::Duration::from_secs(10));
+        let took = started.elapsed();
+        drop(other);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(took < std::time::Duration::from_secs(4), "waited {took:?}");
+        assert!(
+            errors.iter().any(|e| e.contains("another program")),
+            "{errors:?}"
+        );
+    }
+
+    /// Review 3.7 round 5 #7: the history kept for loads shrinks as writes
+    /// land: nothing older than the oldest load in flight, nothing at all
+    /// with none.
+    #[test]
+    fn the_write_history_is_trimmed_to_what_a_load_can_replay() {
+        let dir = temp("authored-trim");
+        let path = dir.join("a.jpg");
+        let mut wb = new_wb();
+        for stars in 1..=5u8 {
+            wb.enqueue(&path, rated(stars));
+        }
+        let _ = wb.flush_blocking(std::time::Duration::from_secs(5));
+        let none_in_flight = wb.authored.len();
+        let mark = wb.begin_load();
+        for stars in 1..=5u8 {
+            wb.enqueue(&path, rated(stars));
+        }
+        let _ = wb.flush_blocking(std::time::Duration::from_secs(5));
+        let kept_for_load = wb.authored.get(&path).map_or(0, |ops| ops.len());
+        wb.end_load(mark);
+        let after_load = wb.authored.len();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(none_in_flight, 0);
+        assert_eq!(kept_for_load, 5, "what the load in flight may replay");
+        assert_eq!(after_load, 0);
     }
 }
