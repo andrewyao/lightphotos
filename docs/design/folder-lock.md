@@ -192,6 +192,7 @@ Reopen the folder to try again (there is no "Try again" button).
 | 46 | A panic while parked writes are tried again loses all of them | each leaves the queue only once done |
 | 47 | Auto Tone pressed while a folder opens is dropped | opening defers as loading does; only read-only refuses a job |
 | 48 | A relaunch tries in the gap where the quitting app has cleared its holder line but not let go, and opens read-only | once an attempt has seen `app-quitting`, it keeps that wait |
+| 49 | A sidecar, group, coverage, thumbnail or signal write recreates a photo folder deleted or unplugged while the app works in it | `.lightphotos` is made only inside a photo folder that exists (`paths::create_sidecar_dir`); the lock makes it with `create_dir`, not `create_dir_all` |
 
 ## 10. Decisions
 

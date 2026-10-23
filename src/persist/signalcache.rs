@@ -453,7 +453,8 @@ mod writer {
         let Some(dir) = path.parent() else {
             return;
         };
-        if std::fs::create_dir_all(dir).is_err() {
+        // Never the photo folder itself: one removed stays removed.
+        if crate::paths::create_sidecar_dir(dir).is_err() {
             return;
         }
         let _ = crate::paths::write_atomic(path, bytes);

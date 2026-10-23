@@ -493,7 +493,7 @@ fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
     }
     let dir = file.parent().ok_or("cache entry has no parent")?;
     crate::paths::refuse_linked_sidecar_dir(dir).map_err(|e| e.to_string())?;
-    fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    crate::paths::create_sidecar_dir(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
     #[cfg(not(target_os = "macos"))]
     {
