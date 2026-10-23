@@ -797,7 +797,7 @@ mod tests {
     /// A load is a background read; a mark made before it lands must wait
     /// for it, or the shard would hold one photo and lose the rest.
     #[test]
-    fn a_rating_made_while_the_folder_loads_waits_for_the_load() {
+    fn the_marks_shard_waits_for_the_load() {
         use crate::app::test_support::wait_for_folder_store;
         let (mut app, photos) = disk_app("marks-loading");
         let mut truth = FolderStore::with_dir(photos.clone());
@@ -806,12 +806,14 @@ mod tests {
         drop(truth);
 
         app.load_playlist(Playlist::from_dir(&photos), photos.clone());
-        app.folder_store.set(&photos.join("a.jpg"), 2);
+        // No edit is taken until the load lands (docs/design/folder-lock.md
+        // rule 3), so the rating goes in after it.
         synced(&mut app);
         let shard = app.catalog.shard_path(&photos);
         assert!(!shard.exists(), "nothing is written while the load is out");
 
         wait_for_folder_store(&mut app);
+        app.folder_store.set(&photos.join("a.jpg"), 2);
         synced(&mut app);
         let want = marks(&[
             (

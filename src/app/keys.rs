@@ -2208,10 +2208,8 @@ mod tests {
         app.selected = BTreeSet::from([0, 1]);
         app.sel = Some(0);
         press(&mut app, CMD, KeyCode::KeyG);
-        assert_eq!(
-            app.status_text(),
-            Some(crate::i18n::t().group_refused_loading)
-        );
+        // Natively the folder takes no edit until its records land.
+        assert_eq!(app.status_text(), Some(crate::i18n::t().folder_opening));
         assert_eq!(app.visible, vec![0, 1, 2]);
         crate::app::test_support::wait_for_folder_store(&mut app);
         app.folder_store

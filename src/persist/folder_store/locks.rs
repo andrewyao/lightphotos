@@ -61,7 +61,7 @@ pub(super) enum Visit {
     /// The app holds the folder's lock.
     Held,
     /// The lock was busy for a moment and is tried again each frame. The
-    /// open folder's writes are held back until it is decided.
+    /// visit takes no edit until it is decided.
     Opening,
     /// Nothing in the folder is saved for the whole visit.
     ReadOnly(HeldBy),
@@ -335,9 +335,13 @@ impl SaveLocks {
                 lock(&self.shared).lockless.insert(key.clone());
                 Saved::Done(write())
             }
-            // Can pass, so not remembered; the write goes ahead and fails
-            // on its own if the folder can't be written.
-            Err(LockError::Unavailable(_)) => Saved::Done(write()),
+            // The lock can't be made (a read-only volume, `.lightphotos`
+            // a file): the write fails with that reason rather than land in
+            // the folder without its lock.
+            Err(e @ LockError::Unavailable(_)) => Saved::Done(Err(format!(
+                "could not save in {}: {e}",
+                key.path().display()
+            ))),
         }
     }
 
