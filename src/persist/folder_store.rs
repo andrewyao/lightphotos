@@ -644,9 +644,8 @@ impl FolderStore {
     /// or a group's included.
     #[cfg(not(target_arch = "wasm32"))]
     fn enqueue(&mut self, path: &Path, op: WriteOp) {
-        if let Some(open) = self.read_only_folder() {
-            let into = writeback::op_folder(path, &op).and_then(crate::sidecar::FolderKey::of);
-            if into.as_ref() == Some(open) {
+        if let Some(open) = self.read_only_folder().cloned() {
+            if self.writeback.op_folder_key(path, &op) == Some(open) {
                 return;
             }
         }
