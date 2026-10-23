@@ -83,7 +83,10 @@ pub(crate) enum Payload {
 #[derive(Debug)]
 pub(crate) struct Failure {
     // A WebMCP agent sees only a rejected Error's message.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "a WebMCP agent sees only the message")
+    )]
     error: Value,
     pub(crate) message: String,
 }
@@ -110,7 +113,10 @@ impl From<ChannelError> for Failure {
 #[derive(Serialize, Debug)]
 #[serde(tag = "error", rename_all = "snake_case")]
 // Most variants are about TCP lines and connections, which the browser has none of.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg_attr(
+    target_arch = "wasm32",
+    allow(dead_code, reason = "the browser has no TCP lines or connections")
+)]
 pub(crate) enum ChannelError {
     BadJson {
         reason: String,

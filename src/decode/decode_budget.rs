@@ -15,7 +15,10 @@
 //!
 //! Compiled on every target so the tests run natively. Only wasm32 calls it.
 
-#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+#![cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(dead_code, reason = "only wasm32 has a decode budget")
+)]
 
 use std::cell::Cell;
 use std::sync::{Condvar, Mutex};

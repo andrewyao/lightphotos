@@ -76,10 +76,12 @@ enum Job {
     /// Full-resolution decode, capped at the GPU's max texture size. Requested
     /// only when the user zooms past the preview, because it costs seconds and
     /// hundreds of megabytes.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the web build has no full-resolution tier")
+    )]
     Full(PathBuf, u32, Generation),
     /// Thumbnail whose longest side is at most the carried size.
-    #[allow(dead_code)]
     Thumb(PathBuf, u32),
     /// Camera, lens, and exposure metadata for the info panel.
     Exif(PathBuf),
@@ -791,7 +793,10 @@ pub struct Loader {
 
     /// The GPU's max texture dimension, so full decodes only downscale images
     /// too large to upload.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the web build has no full-resolution tier")
+    )]
     full_target: u32,
 
     limits: CacheLimits,
@@ -1075,7 +1080,10 @@ impl Loader {
     /// Requests the full-resolution decode of `path`. Call only when the photo
     /// shows larger on screen than its preview, at fit or after a zoom,
     /// because this is the expensive tier.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the web build has no full-resolution tier")
+    )]
     pub fn request_full(&mut self, path: PathBuf) {
         if self.fulls.contains(&path) || self.inflight.contains(&path) {
             return;
@@ -1103,7 +1111,6 @@ impl Loader {
     }
 
     /// True while the full decode of `path` is queued or running.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn full_inflight(&self, path: &Path) -> bool {
         self.inflight.contains(path)
     }
@@ -1150,7 +1157,6 @@ impl Loader {
             .or_else(|| self.get_preview(path, target_px))
     }
 
-    #[allow(dead_code)]
     pub fn request_thumb(&mut self, path: PathBuf, max_px: u32) {
         let key = (path.clone(), max_px);
         if self.thumb_cache.contains_key(&key)
@@ -1297,7 +1303,10 @@ impl Loader {
     /// the viewed photo only; exif jobs outrank thumbnails.
     // wasm32 goes through `begin_web_exif`, because a thread there cannot
     // open the file by path.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "wasm32 reads EXIF through begin_web_exif")
+    )]
     pub fn request_exif(&mut self, path: PathBuf) {
         if self.exif_inflight.contains(&path) {
             return;
@@ -1316,7 +1325,6 @@ impl Loader {
         self.exif_inflight.insert(path.to_path_buf())
     }
 
-    #[allow(dead_code)]
     /// wasm32: a handle the browser's async file reads submit decodes
     /// through, since a `spawn_local` future cannot borrow the `Loader`.
     #[cfg(target_arch = "wasm32")]
@@ -1545,7 +1553,10 @@ impl Loader {
     /// Drops queued `Preview` decodes whose path `keep` rejects. Neighbors
     /// get a `Preview` too, so without this, fast stepping leaves a decode
     /// per photo passed queued ahead of the photo the user stops on.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the web build has no full-resolution tier")
+    )]
     pub fn retain_previews(&mut self, keep: impl Fn(&Path) -> bool) {
         let Ok(mut q) = lock_queue(&self.shared) else {
             return;

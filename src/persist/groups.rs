@@ -258,7 +258,10 @@ impl Groups {
         self.by_id.iter()
     }
 
-    #[cfg_attr(not(feature = "hotpath"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        allow(dead_code, reason = "only the hotpath profile reads it")
+    )]
     pub fn len(&self) -> usize {
         self.by_id.len()
     }

@@ -32,7 +32,7 @@ const STATUS_SECS: f32 = 3.0;
 /// which is what export did before it had settings). A chosen folder that has
 /// since gone away falls back to `Exports/` here rather than failing the next
 /// export.
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(test, allow(dead_code, reason = "tests never load the saved value"))]
 pub(super) fn load_export_settings() -> ExportSettings {
     let saved: ExportSettings = crate::persist::prefs::load(EXPORT_SETTINGS_PREF)
         .and_then(|s| serde_json::from_str(&s).ok())

@@ -35,7 +35,6 @@ const ONE_COMPONENT_32F: u32 = u32::from_be_bytes(*b"L00f");
 /// Which Vision request produced a mask. The two behave differently enough
 /// that debugging a mask starts here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum MaskSource {
     Person,
     ForegroundInstance,
@@ -77,7 +76,6 @@ impl Mask {
 
     /// This mask resampled bilinearly to `width x height`, which keeps soft edges.
     // Only CPU users like `seg_probe` call this. The Loupe lets the GPU sampler stretch the mask.
-    #[allow(dead_code)]
     pub fn resized(&self, width: u32, height: u32) -> Mask {
         if (width, height) == (self.width, self.height) {
             return self.clone();
@@ -119,7 +117,6 @@ impl Mask {
 
     /// Mean coverage, 0.0..=1.0.
     // Only `seg_probe` reports this. The app uses `solid_coverage`.
-    #[allow(dead_code)]
     pub fn coverage(&self) -> f32 {
         if self.alpha.is_empty() {
             return 0.0;

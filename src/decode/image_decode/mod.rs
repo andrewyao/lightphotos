@@ -96,10 +96,6 @@ pub enum PixelFormat {
     /// Display-referred linear RGBA as `half::f16`, 8 bytes per pixel, alpha
     /// always one. Apple's tone curve is already applied, so it displays as
     /// `Srgb8` does, only with more depth.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "only macOS's CIRAWFilter decode builds it")
-    )]
     TonedF16,
 }
 
@@ -406,8 +402,11 @@ struct DateTimeParts {
     da: u32,
     h: u64,
     mi: u64,
-    /// Read only by the macOS burst clock; display stops at minutes.
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    /// Read only by the native burst clock; display stops at minutes.
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "only the native burst clock reads it")
+    )]
     se: u64,
 }
 

@@ -51,7 +51,10 @@ pub(crate) fn panel_scale(_window: &Window) -> f32 {
 
 /// `native / drawn`, never above 1.0: a mode drawn with fewer pixels than the
 /// panel has is stretched up, which adds no detail.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only the macOS display query calls it")
+)]
 fn scale_of(native: usize, drawn: usize) -> f32 {
     (native as f32 / drawn as f32).min(1.0)
 }

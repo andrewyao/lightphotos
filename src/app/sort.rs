@@ -119,7 +119,7 @@ impl SortOrder {
     /// The saved order, or Name when none is saved or it can't be read. The
     /// browser can't read file metadata, so a saved file sort gives Name
     /// there.
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg_attr(test, allow(dead_code, reason = "tests never load the saved value"))]
     pub(crate) fn load() -> SortOrder {
         crate::persist::prefs::load(SortOrder::PREF_KEY)
             .and_then(|s| SortOrder::parse(&s))

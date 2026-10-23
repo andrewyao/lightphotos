@@ -35,7 +35,6 @@ pub(crate) enum TileFidelity {
     Speed,
     /// Each tile is cut from the member's full-resolution decode. Native
     /// only: the web build keeps one full decode in a 4 GB heap.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Full,
 }
 
@@ -84,7 +83,10 @@ pub(crate) fn compare_zoom_uv(w: u32, h: u32, center: egui::Pos2, side: f32) -> 
 /// The whole pixels `uv` covers in a `w`×`h` image, as (x, y, width,
 /// height): at least one pixel each way and never past the edge. `None` for
 /// an image with no pixels.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg_attr(
+    target_arch = "wasm32",
+    allow(dead_code, reason = "the web build has no Full tile fidelity")
+)]
 pub(crate) fn crop_px(w: u32, h: u32, uv: egui::Rect) -> Option<(u32, u32, u32, u32)> {
     if w == 0 || h == 0 {
         return None;
@@ -97,7 +99,10 @@ pub(crate) fn crop_px(w: u32, h: u32, uv: egui::Rect) -> Option<(u32, u32, u32, 
 
 /// What a tile has of its member's full-resolution crop. Only `None` on
 /// the web, which has no Full.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg_attr(
+    target_arch = "wasm32",
+    allow(dead_code, reason = "the web build has no Full tile fidelity")
+)]
 enum Full {
     None,
     /// The full decode is requested and not yet cut.
@@ -978,9 +983,15 @@ pub(crate) struct CompareTiles {
     pub(crate) sizes: HashMap<PathBuf, (u32, u32)>,
     /// The zoom square as of the last sync, and when it last changed, which
     /// Full waits on before cutting new crops.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the web build has no Full tile fidelity")
+    )]
     square: Square,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the web build has no Full tile fidelity")
+    )]
     square_moved: Instant,
     wake_at: Option<Instant>,
     opened: Instant,

@@ -56,7 +56,6 @@ fn to_srgb_u8(v: f32) -> u8 {
 /// Decodes RAW bytes to the `Fast` sRGB8 preview, Lanczos3-resized to fit
 /// `max_px`. The `decode_probe` golden-hash tests call it by name.
 #[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_fast_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedImage, String> {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
@@ -68,7 +67,6 @@ pub fn decode_raw_fast_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedIm
 /// tier of the same photo lands (`app/thumbs.rs::upload_shown`), so a much
 /// larger `Quality` image would suddenly appear zoomed in.
 #[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_quality_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedImage, String> {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
@@ -323,7 +321,10 @@ fn crop_in_place<T: Copy>(data: &mut Vec<T>, width: usize, crop: rawler::imgop::
 /// rawler's u16 sensor buffer, then what the steps after it allocate,
 /// measured at about 17 bytes a pixel for a 45 MP Bayer `Quality` decode (the
 /// f32 mosaic, PPG's RGB output and its scratch, then the f16 output).
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(dead_code, reason = "only wasm32 has a decode budget")
+)]
 fn scratch_estimate(raw: &rawler::RawImage, mode: DemosaicMode) -> usize {
     let pixels = raw.width.saturating_mul(raw.height);
     let per_pixel = 2 * raw.cpp
@@ -338,7 +339,10 @@ fn scratch_estimate(raw: &rawler::RawImage, mode: DemosaicMode) -> usize {
 /// before the sensor size is known. Compressed RAWs take a byte or more a
 /// pixel, so this rarely asks for too little; [`decode_raw_preview`] asks
 /// again when it does.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(dead_code, reason = "only wasm32 has a decode budget")
+)]
 fn file_estimate(file_len: usize, mode: DemosaicMode) -> usize {
     // rawler's u16 sensor buffer is 2 bytes a pixel; a Bayer file has cpp 1.
     let per_pixel = 2 + match mode {

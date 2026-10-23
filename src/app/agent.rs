@@ -79,7 +79,10 @@ impl Anchor {
 /// Where an agent's export may land: inside the anchor, or inside the
 /// export form's own folder (resolved).
 // The browser exports only into the picked folder; nothing reads this there.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg_attr(
+    target_arch = "wasm32",
+    allow(dead_code, reason = "the browser exports only into the picked folder")
+)]
 pub(super) struct ExportConfine {
     anchor: Option<Anchor>,
     form_folder: Option<PathBuf>,

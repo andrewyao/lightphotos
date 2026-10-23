@@ -18,7 +18,10 @@ pub(crate) enum FolderState {
     /// The browser holds the folder's handle but withholds read access
     /// until a click asks for it.
     // Only the browser withholds access to a folder.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(dead_code, reason = "only the browser withholds access to a folder")
+    )]
     NeedsPermission,
     /// The folder could not be read, with why.
     Unavailable(String),

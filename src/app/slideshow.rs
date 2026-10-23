@@ -45,7 +45,7 @@ impl SlideshowSettings {
 
     /// The saved settings, or the defaults when none are saved or they
     /// can't be read.
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg_attr(test, allow(dead_code, reason = "tests never load the saved value"))]
     pub(super) fn load() -> SlideshowSettings {
         let saved: SlideshowSettings = crate::persist::prefs::load(PREF)
             .and_then(|s| serde_json::from_str(&s).ok())

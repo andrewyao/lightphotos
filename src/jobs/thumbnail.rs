@@ -6,8 +6,6 @@
 //! `<dir>/.lightphotos/`, beside the folder store sidecars. The wasm32 build reads
 //! and writes the same files through `web/web_thumb_cache.rs`.
 
-#![allow(dead_code)]
-
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
 use std::ffi::{OsStr, OsString};
