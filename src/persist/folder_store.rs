@@ -204,7 +204,11 @@ impl FolderStore {
     pub(crate) fn switch_dir(
         &mut self,
         dir: &Path,
-        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] has_photos: bool,
+        #[cfg_attr(
+            target_arch = "wasm32",
+            allow(unused_variables, reason = "the browser build takes no lock")
+        )]
+        has_photos: bool,
     ) -> LoadMark {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -893,8 +897,10 @@ impl std::fmt::Display for GroupWriteRefused {
 }
 
 /// Why a folder opened read-only: who holds it, or that it can't be locked.
-// The browser build has no locks, so it never opens a folder read-only.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg_attr(
+    target_arch = "wasm32",
+    allow(dead_code, reason = "the browser build has no folder locks")
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeldBy {
     /// Another LightPhotos window or instance, by pid.
