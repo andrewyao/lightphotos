@@ -201,6 +201,18 @@ pub fn remove_if_present(file: &Path) -> std::io::Result<()> {
 /// and overwrite whatever it points at.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_then(dest, bytes, || Ok(()))
+}
+
+/// [`write_atomic`], running `before` once the temp file is written and
+/// before it is renamed over `dest`. A failure in `before` removes the temp
+/// file and leaves `dest` as it was.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_atomic_then(
+    dest: &Path,
+    bytes: &[u8],
+    before: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -226,6 +238,7 @@ pub fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
     };
     let written = file.write_all(bytes).and_then(|()| {
         drop(file);
+        before()?;
         std::fs::rename(&tmp, dest)
     });
     if written.is_err() {

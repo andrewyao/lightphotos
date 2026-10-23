@@ -576,8 +576,8 @@ impl Writeback {
         let mut locks = super::locks::SaveLocks::new(self.locks.clone());
         let mut parked = lock_parked(&self.parked);
         retry_parked(&mut parked, &mut locks, &self.done_tx);
-        if !behind_parked(&parked, path, op) {
-            match guarded(path, || perform_locked(&mut locks, path, &[op])) {
+        if !behind_parked(&parked, path) {
+            match guarded(path, || perform_locked(&mut locks, path, op)) {
                 Saved::Done(result) => {
                     let _ = self.done_tx.send((path.to_path_buf(), seq, result.err()));
                 }
@@ -732,8 +732,15 @@ impl Writeback {
             // Everything left is parked (another program holds its folder,
             // or its lock can't be made just now): after a round of tries,
             // say so rather than wait out the timeout.
+            // `try_lock`: the writer can hold the parked writes across a
+            // write, and the deadline must hold.
+            let parked_now = match self.parked.try_lock() {
+                Ok(parked) => Some(parked.len()),
+                Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner().len()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            };
             if started.elapsed() >= PARKED_RETRY * 3
-                && self.outstanding.len() <= lock_parked(&self.parked).len()
+                && parked_now.is_some_and(|n| self.outstanding.len() <= n)
             {
                 errors.push(format!(
                     "{} photos' changes wait for a folder another program holds, or one that can't be locked now; they were not saved",
@@ -795,7 +802,8 @@ const PARKED_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The writer thread: runs each write in order, under its folder's lock.
 /// A write into a folder another program holds is parked with every later
-/// write for that folder behind it, so the order stays, and all of them
+/// write for that photo behind it, so a photo's writes keep their order and
+/// other photos' writes go on, and all of them
 /// are tried again whenever a write arrives, every [`PARKED_RETRY`], and
 /// once more when the queue closes at quit. None is dropped while the app
 /// runs (`docs/design/folder-lock.md`, rule 1).
@@ -807,34 +815,28 @@ fn write_loop(
     shared: &Parked,
 ) {
     use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
-    // Writes taken off the queue early, to coalesce with the one before.
-    let mut ahead: std::collections::VecDeque<(PathBuf, u64, WriteOp)> =
-        std::collections::VecDeque::new();
     loop {
         let waiting = !lock_parked(shared).is_empty();
-        let next = match ahead.pop_front() {
-            Some(next) => Some(next),
-            None => match rx.try_recv() {
-                Ok(next) => Some(next),
-                Err(TryRecvError::Disconnected) => None,
-                Err(TryRecvError::Empty) => {
-                    // Idle: a left folder's lock goes now, so the other
-                    // program can get in.
-                    locks.release_except(None);
-                    if waiting {
-                        match rx.recv_timeout(PARKED_RETRY) {
-                            Ok(next) => Some(next),
-                            Err(RecvTimeoutError::Timeout) => {
-                                retry_parked(&mut lock_parked(shared), &mut locks, done_tx);
-                                continue;
-                            }
-                            Err(RecvTimeoutError::Disconnected) => None,
+        let next = match rx.try_recv() {
+            Ok(next) => Some(next),
+            Err(TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) => {
+                // Idle: a left folder's lock goes now, so the other
+                // program can get in.
+                locks.release_except(None);
+                if waiting {
+                    match rx.recv_timeout(PARKED_RETRY) {
+                        Ok(next) => Some(next),
+                        Err(RecvTimeoutError::Timeout) => {
+                            retry_parked(&mut lock_parked(shared), &mut locks, done_tx);
+                            continue;
                         }
-                    } else {
-                        rx.recv().ok()
+                        Err(RecvTimeoutError::Disconnected) => None,
                     }
+                } else {
+                    rx.recv().ok()
                 }
-            },
+            }
         };
         let mut parked = lock_parked(shared);
         retry_parked(&mut parked, &mut locks, done_tx);
@@ -843,54 +845,17 @@ fn write_loop(
             locks.release_except(None);
             return;
         };
-        // Changes to this photo queued right behind this one go in the same
-        // read-modify-write.
-        let room = COALESCE_AHEAD.saturating_sub(ahead.len());
-        ahead.extend(rx.try_iter().take(room));
-        let mut group = vec![(seq, op)];
-        while let Some((p, _, o)) = ahead.front() {
-            if *p != path || !photo_op(o) || !group.iter().all(|(_, g)| photo_op(g)) {
-                break;
-            }
-            if let Some((_, s, o)) = ahead.pop_front() {
-                group.push((s, o));
-            }
-        }
-        let first_behind = group
-            .first()
-            .is_some_and(|(_, o)| behind_parked(&parked, &path, o));
-        if first_behind {
-            for (s, o) in group {
-                parked.push_back((path.clone(), s, o));
-            }
+        if behind_parked(&parked, &path) {
+            parked.push_back((path, seq, op));
             continue;
         }
-        let ops: Vec<&WriteOp> = group.iter().map(|(_, o)| o).collect();
-        match guarded(&path, || perform_locked(&mut locks, &path, &ops)) {
+        match guarded(&path, || perform_locked(&mut locks, &path, &op)) {
             Saved::Done(result) => {
-                let err = result.err();
-                for (s, _) in &group {
-                    let _ = done_tx.send((path.clone(), *s, err.clone()));
-                }
+                let _ = done_tx.send((path, seq, result.err()));
             }
-            Saved::Parked => {
-                for (s, o) in group {
-                    parked.push_back((path.clone(), s, o));
-                }
-            }
+            Saved::Parked => parked.push_back((path, seq, op)),
         }
     }
-}
-
-/// How many queued writes the writer looks at ahead, to coalesce changes
-/// to one photo.
-#[cfg(not(target_arch = "wasm32"))]
-const COALESCE_AHEAD: usize = 256;
-
-/// A write to a photo's own sidecar, which coalesces.
-#[cfg(not(target_arch = "wasm32"))]
-fn photo_op(op: &WriteOp) -> bool {
-    matches!(op, WriteOp::Patch(_) | WriteOp::Delete)
 }
 
 /// The receiving end of the writer's queue, shared with the store.
@@ -912,25 +877,18 @@ fn lock_parked(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Whether a write for `path` must wait behind a parked one for its folder,
-/// so writes to one folder keep their order.
+/// Whether a write for `path` must wait behind a parked one for the same
+/// path, so one photo's (or one group file's) writes keep their order.
+/// Order across paths doesn't matter, so other photos' writes go on.
 #[cfg(not(target_arch = "wasm32"))]
 fn behind_parked(
     parked: &std::collections::VecDeque<(PathBuf, u64, WriteOp)>,
     path: &Path,
-    op: &WriteOp,
 ) -> bool {
-    if parked.is_empty() {
-        return false;
-    }
-    op_key(path, op).is_some_and(|key| {
-        parked
-            .iter()
-            .any(|(p, _, o)| op_key(p, o).as_ref() == Some(&key))
-    })
+    parked.iter().any(|(p, _, _)| p == path)
 }
 
-/// Try the parked writes again, in order; a folder still held keeps the
+/// Try the parked writes again, in order; a path still parked keeps the
 /// rest of its writes parked behind the first.
 #[cfg(not(target_arch = "wasm32"))]
 fn retry_parked(
@@ -938,9 +896,7 @@ fn retry_parked(
     locks: &mut super::locks::SaveLocks,
     done_tx: &Sender<Done>,
 ) {
-    retry_parked_with(parked, done_tx, |path, op| {
-        perform_locked(locks, path, &[op])
-    });
+    retry_parked_with(parked, done_tx, |path, op| perform_locked(locks, path, op));
 }
 
 /// A write that panics (it should not) fails with an error the user sees,
@@ -965,11 +921,10 @@ fn retry_parked_with(
     done_tx: &Sender<Done>,
     mut write: impl FnMut(&Path, &WriteOp) -> Saved,
 ) {
-    let mut held: Vec<crate::sidecar::FolderKey> = Vec::new();
+    let mut held: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut i = 0;
     while let Some((path, seq, op)) = parked.get(i) {
-        let key = op_key(path, op);
-        if key.as_ref().is_some_and(|k| held.contains(k)) {
+        if held.contains(path) {
             i += 1;
             continue;
         }
@@ -979,7 +934,7 @@ fn retry_parked_with(
                 parked.remove(i);
             }
             Saved::Parked => {
-                held.extend(key);
+                held.insert(path.clone());
                 i += 1;
             }
         }
@@ -996,29 +951,18 @@ pub(super) fn op_folder<'p>(path: &'p Path, op: &WriteOp) -> Option<&'p Path> {
     }
 }
 
+/// Run `op` under its folder's lock: see [`super::locks::SaveLocks`]. A
+/// delete where nothing was ever saved locks nothing, and makes no
+/// `.lightphotos/` to lock it; a folder that is gone isn't made again.
 #[cfg(not(target_arch = "wasm32"))]
-fn op_key(path: &Path, op: &WriteOp) -> Option<crate::sidecar::FolderKey> {
-    crate::sidecar::FolderKey::of(op_folder(path, op)?)
-}
-
-/// Run `ops`, writes to one path in order, under its folder's lock: see
-/// [`super::locks::SaveLocks`]. A delete where nothing was ever saved locks
-/// nothing, and makes no `.lightphotos/` to lock it; a folder that is gone
-/// isn't made again.
-#[cfg(not(target_arch = "wasm32"))]
-fn perform_locked(locks: &mut super::locks::SaveLocks, path: &Path, ops: &[&WriteOp]) -> Saved {
+fn perform_locked(locks: &mut super::locks::SaveLocks, path: &Path, op: &WriteOp) -> Saved {
     let shared = locks.shared();
-    let Some(first) = ops.first() else {
-        return Saved::Done(Ok(()));
+    let Some(dir) = op_folder(path, op) else {
+        return perform(&shared, path, op);
     };
-    let Some(dir) = op_folder(path, first) else {
-        return perform(&shared, path, ops);
-    };
-    let deletes = ops
-        .iter()
-        .all(|op| matches!(op, WriteOp::Delete | WriteOp::DeleteGroup));
+    let deletes = matches!(op, WriteOp::Delete | WriteOp::DeleteGroup);
     if deletes && !dir.join(crate::sidecar::SIDECAR_DIR).is_dir() {
-        return perform(&shared, path, ops);
+        return perform(&shared, path, op);
     }
     let Some(key) = locks.key_of(dir) else {
         return Saved::Done(Err(format!(
@@ -1026,7 +970,7 @@ fn perform_locked(locks: &mut super::locks::SaveLocks, path: &Path, ops: &[&Writ
             path.display()
         )));
     };
-    locks.write_in(&key, || perform(&shared, path, ops))
+    locks.write_in(&key, || perform(&shared, path, op))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1065,136 +1009,112 @@ fn photo_folder(path: &Path) -> Option<&Path> {
 #[cfg(not(target_arch = "wasm32"))]
 use super::locks::Saved;
 
-/// Do `ops`, writes to one path in order. A photo's changes are applied to
-/// the record read from disk once, and written once.
+/// Do `op`. A photo's change is applied to the record read from disk and
+/// written; a change that can't apply fails the write, with the reason.
 ///
-/// Reading the sidecar can fail two ways. An I/O error may pass, so the
-/// writes park and are tried again. A file that read but is not a record
-/// we understand (it doesn't parse, or is over the size cap) is moved aside
-/// to `<sidecar>.unreadable-<n>`, never deleted, and the changes go onto the
-/// cache's copy of the record (or an empty one). The user hears once.
+/// Reading the sidecar can fail three ways. An I/O error that may pass parks
+/// the write, to be tried again; one that won't (no permission, not a file)
+/// fails it. A file that read but is not a record we understand (it doesn't
+/// parse, or is over the size cap) is moved aside to
+/// `<sidecar>.unreadable-<n>`, never deleted, and the change goes onto the
+/// cache's copy of the record, if the change carries one; without one the
+/// write fails and the file is left alone. See [`replace_unreadable`].
 #[cfg(not(target_arch = "wasm32"))]
-fn perform(shared: &super::locks::SharedLocks, path: &Path, ops: &[&WriteOp]) -> Saved {
+fn perform(shared: &super::locks::SharedLocks, path: &Path, op: &WriteOp) -> Saved {
     use crate::paths::{remove_if_present, write_atomic_in_dir};
-    let mut photo_ops = Vec::new();
-    for op in ops {
-        match op {
-            WriteOp::Patch(_) | WriteOp::Delete => photo_ops.push(*op),
-            WriteOp::PutGroup(group) => {
-                let wrote = super::group_file::to_bytes(group)
-                    .and_then(|b| write_atomic_in_dir(path, &b).map_err(|e| e.to_string()));
-                if let Err(e) = wrote {
-                    return Saved::Done(Err(e));
-                }
-            }
-            WriteOp::DeleteGroup => {
-                if let Err(e) = remove_if_present(path) {
-                    return Saved::Done(Err(e.to_string()));
-                }
-            }
+    let op = match op {
+        WriteOp::Patch(op) => op,
+        WriteOp::Delete => return Saved::Done(crate::sidecar::delete_record(path)),
+        WriteOp::PutGroup(group) => {
+            return Saved::Done(
+                super::group_file::to_bytes(group)
+                    .and_then(|b| write_atomic_in_dir(path, &b).map_err(|e| e.to_string())),
+            )
         }
-    }
-    if photo_ops.is_empty() {
-        return Saved::Done(Ok(()));
-    }
-    // After the last delete the record starts empty, and the disk needn't
-    // be read.
-    let last_delete = photo_ops
-        .iter()
-        .rposition(|op| matches!(op, WriteOp::Delete));
-    let (start, rest) = match last_delete {
-        Some(i) => (
-            Start::Empty,
-            photo_ops.get(i.saturating_add(1)..).unwrap_or(&[]),
-        ),
-        None => (Start::Disk, &photo_ops[..]),
-    };
-    if rest.is_empty() {
-        return Saved::Done(crate::sidecar::delete_record(path));
-    }
-    let fallback = rest.iter().find_map(|op| match op {
-        WriteOp::Patch(p) => Some(p.fallback.clone().unwrap_or_default()),
-        _ => None,
-    });
-    let changed = |mut rec: ImageRecord| -> Result<ImageRecord, String> {
-        for op in rest {
-            if let WriteOp::Patch(p) = op {
-                p.patch.apply(&mut rec)?;
-            }
+        WriteOp::DeleteGroup => {
+            return Saved::Done(remove_if_present(path).map_err(|e| e.to_string()))
         }
-        Ok(rec)
     };
     let key = path.display().to_string();
-    let rec = match start {
-        Start::Empty => changed(ImageRecord::default()),
-        Start::Disk => match crate::sidecar::read_record_checked(path) {
-            Ok(on_disk) => {
-                super::locks::settled(shared, &key);
-                match changed(on_disk) {
-                    Ok(rec) => Ok(rec),
-                    // Onto the cache's copy it applies: the disk record is
-                    // the problem.
-                    Err(e) => match fallback.clone().map(changed) {
-                        Some(Ok(rec)) => move_aside(shared, path, &e).map(|()| rec),
-                        _ => Err(e),
-                    },
-                }
-            }
-            Err(crate::sidecar::ReadError::Io(e)) => {
-                super::locks::transient(shared, &key, || {
-                    format!(
-                        "could not read {} to save it ({e}); still trying",
-                        path.display()
-                    )
-                });
-                return Saved::Parked;
-            }
-            Err(crate::sidecar::ReadError::Unreadable(why)) => {
-                super::locks::settled(shared, &key);
-                move_aside(shared, path, &why)
-                    .and_then(|()| changed(fallback.clone().unwrap_or_default()))
-            }
-        },
-    };
-    Saved::Done(rec.and_then(|rec| crate::sidecar::write_record(path, &rec)))
-}
-
-/// Where a photo's changes start from.
-#[cfg(not(target_arch = "wasm32"))]
-enum Start {
-    Disk,
-    Empty,
-}
-
-/// Move `path`'s sidecar aside to the first free `<sidecar>.unreadable-<n>`,
-/// and tell the user once.
-#[cfg(not(target_arch = "wasm32"))]
-fn move_aside(shared: &super::locks::SharedLocks, path: &Path, why: &str) -> Result<(), String> {
-    let sidecar = crate::sidecar::sidecar_path(path).ok_or("cannot determine sidecar path")?;
-    for n in 1..=1000u32 {
-        let mut name = sidecar.as_os_str().to_os_string();
-        name.push(format!(".unreadable-{n}"));
-        let aside = PathBuf::from(name);
-        if aside.exists() {
-            continue;
+    match crate::sidecar::read_record_checked(path) {
+        Ok(mut rec) => {
+            super::locks::settled(shared, &key);
+            Saved::Done(
+                op.patch
+                    .apply(&mut rec)
+                    .and_then(|()| crate::sidecar::write_record(path, &rec)),
+            )
         }
-        std::fs::rename(&sidecar, &aside)
-            .map_err(|e| format!("could not move {} aside: {e}", sidecar.display()))?;
-        let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
-        super::locks::notice(
-            shared,
-            format!(
-                "{}'s sidecar could not be read ({why}); it was kept as {} and saved anew",
-                name(path).unwrap_or_else(|| path.display().to_string()),
-                name(&aside).unwrap_or_else(|| aside.display().to_string())
-            ),
-        );
-        return Ok(());
+        Err(crate::sidecar::ReadError::Io { why, lasting: true }) => {
+            super::locks::settled(shared, &key);
+            Saved::Done(Err(format!("could not save {}: {why}", path.display())))
+        }
+        Err(crate::sidecar::ReadError::Io {
+            why,
+            lasting: false,
+        }) => {
+            super::locks::transient(shared, &key, || {
+                format!(
+                    "could not read {} to save it ({why}); still trying",
+                    path.display()
+                )
+            });
+            Saved::Parked
+        }
+        Err(crate::sidecar::ReadError::Unreadable(why)) => {
+            super::locks::settled(shared, &key);
+            Saved::Done(replace_unreadable(shared, path, op, &why))
+        }
     }
-    Err(format!(
-        "could not move {} aside: no free name",
-        sidecar.display()
-    ))
+}
+
+/// `path`'s sidecar read, but is not a record (`why`). With the cache's
+/// copy in the change, the new record (the change onto that copy) is
+/// written to a temp file first, then the bad file is moved aside to the
+/// first free `<sidecar>.unreadable-<n>`, then the temp file takes its
+/// place. A failure at any step leaves the old sidecar or the new one,
+/// never neither. Without a copy, nothing is touched and the write fails.
+#[cfg(not(target_arch = "wasm32"))]
+fn replace_unreadable(
+    shared: &super::locks::SharedLocks,
+    path: &Path,
+    op: &PatchOp,
+    why: &str,
+) -> Result<(), String> {
+    let name = |p: &Path| {
+        p.file_name().map_or_else(
+            || p.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    };
+    let Some(mut rec) = op.fallback.clone() else {
+        return Err(format!(
+            "could not save {}: its sidecar could not be read ({why}) and was left as it is",
+            name(path)
+        ));
+    };
+    op.patch.apply(&mut rec)?;
+    let sidecar = crate::sidecar::sidecar_path(path).ok_or("cannot determine sidecar path")?;
+    let aside = (1..=1000u32)
+        .map(|n| {
+            let mut aside = sidecar.as_os_str().to_os_string();
+            aside.push(format!(".unreadable-{n}"));
+            PathBuf::from(aside)
+        })
+        .find(|aside| !aside.exists())
+        .ok_or_else(|| format!("could not keep {} aside: no free name", sidecar.display()))?;
+    let bytes = serde_json::to_vec_pretty(&rec).map_err(|e| e.to_string())?;
+    crate::paths::write_atomic_then(&sidecar, &bytes, || std::fs::rename(&sidecar, &aside))
+        .map_err(|e| format!("could not save {}: {e}", name(path)))?;
+    super::locks::notice(
+        shared,
+        format!(
+            "{}'s sidecar could not be read ({why}); it was kept as {} and saved anew",
+            name(path),
+            name(&aside)
+        ),
+    );
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]

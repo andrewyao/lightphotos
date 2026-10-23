@@ -134,10 +134,7 @@ impl FolderStore {
         for e in self.writeback.pump() {
             self.note_persist_error(e);
         }
-        if let Some(n) = self.writeback.take_notices().pop() {
-            eprintln!("[folder store] {n}");
-            self.last_notice = Some(n);
-        }
+        self.take_write_notices();
         #[cfg(not(target_arch = "wasm32"))]
         {
             if self.visit == locks::Visit::Opening {
@@ -162,10 +159,26 @@ impl FolderStore {
         for e in self.writeback.flush_blocking(timeout) {
             self.note_persist_error(e);
         }
-        if let Some(n) = self.writeback.take_notices().pop() {
+        self.take_write_notices();
+    }
+
+    /// Every notice the writes left, as one line: all of them when there are
+    /// few, else the first ones and how many more.
+    fn take_write_notices(&mut self) {
+        let notices = self.writeback.take_notices();
+        for n in &notices {
             eprintln!("[folder store] {n}");
-            self.last_notice = Some(n);
         }
+        let line = match notices.as_slice() {
+            [] => return,
+            [one] => one.clone(),
+            [a, b] => format!("{a}; {b}"),
+            [a, b, rest @ ..] => format!("{a}; {b}; and {} more", rest.len()),
+        };
+        self.last_notice = Some(match self.last_notice.take() {
+            Some(earlier) => format!("{earlier}; {line}"),
+            None => line,
+        });
     }
 
     /// Set the active folder's handle on every folder switch. `None` clears
@@ -780,8 +793,10 @@ impl FolderStore {
         let Some(groups) = &self.groups else {
             return;
         };
-        // Not while the visit is undecided; the next load repairs them.
-        if self.opening() {
+        // Not while the visit is undecided or read-only: a group file is
+        // written whole, from this visit's cache. The next writable visit's
+        // load drops the missing photos and writes the repair.
+        if self.opening() || self.read_only().is_some() {
             return;
         }
         let writes = groups.forget(&names);
@@ -1563,31 +1578,98 @@ mod tests {
         }
     }
 
-    /// Review 3.7 round 5 #1: a sidecar that can't be read just now (here a
-    /// folder where the file should be, so reading fails) parks the edit,
-    /// moves nothing aside, and the edit lands once it reads.
+    /// Review 3.7 round 6 #3: a sidecar that can't be read and won't be
+    /// (here mode 000) fails that one write at once, with the reason,
+    /// touches nothing, and another photo's rating in the folder still lands.
+    #[cfg(unix)]
     #[test]
-    fn a_sidecar_that_cant_be_read_now_parks_the_edit() {
+    fn an_unreadable_sidecar_fails_its_own_write_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_folder("folder-store-test");
+        let (a, b) = (dir.join("a.jpg"), dir.join("b.jpg"));
+        std::fs::write(&a, b"").unwrap();
+        std::fs::write(&b, b"").unwrap();
+        {
+            let mut seed = FolderStore::with_dir(dir.clone());
+            seed.set(&a, 2);
+            flush(&mut seed);
+        }
+        let sidecar = crate::sidecar::sidecar_path(&a).unwrap();
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut cat = FolderStore::with_dir(dir.clone());
+        cat.update(&a, Patch::Rating(Some(5)));
+        cat.set(&b, 4);
+        let started = std::time::Instant::now();
+        flush(&mut cat);
+        let took = started.elapsed();
+        let error = cat.take_error();
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let a_on_disk = crate::sidecar::read_record(&a).unwrap().rating;
+        let b_on_disk = crate::sidecar::read_record(&b).unwrap().rating;
+        let mut aside = sidecar.as_os_str().to_os_string();
+        aside.push(".unreadable-1");
+        let moved = std::path::Path::new(&aside).exists();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            error.is_some_and(|e| e.contains("a.jpg")),
+            "the reason, naming the photo"
+        );
+        assert_eq!(a_on_disk, Some(2), "a's sidecar untouched");
+        assert!(!moved, "nothing moved aside");
+        assert_eq!(b_on_disk, Some(4), "b's rating lands");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "no wait: {took:?}"
+        );
+    }
+
+    /// Review 3.7 round 6 #2: a sidecar that isn't a record, for a change
+    /// that carries no cache copy (a job's result for a photo the cache
+    /// doesn't hold), is left as it is and the write fails, naming it.
+    #[test]
+    fn an_unreadable_sidecar_without_a_cache_copy_is_left_alone() {
+        let dir = temp_folder("folder-store-test");
+        let photo = dir.join("photo.jpg");
+        std::fs::write(&photo, b"").unwrap();
+        let cat_dir = temp_folder("folder-store-test");
+        let mut cat = FolderStore::with_dir(cat_dir.clone());
+        let sidecar = crate::sidecar::sidecar_path(&photo).unwrap();
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::fs::write(&sidecar, b"{not json").unwrap();
+        cat.patch_uncached(&photo, Patch::Rating(Some(3)));
+        flush(&mut cat);
+        let error = cat.take_error();
+        let kept = std::fs::read(&sidecar).unwrap();
+        let mut aside = sidecar.as_os_str().to_os_string();
+        aside.push(".unreadable-1");
+        let moved = std::path::Path::new(&aside).exists();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&cat_dir).unwrap();
+        assert!(error.is_some_and(|e| e.contains("photo.jpg")));
+        assert_eq!(kept, b"{not json", "left as it is");
+        assert!(!moved);
+    }
+
+    /// Review 3.7 round 6 #2: a change that can't apply to a record that
+    /// read fine fails the write; nothing is moved aside.
+    #[test]
+    fn a_change_that_cant_apply_moves_nothing_aside() {
         let dir = temp_folder("folder-store-test");
         let photo = dir.join("photo.jpg");
         std::fs::write(&photo, b"").unwrap();
         let mut cat = FolderStore::with_dir(dir.clone());
+        cat.set(&photo, 2);
+        flush(&mut cat);
+        cat.patch_uncached(&photo, Patch::Fail);
+        flush(&mut cat);
         let sidecar = crate::sidecar::sidecar_path(&photo).unwrap();
-        std::fs::create_dir_all(&sidecar).unwrap();
-        cat.set(&photo, 4);
-        cat.writeback
-            .flush_blocking(std::time::Duration::from_millis(400));
-        let parked = cat.backlog();
         let mut aside = sidecar.as_os_str().to_os_string();
         aside.push(".unreadable-1");
         let moved = std::path::Path::new(&aside).exists();
-        std::fs::remove_dir(&sidecar).unwrap();
-        flush(&mut cat);
-        let saved = crate::sidecar::read_record(&photo).unwrap().rating;
+        let error = cat.take_error();
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(parked, 1, "parked, not failed");
-        assert!(!moved, "nothing moved aside");
-        assert_eq!(saved, Some(4));
+        assert!(error.is_some());
+        assert!(!moved, "a good record is never moved aside");
     }
 
     /// Review 3.7 round 5 #6: a change that can't apply fails its write

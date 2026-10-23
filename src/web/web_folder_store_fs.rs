@@ -247,8 +247,16 @@ pub(crate) async fn update_sidecar(
                 match crate::sidecar::parse_record(&bytes, saved_at) {
                     Ok(read) => rec = read,
                     Err(why) => {
+                        // Without the cache's copy there is nothing to save
+                        // instead; the file is left as it is.
+                        let Some(copy) = fallback else {
+                            return Err(format!(
+                                "its sidecar could not be read ({why}) and was left as it is"
+                            ));
+                        };
+                        // The copy aside is written before the sidecar is.
                         let aside = keep_aside(&dir, &name, &bytes).await?;
-                        rec = fallback.unwrap_or_default();
+                        rec = copy;
                         notice = Some(format!(
                             "{}'s sidecar could not be read ({why}); it was kept as {aside} and saved anew",
                             filename.to_string_lossy()
