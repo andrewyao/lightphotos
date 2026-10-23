@@ -1348,7 +1348,7 @@ impl App {
     /// person didn't see focused.
     pub(super) fn develop_adjust(&mut self, dir: isize) {
         if self.read_only() {
-            self.refuse_if_read_only();
+            self.refuse_edit();
             return;
         }
         self.set_develop_tab(DevelopTab::Sliders);

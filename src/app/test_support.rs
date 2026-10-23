@@ -45,11 +45,15 @@ pub(crate) fn folder_app(tag: &str, photos: usize) -> (App, PathBuf, Vec<PathBuf
     (app, dir, paths)
 }
 
-/// Waits for the folder store load `App::load_playlist` started, failing after
-/// `limit` rather than hanging the suite.
+/// Waits for the folder store load `App::load_playlist` started, and for the
+/// folder's visit to be decided, failing after `limit` rather than hanging
+/// the suite.
 pub(crate) fn wait_for_folder_store_within(app: &mut App, limit: Duration) {
     let deadline = Instant::now() + limit;
-    while app.poll_folder_store_load() {
+    while app.poll_folder_store_load() | {
+        app.pump_folder_store();
+        app.folder_store.opening()
+    } {
         assert!(Instant::now() < deadline, "folder store load timed out");
         std::thread::sleep(Duration::from_millis(1));
     }

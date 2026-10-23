@@ -94,7 +94,7 @@ impl App {
         // own keys, so Delete can't remove a selected mask either.
         if self.read_only() && key_edits_folder(code, cmd, shift, alt, self.mode == ViewMode::Loupe)
         {
-            self.refuse_if_read_only();
+            self.refuse_edit();
             return;
         }
 
@@ -2208,9 +2208,10 @@ mod tests {
         app.selected = BTreeSet::from([0, 1]);
         app.sel = Some(0);
         press(&mut app, CMD, KeyCode::KeyG);
-        // Natively the folder is still opening until its records land, and
-        // that refusal comes first.
-        assert_eq!(app.status_text(), Some(crate::i18n::t().folder_opening));
+        assert_eq!(
+            app.status_text(),
+            Some(crate::i18n::t().group_refused_loading)
+        );
         assert_eq!(app.visible, vec![0, 1, 2]);
         crate::app::test_support::wait_for_folder_store(&mut app);
         app.folder_store
