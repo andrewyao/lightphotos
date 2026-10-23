@@ -196,23 +196,46 @@ mod tests {
         assert!(empty_untouched, "a folder without photos gets nothing");
     }
 
-    /// Design row 8: two spellings of one folder are one folder. Opening it
-    /// again as `dir/.` keeps the visit writable on its own lock.
+    /// Design row 8: every spelling of one folder is one folder: a `.`
+    /// part, a trailing separator, a symlink to it, and on a
+    /// case-insensitive volume another letter case. Opening it again by any
+    /// of them, with the lock still held for the first, keeps the visit
+    /// writable on that one lock, and a rating lands.
     #[test]
-    fn two_spellings_of_one_folder_open_writable() {
+    fn every_spelling_of_one_open_folder_stays_writable_on_one_lock() {
         use crate::app::test_support::load_folder;
         let (dir, photo) = one_photo("lock-spelling");
+        let mut spellings = vec![dir.join("."), dir.join("")];
+        #[cfg(unix)]
+        {
+            let link = dir.with_extension("link");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&dir, &link).unwrap();
+            spellings.push(link);
+        }
+        let upper = dir.with_file_name(dir.file_name().unwrap().to_string_lossy().to_uppercase());
+        if upper != dir && upper.is_dir() {
+            spellings.push(upper);
+        }
         let mut app = App::new(None);
         load_folder(&mut app, &dir);
-        load_folder(&mut app, &dir.join("."));
-        let read_only = app.folder_store.read_only();
-        app.folder_store.set(&dir.join(".").join("a.jpg"), 4);
-        app.folder_store
-            .flush_blocking(std::time::Duration::from_secs(10));
-        let rated = crate::sidecar::read_record(&photo).unwrap().rating;
+        let mut seen = Vec::new();
+        for (stars, spelling) in (1u8..).zip(&spellings) {
+            load_folder(&mut app, spelling);
+            app.folder_store.set(&spelling.join("a.jpg"), stars);
+            app.folder_store
+                .flush_blocking(std::time::Duration::from_secs(10));
+            let rated = crate::sidecar::read_record(&photo).unwrap().rating;
+            seen.push((app.folder_store.read_only(), rated, lock_free(&dir)));
+        }
+        let _ = std::fs::remove_file(dir.with_extension("link"));
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(read_only, None);
-        assert_eq!(rated, Some(4));
+        for (i, (read_only, rated, free)) in seen.into_iter().enumerate() {
+            let spelling = spellings[i].display();
+            assert_eq!(read_only, None, "{spelling} opened read-only");
+            assert_eq!(rated, u8::try_from(i + 1).ok(), "{spelling}: rating saved");
+            assert!(!free, "{spelling}: the folder stays locked");
+        }
     }
 
     /// Design rows 30 and 18 (store side): a second instance on a folder
