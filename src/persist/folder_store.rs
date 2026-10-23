@@ -21,11 +21,18 @@ use crate::sidecar::{SIDECAR_DIR, SIDECAR_EXT};
 pub(crate) mod group_file;
 #[cfg(not(target_arch = "wasm32"))]
 mod locks;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use locks::{LockRequest, Opened};
 mod writeback;
 pub(crate) use writeback::{changed_onto, LoadMark, Patch};
 use writeback::{WriteOp, Writeback};
+
+/// A photo's record from before a write held back while its folder opens.
+#[cfg(not(target_arch = "wasm32"))]
+enum Before {
+    /// As loaded; `None` when it had no sidecar.
+    Known(Option<Box<ImageRecord>>),
+    /// The load has not landed yet; it fills this in.
+    Unloaded,
+}
 
 /// Records for the active directory, backed by its sidecar files. `images`
 /// is a read cache keyed by filename, so it answers only for photos in the
@@ -60,10 +67,19 @@ pub struct FolderStore {
     /// The open folder's key, for the read-only test on each write.
     #[cfg(not(target_arch = "wasm32"))]
     open_key: Option<crate::sidecar::FolderKey>,
-    /// The lock to take for the folder just switched to, for the load
-    /// thread. See [`FolderStore::take_lock_request`].
+    /// Writes into the open folder made while its visit is `Opening`, in
+    /// order. Once the visit is decided they are queued, or refused if it
+    /// is read-only.
     #[cfg(not(target_arch = "wasm32"))]
-    lock_request: Option<LockRequest>,
+    held_back: Vec<(PathBuf, WriteOp)>,
+    /// The record each photo with a held-back write had before it, to put
+    /// back if the visit turns out read-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    held_before: HashMap<OsString, Before>,
+    /// The visit changed since the app last asked. See
+    /// [`FolderStore::take_visit_changed`].
+    #[cfg(not(target_arch = "wasm32"))]
+    visit_changed: bool,
     /// Every folder this session opened read-only and has not opened
     /// writable since: no derived file is written into them, even by work
     /// still running after the user moved on.
@@ -104,7 +120,11 @@ impl FolderStore {
             #[cfg(not(target_arch = "wasm32"))]
             open_key: None,
             #[cfg(not(target_arch = "wasm32"))]
-            lock_request: None,
+            held_back: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            held_before: HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            visit_changed: false,
             #[cfg(not(target_arch = "wasm32"))]
             read_only_folders: HashSet::new(),
             lockless_notice: false,
@@ -121,9 +141,13 @@ impl FolderStore {
         for e in self.writeback.pump() {
             self.note_persist_error(e);
         }
-        // Not while a folder opens: its lock may be one draining here.
         #[cfg(not(target_arch = "wasm32"))]
-        if self.visit != locks::Visit::Opening {
+        {
+            if self.visit == locks::Visit::Opening {
+                if let Some(visit) = self.locks.retry() {
+                    self.set_visit(visit);
+                }
+            }
             let writeback = &self.writeback;
             self.locks.settle(|key| writeback.writes_pending_in(key));
         }
@@ -171,8 +195,10 @@ impl FolderStore {
     pub fn open_dir(&mut self, dir: &Path) {
         let photos = crate::navigation::Playlist::from_dir(dir);
         let mark = self.switch_dir(dir, !photos.entries().is_empty());
-        if let Some(request) = self.take_lock_request() {
-            self.finish_open(request.run(), true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while self.opening() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            self.pump();
         }
         let loaded = load_sidecars(dir);
         self.apply_loaded(dir, mark, loaded, photos.entries());
@@ -185,11 +211,11 @@ impl FolderStore {
     /// the write order. The returned mark must reach [`FolderStore::apply_loaded`],
     /// or [`FolderStore::abandon_load`] if the load never runs.
     ///
-    /// Natively the visit is `Opening` until [`FolderStore::finish_open`]
-    /// takes in the lock request's result, which the load thread works out
-    /// before it reads the sidecars ([`FolderStore::take_lock_request`]). A
-    /// lock another program holds makes the whole visit read-only; opening
-    /// the folder again tries again. See `docs/design/folder-lock.md`.
+    /// Natively it tries `dir`'s lock once, with no wait, when `dir` has
+    /// photos. A lock another program holds makes the whole visit
+    /// read-only; opening the folder again tries again. A lock busy for a
+    /// moment makes it `Opening`, and [`FolderStore::pump`] tries again each
+    /// frame. See `docs/design/folder-lock.md`.
     #[must_use]
     pub(crate) fn switch_dir(
         &mut self,
@@ -198,9 +224,16 @@ impl FolderStore {
     ) -> LoadMark {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.lock_request = Some(self.locks.request(dir, has_photos));
-            self.open_key = None;
-            self.visit = locks::Visit::Opening;
+            self.refuse_held_back();
+            // A folder opened again may be on another volume now (an SD
+            // card mounted at the same path), so its key is worked out afresh.
+            self.writeback.forget_folder_key(dir);
+            let (key, visit) = self.locks.open(dir, has_photos);
+            if let Some(key) = &key {
+                self.writeback.note_folder_key(dir, key.clone());
+            }
+            self.open_key = key;
+            self.set_visit(visit);
         }
         self.dir = Some(dir.to_path_buf());
         self.images.clear();
@@ -209,33 +242,97 @@ impl FolderStore {
         self.writeback.begin_load()
     }
 
-    /// The lock to take for the folder just switched to. The load thread
-    /// runs it before it reads the sidecars, so no UI thread waits for it.
+    /// Take in the open folder's visit: the derived-file writers' set, the
+    /// lockless notice, and the writes held back while it was `Opening`.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn take_lock_request(&mut self) -> Option<LockRequest> {
-        self.lock_request.take()
-    }
-
-    /// Take in a lock request's result. `current` says it is for the latest
-    /// open of the folder showing; an older one only hands over the lock.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn finish_open(&mut self, opened: Opened, current: bool) {
-        let (key, visit) = self.locks.finish(opened, current);
-        if !current {
-            return;
-        }
+    fn set_visit(&mut self, visit: locks::Visit) {
         if visit == (locks::Visit::Lockless { new: true }) {
             self.lockless_notice = true;
         }
-        if let Some(key) = &key {
-            if matches!(visit, locks::Visit::ReadOnly(_)) {
+        let quiet = matches!(visit, locks::Visit::ReadOnly(_) | locks::Visit::Opening);
+        if let Some(key) = &self.open_key {
+            if quiet {
                 self.read_only_folders.insert(key.clone());
             } else {
                 self.read_only_folders.remove(key);
             }
         }
-        self.open_key = key;
         self.visit = visit;
+        self.visit_changed = true;
+        match &self.visit {
+            locks::Visit::Opening => {}
+            locks::Visit::ReadOnly(_) => self.refuse_held_back(),
+            _ => {
+                self.held_before.clear();
+                for (path, op) in std::mem::take(&mut self.held_back) {
+                    self.writeback.enqueue(&path, op);
+                }
+            }
+        }
+    }
+
+    /// Drop the writes held back while the visit was `Opening`, put back
+    /// the records they changed, and report their photos as refused, so
+    /// the app puts its own copies back too.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refuse_held_back(&mut self) {
+        for (name, before) in std::mem::take(&mut self.held_before) {
+            self.dirty.remove(&name);
+            match before {
+                Before::Known(Some(rec)) => {
+                    self.images.insert(name, *rec);
+                }
+                // Not loaded yet: the load fills it in, now it isn't dirty.
+                Before::Known(None) | Before::Unloaded => {
+                    self.images.remove(&name);
+                }
+            }
+            self.sort_revision += 1;
+            self.marks_revision += 1;
+        }
+        for (path, _) in std::mem::take(&mut self.held_back) {
+            if !self.refused.contains(&path) {
+                self.refused.push(path);
+            }
+        }
+    }
+
+    /// Keep `name`'s record from before its first held-back write.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hold_before(&mut self, name: &OsStr) {
+        if self.visit != locks::Visit::Opening || self.held_before.contains_key(name) {
+            return;
+        }
+        let before = if self.groups.is_some() {
+            Before::Known(self.images.get(name).cloned().map(Box::new))
+        } else {
+            Before::Unloaded
+        };
+        self.held_before.insert(name.to_os_string(), before);
+    }
+
+    /// The load thread could not start, so nothing is known of the folder's
+    /// sidecars: the visit is read-only, as for a lock that can't be made.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn fail_open(&mut self) {
+        self.locks.leave();
+        self.set_visit(locks::Visit::ReadOnly(HeldBy::Unlockable));
+    }
+
+    /// Whether the visit may sweep derived files: decided and writable.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn may_sweep(&self) -> bool {
+        !matches!(
+            self.visit,
+            locks::Visit::ReadOnly(_) | locks::Visit::Opening
+        )
+    }
+
+    /// Whether the open folder's visit changed since the last call, so the
+    /// app tells its derived-file writers.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn take_visit_changed(&mut self) -> bool {
+        std::mem::take(&mut self.visit_changed)
     }
 
     /// Whether the folder showing is still opening: its lock and records
@@ -285,13 +382,6 @@ impl FolderStore {
         None
     }
 
-    /// The open folder's key while the visit is read-only, so the photos
-    /// of that folder, and only those, are treated as read-only.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn read_only_folder(&self) -> Option<&crate::sidecar::FolderKey> {
-        self.read_only().and(self.open_key.as_ref())
-    }
-
     /// Whether the folder just opened can't be locked, so a headless MCP
     /// there is unsafe. True once per session per folder.
     pub(crate) fn take_lockless_notice(&mut self) -> bool {
@@ -302,9 +392,11 @@ impl FolderStore {
     /// writes have landed.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn leave_dir(&mut self) {
+        self.refuse_held_back();
         self.locks.leave();
-        self.visit = locks::Visit::Unlocked;
+        // Before the visit, so a read-only folder left stays in the set.
         self.open_key = None;
+        self.set_visit(locks::Visit::Unlocked);
     }
 
     /// The app is quitting: the folders it holds say so in their holder
@@ -390,6 +482,17 @@ impl FolderStore {
             for (name, rec) in loaded.images {
                 if !self.dirty.contains(&name) {
                     self.images.insert(name, rec);
+                    continue;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(before @ Before::Unloaded) = self.held_before.get_mut(&name) {
+                    *before = Before::Known(Some(Box::new(rec)));
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            for before in self.held_before.values_mut() {
+                if matches!(before, Before::Unloaded) {
+                    *before = Before::Known(None);
                 }
             }
             let names: HashSet<&OsStr> = if loaded.groups.is_empty() {
@@ -419,6 +522,10 @@ impl FolderStore {
         let dir = self.dir.clone().ok_or(GroupWriteRefused::NoFolder)?;
         if let Some(by) = self.read_only() {
             return Err(GroupWriteRefused::ReadOnly(by));
+        }
+        // Groups change in memory first, so not until the visit is decided.
+        if self.opening() {
+            return Err(GroupWriteRefused::LoadPending);
         }
         let groups = self.groups.as_mut().ok_or(GroupWriteRefused::LoadPending)?;
         for write in &writes {
@@ -649,9 +756,10 @@ impl FolderStore {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn forget_photos(&mut self, paths: &[PathBuf]) {
         for path in paths {
-            if let Some(name) = self.cache_key(path) {
-                self.images.remove(name);
-                self.dirty.insert(name.to_os_string());
+            if let Some(name) = self.cache_key(path).map(OsStr::to_os_string) {
+                self.hold_before(&name);
+                self.images.remove(&name);
+                self.dirty.insert(name);
                 self.marks_revision += 1;
             }
             self.enqueue(path, WriteOp::Delete);
@@ -672,6 +780,10 @@ impl FolderStore {
         let Some(groups) = &self.groups else {
             return;
         };
+        // Not while the visit is undecided; the next load repairs them.
+        if self.opening() {
+            return;
+        }
         let writes = groups.forget(&names);
         if let Err(e) = self.apply_group_writes(writes) {
             self.note_persist_error(e);
@@ -699,6 +811,8 @@ impl FolderStore {
             self.note_persist_error(format!("{} is not in the open folder", path.display()));
             return;
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hold_before(&name);
         self.dirty.insert(name.clone());
         let mut rec = self.images.remove(&name).unwrap_or_default();
         let sorted_by = (rec.rating, rec.edited);
@@ -719,11 +833,19 @@ impl FolderStore {
     }
 
     /// A read-only visit writes nothing into its folder, a photo's removal
-    /// or a group's included.
+    /// or a group's included. An `Opening` one holds its writes back until
+    /// it is decided.
     #[cfg(not(target_arch = "wasm32"))]
     fn enqueue(&mut self, path: &Path, op: WriteOp) {
-        if let Some(open) = self.read_only_folder().cloned() {
+        let undecided = matches!(
+            self.visit,
+            locks::Visit::ReadOnly(_) | locks::Visit::Opening
+        );
+        if let (true, Some(open)) = (undecided, self.open_key.clone()) {
             if self.writeback.op_folder_key(path, &op) == Some(open) {
+                if self.visit == locks::Visit::Opening {
+                    self.held_back.push((path.to_path_buf(), op));
+                }
                 return;
             }
         }

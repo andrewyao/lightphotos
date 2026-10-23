@@ -3,11 +3,13 @@
 //! The app's side of `sidecar::lock` (`docs/design/folder-lock.md` §4):
 //! which folders' locks the app holds, and for how long.
 //!
-//! - The lock of a folder that opens is taken on the thread that loads its
-//!   sidecars, before it reads them ([`LockRequest::run`]), so any wait is
-//!   off the UI thread and the decision lands with the records. The UI
-//!   keeps the lock for the visit ([`Locks::finish`]). After a folder change or close it keeps it
-//!   until the writes queued for that folder have landed
+//! - All of the UI's lock state lives on the UI thread, which never
+//!   sleeps for a lock. Opening a folder tries its lock once
+//!   ([`Locks::open`]). A lock busy for a moment (a probe, our own writer,
+//!   an app that is quitting) leaves the visit `Opening`, and each frame
+//!   tries once more ([`Locks::retry`]) until it is taken or the wait runs
+//!   out. The UI keeps the lock for the visit. After a folder change or
+//!   close it keeps it until the writes queued for that folder have landed
 //!   ([`Locks::settle`]).
 //! - The writer thread takes the lock of a folder the app doesn't hold for
 //!   the writes into it, and lets go when the next write is for another
@@ -26,14 +28,12 @@ use std::time::Duration;
 use super::HeldBy;
 use crate::sidecar::{FolderKey, FolderLock, Holder, LockError, Writer};
 
-/// How far apart opening a folder tries a busy lock again.
-const RETRY_GAP: Duration = Duration::from_millis(20);
-/// Tries for a lock busy for no named reason (a probe) or with our own
-/// pid (a hand-over): about 100 ms.
-const BRIEF_TRIES: u32 = 5;
-/// Tries for a lock whose holder is an app that is quitting: as long as
-/// that app lives, which the OS lock tells, up to about 15 s.
-const QUITTING_TRIES: u32 = 750;
+/// How long opening a folder tries a lock busy for no named reason (a
+/// probe) or with our own pid (a hand-over).
+const BRIEF_WAIT: Duration = Duration::from_millis(100);
+/// How long opening a folder tries a lock whose holder is an app that is
+/// quitting: as long as that app lives, which the OS lock tells, up to this.
+const QUITTING_WAIT: Duration = Duration::from_secs(15);
 
 /// What the UI thread and the writer thread share, under one mutex that
 /// is never held across file I/O.
@@ -60,8 +60,8 @@ pub(super) enum Visit {
     Unlocked,
     /// The app holds the folder's lock.
     Held,
-    /// The lock is being taken, off the UI thread, with the load; nothing
-    /// is edited until it lands.
+    /// The lock was busy for a moment and is tried again each frame. The
+    /// open folder's writes are held back until it is decided.
     Opening,
     /// Nothing in the folder is saved for the whole visit.
     ReadOnly(HeldBy),
@@ -77,6 +77,18 @@ pub(super) struct Locks {
     open: Option<(FolderKey, FolderLock)>,
     /// Folders left behind whose queued writes have not all landed.
     draining: HashMap<FolderKey, FolderLock>,
+    /// The open folder's lock while the visit is `Opening`.
+    attempt: Option<Attempt>,
+}
+
+/// Trying a busy lock again, for an `Opening` visit.
+struct Attempt {
+    key: FolderKey,
+    since: std::time::Instant,
+    /// An app that is quitting held it at some try. It clears its holder
+    /// line just before it lets go, so a later try that finds no name is
+    /// still that app, and keeps its wait.
+    quitting: bool,
 }
 
 impl Locks {
@@ -84,46 +96,112 @@ impl Locks {
         self.shared.clone()
     }
 
-    /// Start opening `dir`: the old folder's lock drains, and the returned
-    /// request takes the new one off the UI thread.
-    pub(super) fn request(&mut self, dir: &Path, has_photos: bool) -> LockRequest {
+    /// Open `dir`: the old folder's lock drains, and the new one is tried
+    /// once, with no wait. A lock busy for a moment gives `Opening`; then
+    /// [`Locks::retry`] each frame decides.
+    pub(super) fn open(&mut self, dir: &Path, has_photos: bool) -> (Option<FolderKey>, Visit) {
         self.leave();
-        LockRequest {
-            dir: dir.to_path_buf(),
-            has_photos,
-            shared: self.shared.clone(),
-        }
-    }
-
-    /// Take in what a request found. `current` is false for a request made
-    /// for a folder since left: a lock it took drains like any other.
-    pub(super) fn finish(&mut self, opened: Opened, current: bool) -> (Option<FolderKey>, Visit) {
-        let Opened { key, outcome } = opened;
-        let Some(key) = key else {
+        let Some(key) = FolderKey::of(dir) else {
             return (None, Visit::ReadOnly(HeldBy::Unlockable));
         };
-        if !current {
-            if let Outcome::Taken(taken) = outcome {
-                self.draining.insert(key, taken);
-            }
-            return (None, Visit::Unlocked);
+        if !has_photos {
+            return (Some(key), Visit::Unlocked);
         }
-        let visit = match outcome {
-            Outcome::Taken(taken) => {
-                self.open = Some((key.clone(), taken));
-                Visit::Held
+        let visit = match self.try_once(&key) {
+            Ok(visit) => visit,
+            Err(holder) => {
+                self.attempt = Some(Attempt {
+                    key: key.clone(),
+                    since: std::time::Instant::now(),
+                    quitting: is_quitting(holder.as_ref()),
+                });
+                Visit::Opening
             }
-            Outcome::AlreadyHeld => {
-                if !self.open.as_ref().is_some_and(|(k, _)| *k == key) {
-                    if let Some(held) = self.draining.remove(&key) {
-                        self.open = Some((key.clone(), held));
-                    }
-                }
-                Visit::Held
-            }
-            Outcome::Visit(visit) => visit,
         };
         (Some(key), visit)
+    }
+
+    /// Try an `Opening` visit's lock once more, with no wait. `Some` once
+    /// it is decided: taken, or read-only when the wait for its holder has
+    /// run out.
+    pub(super) fn retry(&mut self) -> Option<Visit> {
+        let attempt = self.attempt.as_ref()?;
+        let (key, waited, seen) = (
+            attempt.key.clone(),
+            attempt.since.elapsed(),
+            attempt.quitting,
+        );
+        let visit = match self.try_once(&key) {
+            Ok(visit) => visit,
+            Err(holder) => {
+                let quitting = seen || is_quitting(holder.as_ref());
+                if let Some(attempt) = self.attempt.as_mut() {
+                    attempt.quitting = quitting;
+                }
+                let budget = if quitting { QUITTING_WAIT } else { BRIEF_WAIT };
+                if waited < budget {
+                    return None;
+                }
+                Visit::ReadOnly(held_by(holder))
+            }
+        };
+        self.attempt = None;
+        Some(visit)
+    }
+
+    /// Try `key`'s lock once. `Err` names a holder worth waiting for: none
+    /// named (a probe), our own pid (a hand-over), or an app that is
+    /// quitting.
+    fn try_once(&mut self, key: &FolderKey) -> Result<Visit, Option<Holder>> {
+        {
+            let mut shared = lock(&self.shared);
+            if shared.lockless.contains(key) {
+                return Ok(Visit::Lockless { new: false });
+            }
+            if shared.held.contains(key) {
+                drop(shared);
+                if let Some(held) = self.draining.remove(key) {
+                    self.open = Some((key.clone(), held));
+                }
+                return Ok(Visit::Held);
+            }
+            if let Some(taken) = shared.writer.remove(key) {
+                shared.held.insert(key.clone());
+                drop(shared);
+                self.open = Some((key.clone(), taken));
+                return Ok(Visit::Held);
+            }
+        }
+        match FolderLock::try_acquire(key.path(), Writer::App) {
+            Ok(taken) => {
+                lock(&self.shared).held.insert(key.clone());
+                self.open = Some((key.clone(), taken));
+                Ok(Visit::Held)
+            }
+            Err(LockError::Busy(holder)) => match holder {
+                Some(Holder {
+                    writer: Writer::AppQuitting,
+                    ..
+                })
+                | None => Err(holder),
+                Some(h) if h.pid == std::process::id() => Err(holder),
+                Some(_) => Ok(Visit::ReadOnly(held_by(holder))),
+            },
+            Err(LockError::Unsupported(e)) => {
+                eprintln!(
+                    "[folder store] {e}; writing {} without a lock",
+                    key.path().display()
+                );
+                let new = lock(&self.shared).lockless.insert(key.clone());
+                Ok(Visit::Lockless { new })
+            }
+            // Without the lock another program could take the folder and
+            // the app's edits would go unsaved.
+            Err(e @ LockError::Unavailable(_)) => {
+                eprintln!("[folder store] {e}; opening read-only");
+                Ok(Visit::ReadOnly(HeldBy::Unlockable))
+            }
+        }
     }
 
     /// Let go of the locks the writer thread took. Only with no write in
@@ -134,8 +212,10 @@ impl Locks {
         drop(taken);
     }
 
-    /// The open folder is left: its lock drains.
+    /// The open folder is left: its lock drains, and an `Opening` visit's
+    /// attempt just ends.
     pub(super) fn leave(&mut self) {
+        self.attempt = None;
         if let Some((key, held)) = self.open.take() {
             self.draining.insert(key, held);
         }
@@ -177,122 +257,14 @@ impl Locks {
     }
 }
 
-/// Taking a folder's lock, for the thread that loads its sidecars.
-pub(crate) struct LockRequest {
-    dir: std::path::PathBuf,
-    has_photos: bool,
-    shared: SharedLocks,
-}
-
-/// What a [`LockRequest`] found.
-pub(crate) struct Opened {
-    key: Option<FolderKey>,
-    outcome: Outcome,
-}
-
-enum Outcome {
-    /// The lock, newly taken or taken over from the writer thread.
-    Taken(FolderLock),
-    /// The UI holds it already: the folder is open or draining.
-    AlreadyHeld,
-    /// No lock to take.
-    Visit(Visit),
-}
-
-impl Opened {
-    /// No lock could be taken (the load thread didn't start): read-only.
-    pub(crate) fn unlockable() -> Opened {
-        Opened {
-            key: None,
-            outcome: Outcome::Visit(Visit::ReadOnly(HeldBy::Unlockable)),
-        }
-    }
-
-    /// Whether the visit may sweep derived files: not a read-only one.
-    pub(crate) fn may_sweep(&self) -> bool {
-        !matches!(self.outcome, Outcome::Visit(Visit::ReadOnly(_)))
-    }
-}
-
-impl LockRequest {
-    /// Take the folder's lock. It can wait (for a probe, our own writer, or
-    /// an app that is quitting), so it runs off the UI thread.
-    pub(crate) fn run(self) -> Opened {
-        let Some(key) = FolderKey::of(&self.dir) else {
-            return Opened {
-                key: None,
-                outcome: Outcome::Visit(Visit::ReadOnly(HeldBy::Unlockable)),
-            };
-        };
-        let outcome = if self.has_photos {
-            take(&self.shared, &key)
-        } else {
-            Outcome::Visit(Visit::Unlocked)
-        };
-        Opened {
-            key: Some(key),
-            outcome,
-        }
-    }
-}
-
-fn take(shared: &SharedLocks, key: &FolderKey) -> Outcome {
-    let (mut brief, mut quitting) = (BRIEF_TRIES, QUITTING_TRIES);
-    loop {
-        {
-            let mut shared = lock(shared);
-            if shared.lockless.contains(key) {
-                return Outcome::Visit(Visit::Lockless { new: false });
-            }
-            if shared.held.contains(key) {
-                return Outcome::AlreadyHeld;
-            }
-            if let Some(taken) = shared.writer.remove(key) {
-                shared.held.insert(key.clone());
-                return Outcome::Taken(taken);
-            }
-        }
-        match FolderLock::try_acquire(key.path(), Writer::App) {
-            Ok(taken) => {
-                lock(shared).held.insert(key.clone());
-                return Outcome::Taken(taken);
-            }
-            Err(LockError::Busy(holder)) => {
-                let tries = match holder {
-                    // An app that is quitting lets go when its writes have
-                    // landed, or when it ends.
-                    Some(Holder {
-                        writer: Writer::AppQuitting,
-                        ..
-                    }) => &mut quitting,
-                    // A probe names no holder; our own pid is a hand-over
-                    // in progress.
-                    None => &mut brief,
-                    Some(h) if h.pid == std::process::id() => &mut brief,
-                    Some(_) => return Outcome::Visit(Visit::ReadOnly(held_by(holder))),
-                };
-                *tries = tries.saturating_sub(1);
-                if *tries == 0 {
-                    return Outcome::Visit(Visit::ReadOnly(held_by(holder)));
-                }
-                std::thread::sleep(RETRY_GAP);
-            }
-            Err(LockError::Unsupported(e)) => {
-                eprintln!(
-                    "[folder store] {e}; writing {} without a lock",
-                    key.path().display()
-                );
-                let new = lock(shared).lockless.insert(key.clone());
-                return Outcome::Visit(Visit::Lockless { new });
-            }
-            // Without the lock another program could take the folder and
-            // the app's edits would go unsaved.
-            Err(e @ LockError::Unavailable(_)) => {
-                eprintln!("[folder store] {e}; opening read-only");
-                return Outcome::Visit(Visit::ReadOnly(HeldBy::Unlockable));
-            }
-        }
-    }
+fn is_quitting(holder: Option<&Holder>) -> bool {
+    matches!(
+        holder,
+        Some(Holder {
+            writer: Writer::AppQuitting,
+            ..
+        })
+    )
 }
 
 /// Who holds a busy lock, for the read-only line. Our own pid as the app
@@ -413,8 +385,7 @@ mod tests {
         let mut locks = Locks::default();
         let mut save = SaveLocks::new(locks.shared());
         let wrote = save.write_in(&key, || Ok(()));
-        let request = locks.request(&dir, true);
-        let (_, visit) = locks.finish(request.run(), true);
+        let (_, visit) = locks.open(&dir, true);
         save.release_except(None);
         let still_held = !free(&dir);
         drop(locks);
@@ -456,6 +427,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(matches!(saved, Saved::Parked));
         assert!(!ran);
+    }
+
+    /// An app that is quitting clears its holder line just before it lets
+    /// go. A try in that gap finds no name, and must keep the quitting
+    /// wait rather than the brief one, or a relaunch opens read-only.
+    #[test]
+    fn a_quitting_holder_keeps_its_wait_once_its_line_is_cleared() {
+        let (dir, _) = folder("quit-gap");
+        let mut old = FolderLock::try_acquire(&dir, Writer::App).unwrap();
+        old.mark_quitting();
+        let mut locks = Locks::default();
+        let (_, opening) = locks.open(&dir, true);
+        std::fs::remove_file(
+            dir.join(crate::sidecar::SIDECAR_DIR)
+                .join(crate::sidecar::WHO_FILE),
+        )
+        .unwrap();
+        std::thread::sleep(BRIEF_WAIT + Duration::from_millis(50));
+        let in_gap = locks.retry();
+        drop(old);
+        let after = locks.retry();
+        drop(locks);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(opening, Visit::Opening);
+        assert_eq!(in_gap, None, "still waiting for the quitting app");
+        assert_eq!(after, Some(Visit::Held));
     }
 
     /// A busy lock whose line names our own app is never "another window".

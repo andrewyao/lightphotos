@@ -483,8 +483,7 @@ impl App {
     pub(crate) fn pump(&mut self) -> Option<std::time::Duration> {
         // Outside the loader block below, because a queued sidecar write has
         // no loader to wait on and can outlive the folder it came from.
-        self.folder_store.pump();
-        self.revert_refused_edits();
+        self.pump_folder_store();
         self.sync_marks();
         self.catalog.pump();
         self.keep_status_alive();
@@ -612,7 +611,13 @@ impl App {
         // needs the tight interval on wasm, where `pump` is the scheduler; on
         // native the worker drains on its own and only the toast needs
         // refreshing.
-        let poll_ms = if image_pending || thumbs_pending || self.bulk_delete_running() {
+        // An undecided visit tries its lock again each poll, for about 100 ms
+        // (or while an app that is quitting holds it).
+        let poll_ms = if image_pending
+            || thumbs_pending
+            || self.bulk_delete_running()
+            || self.folder_store.opening()
+        {
             Some(16)
         } else if self.export_running()
             || self.folder_store.backlog() > 0

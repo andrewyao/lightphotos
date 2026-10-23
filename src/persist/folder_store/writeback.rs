@@ -189,10 +189,19 @@ pub(super) struct Writeback {
     /// next one, or for the inline path, to try again.
     #[cfg(not(target_arch = "wasm32"))]
     parked: Parked,
-    /// Each queued photo folder's key, as spelled, worked out once when a
-    /// write for it is first queued, so nothing here touches the disk later.
+    /// Each queued photo folder's key, as spelled, worked out when a write
+    /// for it is first queued, so nothing here touches the disk later. A
+    /// folder opened again is worked out afresh
+    /// ([`Writeback::forget_folder_key`]); a folder with no key is not kept.
     #[cfg(not(target_arch = "wasm32"))]
-    folder_keys: HashMap<PathBuf, Option<crate::sidecar::FolderKey>>,
+    folder_keys: HashMap<PathBuf, crate::sidecar::FolderKey>,
+    /// The folder each outstanding write was counted under, so it is
+    /// uncounted under the same key whatever the cache says by then.
+    #[cfg(not(target_arch = "wasm32"))]
+    seq_keys: HashMap<u64, crate::sidecar::FolderKey>,
+    /// When the parked writes were last tried with no writer thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    inline_retry: std::time::Instant,
     /// Queued, running or parked writes per folder. See
     /// [`Writeback::writes_pending_in`].
     #[cfg(not(target_arch = "wasm32"))]
@@ -232,6 +241,10 @@ impl Writeback {
             parked: Parked::default(),
             #[cfg(not(target_arch = "wasm32"))]
             folder_keys: HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            seq_keys: HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            inline_retry: std::time::Instant::now(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_folders: HashMap::new(),
             done_tx,
@@ -358,7 +371,8 @@ impl Writeback {
         *self.pending.entry(path.to_path_buf()).or_insert(0) += 1;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(key) = self.folder_key_of(path) {
-            *self.pending_folders.entry(key).or_insert(0) += 1;
+            *self.pending_folders.entry(key.clone()).or_insert(0) += 1;
+            self.seq_keys.insert(seq, key);
         }
         let op = match (op, self.authored.get(path).map(|a| &a.op)) {
             (WriteOp::Patch(patch), Some(WriteOp::Put(rec))) => {
@@ -381,7 +395,7 @@ impl Writeback {
     fn retire(&mut self, path: &Path, seq: u64) {
         self.outstanding.remove(&seq);
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(key) = self.folder_key_of(path) {
+        if let Some(key) = self.seq_keys.remove(&seq) {
             if let Some(n) = self.pending_folders.get_mut(&key) {
                 *n = n.saturating_sub(1);
                 if *n == 0 {
@@ -468,12 +482,7 @@ impl Writeback {
     /// first write and then kept.
     fn folder_key_of(&mut self, path: &Path) -> Option<crate::sidecar::FolderKey> {
         let dir = photo_folder(path)?;
-        if let Some(key) = self.folder_keys.get(dir) {
-            return key.clone();
-        }
-        let key = crate::sidecar::FolderKey::of(dir);
-        self.folder_keys.insert(dir.to_path_buf(), key.clone());
-        key
+        self.key_of_dir(dir)
     }
 
     /// The key of the folder `op` writes into, as [`Self::folder_key_of`].
@@ -483,12 +492,29 @@ impl Writeback {
         op: &WriteOp,
     ) -> Option<crate::sidecar::FolderKey> {
         let dir = op_folder(path, op)?;
+        self.key_of_dir(dir)
+    }
+
+    fn key_of_dir(&mut self, dir: &Path) -> Option<crate::sidecar::FolderKey> {
         if let Some(key) = self.folder_keys.get(dir) {
-            return key.clone();
+            return Some(key.clone());
         }
-        let key = crate::sidecar::FolderKey::of(dir);
+        let key = crate::sidecar::FolderKey::of(dir)?;
         self.folder_keys.insert(dir.to_path_buf(), key.clone());
-        key
+        Some(key)
+    }
+
+    /// `dir` is being opened: its kept key may be from another volume
+    /// mounted there before, so it is worked out again.
+    pub(super) fn forget_folder_key(&mut self, dir: &Path) {
+        self.folder_keys.remove(dir);
+        self.folder_keys.remove(&spelled_as_parent(dir));
+    }
+
+    /// The key `dir` was just found to have, at open.
+    pub(super) fn note_folder_key(&mut self, dir: &Path, key: crate::sidecar::FolderKey) {
+        self.folder_keys.insert(spelled_as_parent(dir), key.clone());
+        self.folder_keys.insert(dir.to_path_buf(), key);
     }
 
     fn sender(&mut self) -> Option<&Sender<(PathBuf, u64, WriteOp)>> {
@@ -518,6 +544,15 @@ impl Writeback {
     pub(super) fn pump(&mut self) -> Vec<String> {
         let mut errors = Vec::new();
         self.drain_completions(&mut errors);
+        // With no writer thread, parked writes are tried here, as often as
+        // the writer would.
+        if self.tx.is_none() && self.inline_retry.elapsed() >= PARKED_RETRY {
+            self.inline_retry = std::time::Instant::now();
+            if !lock_parked(&self.parked).is_empty() {
+                self.retry_parked_inline();
+            }
+            self.drain_completions(&mut errors);
+        }
         errors
     }
 
@@ -679,25 +714,36 @@ fn retry_parked(
     locks: &mut super::locks::SaveLocks,
     done_tx: &Sender<Done>,
 ) {
-    let mut still = std::collections::VecDeque::new();
+    retry_parked_with(parked, done_tx, |path, op| perform_locked(locks, path, op));
+}
+
+/// [`retry_parked`] with the write given. Each write leaves the queue only
+/// once it is done, so a panic in one loses none of the others.
+#[cfg(not(target_arch = "wasm32"))]
+fn retry_parked_with(
+    parked: &mut std::collections::VecDeque<(PathBuf, u64, WriteOp)>,
+    done_tx: &Sender<Done>,
+    mut write: impl FnMut(&Path, &WriteOp) -> Saved,
+) {
     let mut held: Vec<crate::sidecar::FolderKey> = Vec::new();
-    for (path, seq, op) in parked.drain(..) {
-        let key = op_key(&path, &op);
+    let mut i = 0;
+    while let Some((path, seq, op)) = parked.get(i) {
+        let key = op_key(path, op);
         if key.as_ref().is_some_and(|k| held.contains(k)) {
-            still.push_back((path, seq, op));
+            i += 1;
             continue;
         }
-        match perform_locked(locks, &path, &op) {
+        match write(path, op) {
             Saved::Done(result) => {
-                let _ = done_tx.send((path, seq, result.err()));
+                let _ = done_tx.send((path.clone(), *seq, result.err()));
+                parked.remove(i);
             }
             Saved::Parked => {
                 held.extend(key);
-                still.push_back((path, seq, op));
+                i += 1;
             }
         }
     }
-    *parked = still;
 }
 
 /// The photo folder `op` writes into: the photo's own, or, for a group
@@ -746,6 +792,13 @@ impl Writeback {
     pub(super) fn writes_pending_in(&self, key: &crate::sidecar::FolderKey) -> bool {
         self.pending_folders.contains_key(key)
     }
+}
+
+/// `dir` as a photo path's parent spells it: no trailing separator and
+/// no `.` parts.
+#[cfg(not(target_arch = "wasm32"))]
+fn spelled_as_parent(dir: &Path) -> PathBuf {
+    dir.components().collect()
 }
 
 /// The photo folder a queued path writes into: a photo's parent, or for a
@@ -1157,6 +1210,124 @@ mod tests {
         drop(other);
         let _ = std::fs::remove_dir_all(&moved);
         assert!(pending, "the parked write still counts for its folder");
+    }
+
+    /// Review 3.7 round 2 #5: a folder opened again is keyed afresh, so a
+    /// volume mounted again at the same path (here the folder made again,
+    /// which gives it a new inode) is not counted under the old key, and a
+    /// folder with no key yet is looked up again rather than kept as none.
+    #[test]
+    fn a_folder_opened_again_is_keyed_afresh() {
+        use crate::sidecar::FolderKey;
+        let dir = temp("key-afresh");
+        let photo = dir.join("a.jpg");
+        let mut wb = new_wb();
+        let first = wb.op_folder_key(&photo, &rated(1));
+        std::fs::remove_dir_all(&dir).unwrap();
+        let gone = wb.op_folder_key(&dir.with_extension("none").join("a.jpg"), &rated(1));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Hold the old inode's slot so the new folder can't reuse it.
+        let keep = temp("key-afresh-keep");
+        wb.forget_folder_key(&dir);
+        let again = wb.op_folder_key(&photo, &rated(1));
+        let fresh = FolderKey::of(&dir);
+        let missing = dir.with_extension("later");
+        let _ = std::fs::remove_dir_all(&missing);
+        let none_yet = wb.op_folder_key(&missing.join("a.jpg"), &rated(1));
+        std::fs::create_dir_all(&missing).unwrap();
+        let found = wb.op_folder_key(&missing.join("a.jpg"), &rated(1));
+        for d in [&dir, &keep, &missing] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        assert!(first.is_some() && gone.is_none());
+        assert_eq!(again, fresh, "keyed afresh after the folder opened again");
+        assert!(none_yet.is_none());
+        assert!(found.is_some(), "a folder with no key is not kept as none");
+    }
+
+    /// Review 3.7 round 2 #5: a write is uncounted under the key it was
+    /// counted under, even when the folder's key changed in between.
+    #[test]
+    fn a_write_is_uncounted_under_the_key_it_was_counted_under() {
+        use crate::sidecar::FolderKey;
+        let dir = temp("key-count");
+        let photo = dir.join("a.jpg");
+        let mut wb = new_wb();
+        let old = FolderKey::of(&dir).unwrap();
+        let seq = wb.accept(&photo, &rated(1));
+        std::fs::remove_dir_all(&dir).unwrap();
+        let keep = temp("key-count-keep");
+        std::fs::create_dir_all(&dir).unwrap();
+        wb.forget_folder_key(&dir);
+        let _ = wb.op_folder_key(&photo, &rated(1));
+        wb.retire(&photo, seq);
+        let still = wb.writes_pending_in(&old);
+        for d in [&dir, &keep] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        assert!(!still, "the old key's count went back to zero");
+    }
+
+    /// Review 3.7 round 2 #7: with no writer thread, `pump` tries the
+    /// parked writes again on the writer's schedule, not only on the next
+    /// write or at quit.
+    #[test]
+    fn pump_retries_inline_parked_writes() {
+        use crate::sidecar::{FolderLock, Writer};
+        let dir = temp("inline-pump");
+        let path = dir.join("a.jpg");
+        let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
+        let mut wb = new_wb();
+        let (tx, rx) = channel();
+        drop(rx);
+        wb.tx = Some(tx);
+        wb.enqueue(&path, rated(3));
+        drop(other);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while wb.backlog() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let _ = wb.pump();
+        }
+        let after = crate::sidecar::read_record(&path).unwrap().rating;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(after, Some(3), "pump wrote the parked write");
+        assert_eq!(wb.backlog(), 0);
+    }
+
+    /// Review 3.7 round 2 #8: a write that panics while the parked writes
+    /// are tried again loses none of the others.
+    #[test]
+    fn a_panic_while_retrying_parked_writes_loses_none() {
+        let dir = temp("parked-panic");
+        let mut parked = std::collections::VecDeque::new();
+        for (seq, name) in (1u64..).zip(["a.jpg", "b.jpg", "c.jpg"]) {
+            parked.push_back((dir.join(name), seq, rated(1)));
+        }
+        let (done_tx, done_rx) = channel();
+        let shared: Parked = std::sync::Arc::new(std::sync::Mutex::new(parked));
+        let for_panic = shared.clone();
+        let unwound = std::panic::catch_unwind(move || {
+            let mut parked = lock_parked(&for_panic);
+            retry_parked_with(&mut parked, &done_tx, |path, _| {
+                if path.ends_with("b.jpg") {
+                    panic!("a write that panics");
+                }
+                Saved::Done(Ok(()))
+            });
+        });
+        let left: Vec<u64> = lock_parked(&shared)
+            .iter()
+            .map(|(_, seq, _)| *seq)
+            .collect();
+        let done: Vec<u64> = done_rx.try_iter().map(|(_, seq, _)| seq).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(unwound.is_err());
+        assert_eq!(done, vec![1], "the write before the panic is done");
+        assert_eq!(
+            left,
+            vec![2, 3],
+            "the panicking write and the rest stay parked"
+        );
     }
 
     /// A worker that has died must not swallow the edits sent to it.

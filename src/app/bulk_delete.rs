@@ -184,7 +184,13 @@ impl App {
     pub(super) fn start_delete(&mut self, mut paths: Vec<PathBuf>) {
         let mut seen = HashSet::new();
         paths.retain(|p| seen.insert(p.clone()));
-        if paths.is_empty() || self.refuse_if_read_only() {
+        if paths.is_empty() {
+            return;
+        }
+        // Photos go to the Trash at once, so not while the visit is still
+        // undecided either: the folder may turn out to be another's.
+        if self.read_only() {
+            self.refuse_edit();
             return;
         }
         if self.bulk_delete.is_some() || self.export_running() {

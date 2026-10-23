@@ -173,7 +173,8 @@ impl App {
     /// show for the new one. `poll_folder_store_load` folds in the result.
     pub(super) fn request_folder_store_load(&mut self, dir: &Path, has_photos: bool) {
         let mark = self.folder_store.switch_dir(dir, has_photos);
-        // Nothing derived is written for the folder until its lock lands.
+        // Nothing derived is written for the folder until its visit is
+        // decided, and never in a read-only one.
         self.sync_read_only_derived();
         self.folder_store_load.token += 1;
         let token = self.folder_store_load.token;
@@ -183,17 +184,14 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let for_thread = dir.clone();
-            let request = self.folder_store.take_lock_request();
+            // Only a visit decided writable at open sweeps: an undecided one
+            // may turn out read-only, with the other program writing the
+            // files a sweep would take. The thread only reads and sweeps; the
+            // lock is the UI thread's. See docs/design/folder-lock.md §4.
+            let sweep = self.folder_store.may_sweep();
             let spawned = std::thread::Builder::new()
                 .name("folder-store-load".into())
                 .spawn(move || {
-                    // The lock first, so no other program changes the
-                    // sidecars under the load, and any wait for it is here,
-                    // off the UI thread. See docs/design/folder-lock.md §4.
-                    let opened = request.map(crate::persist::folder_store::LockRequest::run);
-                    let sweep = opened
-                        .as_ref()
-                        .is_none_or(crate::persist::folder_store::Opened::may_sweep);
                     let loaded = crate::persist::folder_store::load_sidecars(&for_thread);
                     let named: HashMap<std::ffi::OsString, crate::develop::Detections> = loaded
                         .images
@@ -201,7 +199,7 @@ impl App {
                         .filter(|(_, r)| !r.detections.is_empty())
                         .map(|(name, r)| (name.clone(), r.detections.clone()))
                         .collect();
-                    let _ = tx.send((for_thread.clone(), token, mark, loaded, opened));
+                    let _ = tx.send((for_thread.clone(), token, mark, loaded));
                     // Sweep after sending, because the UI waits on the folder store
                     // and nothing waits on the sweeps. Not in a read-only folder:
                     // the other program may be writing the files swept.
@@ -215,9 +213,9 @@ impl App {
             match spawned {
                 Ok(_) => self.folder_store_load.pending = Some((dir, token)),
                 Err(e) => {
-                    // No lock was taken, so nothing in the folder is saved.
-                    self.folder_store
-                        .finish_open(crate::persist::folder_store::Opened::unlockable(), true);
+                    // Nothing of the folder's sidecars is known, so nothing
+                    // in it is saved.
+                    self.folder_store.fail_open();
                     self.sync_read_only_derived();
                     // The folder store stays empty, so tell the user. Keep the load
                     // marked pending on purpose: export refuses to run while a
@@ -270,20 +268,7 @@ impl App {
     /// Applies finished folder store loads and refreshes the ratings and edits
     /// mirrors for the open folder. Returns true while a load is still pending.
     pub(crate) fn poll_folder_store_load(&mut self) -> bool {
-        while let Ok(result) = self.folder_store_load.rx.try_recv() {
-            #[cfg(not(target_arch = "wasm32"))]
-            let (dir, token, mark, loaded, opened) = result;
-            #[cfg(target_arch = "wasm32")]
-            let (dir, token, mark, loaded) = result;
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(opened) = opened {
-                // Only the latest open of the folder showing decides the
-                // visit; an older one hands over the lock it took.
-                let current =
-                    self.folder_store_load.pending.as_ref() == Some(&(dir.clone(), token));
-                self.folder_store.finish_open(opened, current);
-                self.sync_read_only_derived();
-            }
+        while let Ok((dir, token, mark, loaded)) = self.folder_store_load.rx.try_recv() {
             let photos = match &self.playlist {
                 Some(p) if p.dir() == dir.as_path() => p.entries(),
                 _ => &[],
@@ -364,10 +349,10 @@ impl App {
         };
     }
 
-    /// Whether the open folder takes no edit now: it is read-only for this
-    /// visit, because another program held it when it opened, or it is
-    /// still opening and its lock not yet taken. Every edit control reads
-    /// this.
+    /// Whether the open folder takes no edit from the user now: it is
+    /// read-only for this visit, because another program held it when it
+    /// opened, or its visit is still undecided (`Opening`). Every edit
+    /// control reads this.
     pub(crate) fn read_only(&self) -> bool {
         self.folder_store.read_only().is_some() || self.folder_store.opening()
     }
@@ -394,16 +379,42 @@ impl App {
     }
 
     /// Refuse a job that would write the open folder while it is read-only,
-    /// saying why. True when refused.
+    /// saying why. True when refused. A folder still opening is not
+    /// refused: the job goes ahead or defers as it would while the folder
+    /// loads, and its writes are held back until the visit is decided.
     pub(super) fn refuse_if_read_only(&mut self) -> bool {
-        let why = match self.folder_read_only_text() {
-            Some(why) => why,
-            None if self.folder_store.opening() => crate::i18n::t().folder_opening.to_string(),
-            None => return false,
+        let Some(why) = self.folder_read_only_text() else {
+            return false;
         };
         self.set_status(StatusKind::Error, why);
         self.request_redraw();
         true
+    }
+
+    /// Say why an edit the user made with a control that is off was
+    /// dropped: the folder is read-only, or still opening.
+    pub(super) fn refuse_edit(&mut self) {
+        if self.refuse_if_read_only() || !self.folder_store.opening() {
+            return;
+        }
+        self.set_status(
+            StatusKind::Error,
+            crate::i18n::t().folder_opening.to_string(),
+        );
+        self.request_redraw();
+    }
+
+    /// Once a frame: retire sidecar writes, decide an `Opening` visit,
+    /// tell the derived-file writers when the visit changed, and put back
+    /// the app's copies of refused edits.
+    pub(crate) fn pump_folder_store(&mut self) {
+        self.folder_store.pump();
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.folder_store.take_visit_changed() {
+            self.sync_read_only_derived();
+            self.request_redraw();
+        }
+        self.revert_refused_edits();
     }
 
     /// Put back the app's copies of the photos whose edit the read-only
