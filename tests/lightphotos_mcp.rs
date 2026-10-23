@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use lightphotos::control_auth::{self, Side};
 use lightphotos::decode::image_decode;
 use lightphotos::decode::image_encode::{Embedded, Encoding, Pixels, Prepared};
+use lightphotos::scoring::quality::{Basis, QualityScore};
 use lightphotos::sidecar::{self, Flag};
 use serde_json::{json, Value};
 
@@ -303,6 +304,98 @@ fn a_headless_toggle_settles_once_for_the_set() {
             "{name}"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_headless_score_saves_what_the_listing_then_reports() {
+    let dir = temp_dir("score-run");
+    write_jpeg(&dir.join("a.jpg"));
+    let score = json!({ "id": "photo.score", "params": { "photos": ["a.jpg"] } });
+    let replies = session(
+        &["--folder", dir.to_str().unwrap()],
+        None,
+        &[
+            call(1, "list_commands", json!({})),
+            call(2, "run_command", score),
+            call(3, "list_photos", json!({})),
+        ],
+    );
+    let listing: Value =
+        serde_json::from_str(&content_text(&reply(&replies, 1)["result"])).unwrap();
+    let listed = listing["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "photo.score")
+        .cloned();
+    assert_eq!(listed.map(|c| c["headless"].clone()), Some(json!(true)));
+    assert_eq!(reply(&replies, 2)["result"]["isError"], false);
+    let photos: Value = serde_json::from_str(&content_text(&reply(&replies, 3)["result"])).unwrap();
+    let saved = sidecar::read_record(&dir.join("a.jpg")).unwrap();
+    if cfg!(target_os = "macos") {
+        let stored = saved.score.expect("scored");
+        assert_eq!(
+            photos["photos"][0]["score"],
+            json!({ "value": stored.score.value, "stale": false })
+        );
+    } else {
+        assert!(
+            saved.score.is_none(),
+            "scoring needs macOS; nothing changes"
+        );
+        assert!(photos["photos"][0].get("score").is_none());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_headless_listing_reports_the_score_the_app_stored() {
+    let dir = temp_dir("score");
+    for name in ["scored.jpg", "edited.jpg", "unscored.jpg"] {
+        write_jpeg(&dir.join(name));
+    }
+    let score_for = |rec: &sidecar::ImageRecord| sidecar::StoredScore {
+        score: QualityScore {
+            value: 72,
+            basis: Basis::WithAesthetics,
+            base: Some(80),
+            deductions: vec![],
+        },
+        edits: rec.edit_signature(),
+    };
+    let mut scored = sidecar::ImageRecord::default();
+    scored.score = Some(score_for(&scored));
+    sidecar::write_record(&dir.join("scored.jpg"), &scored).unwrap();
+    let mut edited = sidecar::ImageRecord::default();
+    edited.score = Some(score_for(&edited));
+    edited.adjustments.exposure = 1.0;
+    sidecar::write_record(&dir.join("edited.jpg"), &edited).unwrap();
+
+    let replies = session(
+        &["--folder", dir.to_str().unwrap()],
+        None,
+        &[call(1, "list_photos", json!({}))],
+    );
+    let listed: Value = serde_json::from_str(&content_text(&reply(&replies, 1)["result"])).unwrap();
+    let score_of = |name: &str| {
+        listed["photos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == name)
+            .map(|p| p.get("score").cloned())
+            .unwrap()
+    };
+    assert_eq!(
+        score_of("scored.jpg"),
+        Some(json!({ "value": 72, "stale": false }))
+    );
+    assert_eq!(
+        score_of("edited.jpg"),
+        Some(json!({ "value": 72, "stale": true }))
+    );
+    assert_eq!(score_of("unscored.jpg"), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

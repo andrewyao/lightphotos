@@ -17,6 +17,34 @@ pub fn judge(rgba: &[u8], width: u32, height: u32) -> QualityScore {
     quality::score(&technical, signals.aesthetics.as_ref(), signals.eyes)
 }
 
+/// A photo file scored with its sidecar's edits baked in, as the app's
+/// scoring workers score it, for headless callers that have no app. The
+/// workers start from a RAW's embedded preview; this decodes the file at the
+/// same size, so a RAW may score a little apart. macOS only, like the
+/// workers: elsewhere there is no Vision pass to score with.
+#[cfg(target_os = "macos")]
+pub fn score_file(
+    path: &std::path::Path,
+    rec: &crate::sidecar::ImageRecord,
+) -> Result<QualityScore, String> {
+    let img = crate::decode::image_decode::decode(path, quality::ANALYSIS_PX)?;
+    // Grain and Vignette are looks, not faults: grain would score as noise.
+    // Sharpening would score as focus the camera never had.
+    let adj = crate::develop::Adjustments {
+        vignette: Default::default(),
+        grain: Default::default(),
+        sharpening: Default::default(),
+        ..rec.adjustments
+    };
+    let masks = rec.mask_set(path)?;
+    let (w, h, rgba) =
+        crate::develop::image_ops::bake_edited(&img, &adj, &rec.touchups, &masks, rec.rotation);
+    if w == 0 || h == 0 {
+        return Err("the edited preview is empty".into());
+    }
+    Ok(judge(&rgba, w, h))
+}
+
 /// What Vision adds to the pixel measurements. Empty when unavailable.
 #[derive(Default, Debug)]
 pub struct VisionSignals {

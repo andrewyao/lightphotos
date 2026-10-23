@@ -1,0 +1,13 @@
+Cull the photos in the LightPhotos folder with the lightphotos MCP tools.
+1. get_state lists the photos. Leave any already flagged reject alone.
+2. render each of the rest at max_size 1024, a few consecutive frames at a
+   time, and give each a score from 0 to 100 for how likely a photographer is
+   to keep it. Be critical: missed focus on the subject's nearer eye, closed
+   eyes, a blurred or awkward moment, and bad exposure score below 40; a
+   usable frame 40 to 59; a good one 60 or more. Compare neighbouring frames.
+3. Apply this table with as few run_command calls as you can, passing the
+   photo names in params.photos:
+   below 40: photo.flag with flag "reject"
+   40 to 59: photo.rate with stars 2
+   60 and up: leave it as it is
+4. Report how many frames got each result. Do not change anything else.

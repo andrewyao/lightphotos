@@ -164,8 +164,10 @@ impl Mode {
                         object(json!({ "wait": { "type": "boolean", "default": false } }), &[]),
                     ),
                     Tool::GetState => (
-                        "The folder's photos with each one's rating, flag, label and whether \
-                         it has develop edits.",
+                        "The folder's photos with each one's rating, flag, label, whether \
+                         it has develop edits, and its 0-100 quality score once scored \
+                         (`stale` once edited since). photo.score scores photos, on \
+                         macOS only.",
                         object(json!({}), &[]),
                     ),
                     Tool::ListPhotos if attached => (

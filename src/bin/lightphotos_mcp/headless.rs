@@ -47,9 +47,16 @@ impl Folder {
                     Some(name) => Some(self.record(&self.photo(Path::new(name))?)?.adjustments),
                     None => None,
                 };
-                let listing = serde_json::to_string(&command::listing(current.as_ref()))
+                let mut listing = serde_json::to_value(command::listing(current.as_ref()))
                     .map_err(|e| e.to_string())?;
-                Ok(vec![text(listing)])
+                // photo.score runs here too, on the pixels, so it is headless
+                // in this listing though no record alone can run it.
+                if let Some(commands) = listing["commands"].as_array_mut() {
+                    for c in commands.iter_mut().filter(|c| c["id"] == "photo.score") {
+                        c["headless"] = json!(true);
+                    }
+                }
+                Ok(vec![text(listing.to_string())])
             }
             Tool::RunCommand => self.run(args),
             Tool::GetState | Tool::ListPhotos => Ok(vec![text(self.state()?.to_string())]),
@@ -78,7 +85,7 @@ impl Folder {
     /// sidecar is read and edited before any is written.
     fn run(&self, args: &Map<String, Value>) -> ToolResult {
         let cmd = Command::from_json(&command_request(args)?).map_err(explain)?;
-        if !cmd.about().1 {
+        if !runs_headless(&cmd) {
             return Err(explain(CommandError::NeedsApp));
         }
         let names = match cmd.photos() {
@@ -99,6 +106,20 @@ impl Folder {
                 paths.push(path);
             }
         }
+        let scoring = matches!(cmd, Command::Score(_));
+        if scoring && !cfg!(target_os = "macos") {
+            // The score needs Apple's Vision framework; elsewhere the call
+            // writes nothing.
+            let photos = paths
+                .iter()
+                .map(|p| self.record(p).map(|r| entry(p, &r)))
+                .collect::<Result<Vec<_>, _>>()?;
+            let note =
+                "scoring needs macOS, which has Apple's Vision framework; nothing was scored";
+            return Ok(vec![text(
+                json!({ "photos": photos, "notes": [note] }).to_string(),
+            )]);
+        }
         // One writer per folder: hold the lock from the read to the last
         // write, and leave a folder the app has open to the app.
         let _lock = self.lock()?;
@@ -106,15 +127,19 @@ impl Folder {
             .iter()
             .map(|p| self.record(p))
             .collect::<Result<Vec<_>, _>>()?;
-        command::apply_to_records(&cmd, &mut records, |i| {
-            paths
-                .get(i)
-                .map_or(Err(CommandError::NoPhotos), |p| display_size(p))
-        })
-        .map_err(explain)?;
         let mut notes = Vec::new();
-        for (path, rec) in paths.iter().zip(&mut records) {
-            notes.extend(detect_for(path, rec));
+        if scoring {
+            notes.extend(score_records(&paths, &mut records));
+        } else {
+            command::apply_to_records(&cmd, &mut records, |i| {
+                paths
+                    .get(i)
+                    .map_or(Err(CommandError::NoPhotos), |p| display_size(p))
+            })
+            .map_err(explain)?;
+            for (path, rec) in paths.iter().zip(&mut records) {
+                notes.extend(detect_for(path, rec));
+            }
         }
         for (n, (path, rec)) in paths.iter().zip(&records).enumerate() {
             sidecar::write_record(path, rec).map_err(|e| {
@@ -305,15 +330,48 @@ fn detect_for(path: &Path, rec: &mut ImageRecord) -> Vec<String> {
     notes
 }
 
-/// What `get_state` and `run_command` report for one photo.
+/// `photo.score`: each record gets the score the app's workers would give
+/// it. A photo that cannot be scored keeps its old score and gets a note.
+#[cfg(target_os = "macos")]
+fn score_records(paths: &[PathBuf], records: &mut [ImageRecord]) -> Vec<String> {
+    let mut notes = Vec::new();
+    for (path, rec) in paths.iter().zip(records.iter_mut()) {
+        match lightphotos::scoring::judge::score_file(path, rec) {
+            Ok(score) => {
+                rec.score = Some(sidecar::StoredScore {
+                    score,
+                    edits: rec.edit_signature(),
+                })
+            }
+            Err(e) => notes.push(format!("{}: not scored: {e}", file_name(path))),
+        }
+    }
+    notes
+}
+
+#[cfg(not(target_os = "macos"))]
+fn score_records(_paths: &[PathBuf], _records: &mut [ImageRecord]) -> Vec<String> {
+    Vec::new()
+}
+
+/// What `get_state` and `run_command` report for one photo. `score` is the
+/// stored quality score, from the app or `photo.score`, as attached mode
+/// reports it.
 fn entry(path: &Path, rec: &ImageRecord) -> Value {
-    json!({
+    let mut entry = json!({
         "name": file_name(path),
         "rating": rec.rating,
         "flag": rec.flag,
         "label": rec.label,
         "edited": rec.edited.is_some(),
-    })
+    });
+    if let Some(stored) = &rec.score {
+        entry["score"] = json!({
+            "value": stored.score.value,
+            "stale": stored.edits != rec.edit_signature(),
+        });
+    }
+    entry
 }
 
 fn file_name(path: &Path) -> String {
@@ -336,13 +394,19 @@ fn display_size(path: &Path) -> Result<(f32, f32), CommandError> {
         })
 }
 
+/// The commands headless runs: every command a record alone can run, and
+/// `photo.score`, which reads the photo's pixels.
+fn runs_headless(cmd: &Command) -> bool {
+    cmd.about().1 || matches!(cmd, Command::Score(_))
+}
+
 /// A command error as a tool error that says what to do next.
 fn explain(e: CommandError) -> String {
     match e {
         CommandError::NeedsApp => {
             let headless: Vec<&str> = Command::examples()
                 .iter()
-                .filter(|c| c.about().1)
+                .filter(|c| runs_headless(c))
                 .map(Command::id)
                 .collect();
             format!(
