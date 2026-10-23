@@ -543,18 +543,6 @@ impl MaskSet {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.layers.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.layers.len()
-    }
-
-    pub fn masks(&self) -> impl Iterator<Item = &Mask> {
-        self.layers.iter().map(|(m, _)| m)
-    }
-
     /// The detected coverage layer `i` renders with, if it has one.
     pub fn coverage(&self, i: usize) -> Option<&Arc<Coverage>> {
         self.layers.get(i).and_then(|(_, c)| c.as_ref())
@@ -912,7 +900,7 @@ mod tests {
             (t == DetectTarget::Subject).then(|| Arc::clone(&c))
         });
         assert_eq!(asked, [DetectTarget::Subject, DetectTarget::Sky]);
-        assert_eq!(set.len(), 4);
+        assert_eq!(set.layers.len(), 4);
         assert!(set.coverage(0).is_some() && set.coverage(1).is_none());
         let set = set.on_photo(2.0);
 

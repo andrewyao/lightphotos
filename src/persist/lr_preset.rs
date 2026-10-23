@@ -99,7 +99,7 @@ fn keys(id: SliderId) -> &'static [&'static str] {
     }
 }
 
-/// The Color Mixer keys, one per band in [`crate::develop::Band::ALL`] order.
+/// The Color Mixer keys, one per band in [`crate::develop::Band`] order.
 const HUE_KEYS: [&str; 8] = [
     "HueAdjustmentRed",
     "HueAdjustmentOrange",

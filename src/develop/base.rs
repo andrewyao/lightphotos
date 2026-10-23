@@ -27,7 +27,7 @@ pub const FINE_SHORT: u32 = 768;
 pub const FINE_LONG_MAX: u32 = 8192;
 
 /// Gaussian half-kernel at sigma 2 cells (0.8% of the short side), center
-/// first. Mirrored in base.wgsl; a test rebuilds both from [`gauss_half`].
+/// first. Mirrored in base.wgsl; a test rebuilds both from their Gaussians.
 pub const GAUSS_MID: [f32; 7] = [
     0.19967563,
     0.17621312,
@@ -302,10 +302,6 @@ impl BaseLayer {
         Some(BaseLayer { grid, cells })
     }
 
-    pub fn grid(&self) -> Grid {
-        self.grid
-    }
-
     /// The base at source UV: the four cells around `uv * grid - 0.5`,
     /// clamped at the edge, blended in f32. Must match `baseAt` in
     /// loupe_common.wgsl.
@@ -443,15 +439,6 @@ fn blur_axis(src: &[f32], gw: usize, gh: usize, kernel: &[f32], horizontal: bool
     out
 }
 
-/// A normalized Gaussian half-kernel of `N` taps at `sigma`, center first:
-/// `w[0] + 2 * (w[1] + ... + w[N-1]) == 1`. Computed in f64 so the tables
-/// are reproducible.
-pub fn gauss_half<const N: usize>(sigma: f64) -> [f32; N] {
-    let raw: [f64; N] = std::array::from_fn(|k| (-((k * k) as f64) / (2.0 * sigma * sigma)).exp());
-    let total = raw.iter().skip(1).sum::<f64>() * 2.0 + raw.first().copied().unwrap_or(0.0);
-    raw.map(|v| (v / total) as f32)
-}
-
 /// Gamma-2.2 Rec.709 luma of a linear pixel. Must match `lumaGamma` in
 /// loupe_common.wgsl.
 pub fn luma_gamma(rgb: [f32; 3]) -> f32 {
@@ -499,6 +486,16 @@ mod tests {
                 assert!(banded == one_band, "{w}x{h}, {band_cells} cell rows a band");
             }
         }
+    }
+
+    /// A normalized Gaussian half-kernel of `N` taps at `sigma`, center
+    /// first: `w[0] + 2 * (w[1] + ... + w[N-1]) == 1`. Computed in f64 so the
+    /// tables are reproducible.
+    fn gauss_half<const N: usize>(sigma: f64) -> [f32; N] {
+        let raw: [f64; N] =
+            std::array::from_fn(|k| (-((k * k) as f64) / (2.0 * sigma * sigma)).exp());
+        let total = raw.iter().skip(1).sum::<f64>() * 2.0 + raw[0];
+        raw.map(|v| (v / total) as f32)
     }
 
     #[test]
@@ -566,7 +563,7 @@ mod tests {
             [v, v * 0.5, 1.0 - v]
         })
         .unwrap();
-        let g = base.grid();
+        let g = base.grid;
         for (i, j) in [(0, 0), (17, 3), (g.width() - 1, g.height() - 1), (200, 100)] {
             let (u, v) = (
                 (i as f32 + 0.5) / g.width() as f32,
@@ -614,7 +611,7 @@ mod tests {
         assert_eq!((sw, sh), (600, 400));
         let small = BaseLayer::build(sw, sh, Fields::All, decode(&small_rgba, sw)).unwrap();
 
-        assert_eq!(full.grid(), small.grid());
+        assert_eq!(full.grid, small.grid);
         let worst = |f: fn(&BaseTexel) -> f32| {
             full.cells
                 .iter()

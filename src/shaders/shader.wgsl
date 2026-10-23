@@ -63,7 +63,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // skips mips, which breaks antialiasing when zoomed out.
     //
     // An Rgba8UnormSrgb texture samples as linear light. The math below must
-    // match `apply_linear` in develop/mod.rs.
+    // match `apply_linear_impl` in develop/mod.rs.
     let ddx = dpdx(in.uv);
     let ddy = dpdy(in.uv);
     let texel = sampleSrc(uv, ddx, ddy);

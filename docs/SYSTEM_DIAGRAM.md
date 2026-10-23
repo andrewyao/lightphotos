@@ -71,7 +71,7 @@ flowchart LR
         auth["control_auth.rs<br/>HMAC sign-in"]
         nonmac["decode/image_decode/nonmac_decode.rs<br/>non-RAW decode (image crate), EXIF"]
         rawlerdir["decode/rawler/<br/>every rawler call: RAW decode,<br/>RAW metadata, CR3/RAF preview,<br/>raw_preview (Fast / Quality)"]
-        develop["develop/mod.rs<br/>Adjustments → GpuAdjust<br/>apply_linear (CPU mirror)"]
+        develop["develop/mod.rs<br/>Adjustments → GpuAdjust<br/>Develop (CPU mirror)"]
         imgops["develop/image_ops.rs<br/>crop / tone / rotate, bake_edited"]
         export["export/mod.rs<br/>ExportJob → ExportDest"]
         immich["export/immich.rs<br/>HTTP upload client"]

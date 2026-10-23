@@ -9,10 +9,11 @@ use std::sync::Arc;
 use super::Renderer;
 use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
 use crate::develop::color::hue_rgb;
+use crate::develop::color::BandShift;
 use crate::develop::curve::Curve;
 use crate::develop::image_ops::bake_edited_probe;
 use crate::develop::{
-    Adjustments, BandShift, BaseProbe, CaScale, ColorAxis, ColorGrade, ColorMixer, Coverage, Crop,
+    Adjustments, BaseProbe, CaScale, ColorAxis, ColorGrade, ColorMixer, Coverage, Crop,
     DetectTarget, GpuAdjust, GpuTouchUp, Grain, GrayMix, Mask, MaskSet, MaskShape, Section,
     Sharpening, SliderId, Straighten, Stroke, TouchUp, Vignette, Wheel, SLIDERS,
 };
