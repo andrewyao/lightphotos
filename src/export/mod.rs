@@ -315,7 +315,6 @@ impl ExportSize {
 /// it to rawler without copying. Like the desktop exporter, it carries the
 /// source's metadata as `output` says.
 #[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
 #[hotpath::measure]
 pub fn bake_export_from_shared_vec(
     src_bytes: std::sync::Arc<Vec<u8>>,

@@ -124,7 +124,6 @@ fn lossy_quality_properties(quality: f64) -> Result<CFRetained<CFDictionary>, St
 /// Export is quality 90, not mozjpeg's default 75, to stay close to ImageIO's
 /// default on macOS.
 #[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
 #[hotpath::measure]
 pub fn encode_jpeg_to_vec(
     width: u32,
@@ -150,10 +149,8 @@ pub fn encode_jpeg_to_vec(
         .map_err(|e| e.to_string())
 }
 
-/// Encode `rgba` to a JPEG file at `out` with `mozjpeg-rs`. The wasm32 build
-/// has no caller, hence `dead_code`.
+/// Encode `rgba` to a JPEG file at `out` with `mozjpeg-rs`.
 #[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
 #[hotpath::measure]
 pub fn encode_jpeg(
     out: &Path,

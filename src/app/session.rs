@@ -122,7 +122,7 @@ impl StoredSession {
 impl Session {
     /// The saved session, if one parses. Nothing is written here: the
     /// first `save_session_if_changed` saves it in this build's shape.
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg_attr(test, allow(dead_code, reason = "tests never load the saved value"))]
     pub(crate) fn load() -> Option<Session> {
         let json = crate::persist::prefs::load(SESSION_PREF)?;
         let stored: StoredSession = serde_json::from_str(&json).ok()?;

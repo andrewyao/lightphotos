@@ -46,13 +46,25 @@ pub(crate) const MAX_SHARD_BYTES: usize = 16 << 20;
 /// Folders a catalog may list.
 pub(crate) const MAX_FOLDERS: usize = 1000;
 /// The longest browser catalog name, in characters.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(
+        dead_code,
+        reason = "only browser catalogs are named and loaded this way"
+    )
+)]
 pub(crate) const MAX_NAME_CHARS: usize = 100;
 
 /// The catalog the browser opens when catalog `failed` won't load: the one
 /// a switch came from, or at launch (`came_from` is `None`) the default, as
 /// natively. `None` keeps `failed` open, its folders in memory only.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(
+        dead_code,
+        reason = "only browser catalogs are named and loaded this way"
+    )
+)]
 pub(crate) fn web_fallback<'a>(failed: &str, came_from: Option<&'a str>) -> Option<&'a str> {
     let to = came_from.unwrap_or(DEFAULT_NAME);
     (to != failed).then_some(to)
@@ -61,7 +73,13 @@ pub(crate) fn web_fallback<'a>(failed: &str, came_from: Option<&'a str>) -> Opti
 /// `name` as a browser catalog's name: trimmed, non-empty, at most
 /// [`MAX_NAME_CHARS`], with no `/` (which reads as a path) and no NUL (which
 /// separates the catalog from the directory in a marks key).
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(
+        dead_code,
+        reason = "only browser catalogs are named and loaded this way"
+    )
+)]
 pub(crate) fn web_catalog_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -496,7 +514,13 @@ impl Catalog {
     }
 
     /// Whether the stored record has yet to arrive.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(
+            dead_code,
+            reason = "only browser catalogs are named and loaded this way"
+        )
+    )]
     pub(crate) fn loading(&self) -> bool {
         matches!(self.folders, Record::Pending { .. })
     }
@@ -505,7 +529,13 @@ impl Catalog {
     /// none yet, or why it could not be read. A missing record is made from
     /// `seed` and the changes made while it was pending. One that cannot be
     /// read or parsed is an error, and the catalog never writes over it.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(
+            dead_code,
+            reason = "only browser catalogs are named and loaded this way"
+        )
+    )]
     pub(crate) fn land_record(
         &mut self,
         stored: Result<Option<Vec<u8>>, String>,

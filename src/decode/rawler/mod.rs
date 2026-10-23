@@ -201,7 +201,6 @@ pub fn apply_fuji_dynamic_range_gain(raw: &mut rawler::RawImage, file: &[u8]) {
 /// Decodes a RAW/DNG file to rawler's undeveloped `RawImage`: sensor samples
 /// with no white balance, color matrix, or gamma. Still mosaiced (cpp=1) for
 /// Bayer/X-Trans files, already RGB (cpp=3/4) for Linear DNG.
-#[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_via_rawler(path: &Path) -> Result<rawler::RawImage, String> {
     rawler::decode_file(path).map_err(|e| e.to_string())
@@ -237,7 +236,6 @@ pub const AUTO_RAW_DENOISE_STRENGTH: f32 = 25.0;
 ///
 /// The vendored rawler's develop returns an error, not a panic, for the
 /// layouts it cannot take (`patches/rawler-develop-errors.patch`).
-#[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_nonmac(
     path: &Path,
@@ -262,7 +260,6 @@ pub enum RawIntent {
 /// [`decode_raw_nonmac`] for an in-memory file, for scoring and the
 /// `decode_probe` harness, since a browser has no path to open. The parity
 /// test in `decode_probe` checks both produce identical bytes.
-#[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_nonmac_from_bytes(
     bytes: &[u8],
@@ -275,7 +272,6 @@ pub fn decode_raw_nonmac_from_bytes(
 
 /// Like [`decode_raw_nonmac_from_bytes`], but takes ownership of the buffer
 /// so rawler can use it without a copy. Export uses this.
-#[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_nonmac_from_shared_vec(
     bytes: std::sync::Arc<Vec<u8>>,

@@ -32,7 +32,6 @@ pub(crate) fn override_default_dir(dir: PathBuf) {
 /// The folder new catalogs go in and the default one lives in:
 /// `~/Pictures/LightPhotos`, or the override. Tests never call it: their
 /// catalogs are in memory or at an explicit path.
-#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn default_dir() -> Option<PathBuf> {
     if let Some(dir) = DEFAULT_DIR_OVERRIDE.get() {
         return Some(dir.clone());

@@ -17,7 +17,10 @@ use crate::sidecar::Flag;
 pub enum UiAction {
     Select(usize),
     /// Group the bursts among every photo in the grid. Native only.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "a native-only action")
+    )]
     GroupAllBursts,
     /// Group the bursts among the selected photos.
     GroupSelectedBursts,
@@ -37,7 +40,10 @@ pub enum UiAction {
     /// Show this page of the group's tiles.
     ComparePage(usize),
     /// Native only, as is the row that sends it.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "a native-only action")
+    )]
     SetTileFidelity(crate::app::TileFidelity),
     /// A click on this member's tile in the Compare pane, which changes the
     /// picks as `how` says. The representative is never picked.

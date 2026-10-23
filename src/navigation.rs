@@ -240,7 +240,10 @@ enum EntryKind {
     File,
     // Only `list_subdirs` asks for folders, and the browser lists its
     // folders through `web_fs.rs`.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the browser lists folders through web_fs.rs")
+    )]
     Dir,
 }
 
@@ -360,7 +363,10 @@ pub struct Playlist {
     /// The entries that are symlinks, noted from the listing, so a check
     /// for links that lead out of the folder looks only at these.
     // The browser lists file handles, never links, so nothing reads it there.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the browser lists file handles, never links")
+    )]
     links: HashSet<PathBuf>,
 }
 

@@ -342,7 +342,13 @@ pub(super) fn hint(ui: &mut egui::Ui, text: &str) {
 
 /// What went wrong with a value, set under it.
 // Only the Immich rows use it so far, and the web build has no Immich.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg_attr(
+    target_arch = "wasm32",
+    allow(
+        dead_code,
+        reason = "only the Immich rows use it, and the web build has no Immich"
+    )
+)]
 pub(super) fn error(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)

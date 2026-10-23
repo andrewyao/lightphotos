@@ -79,7 +79,10 @@ impl PresetStore {
     /// The saved library, written back on every mutation. `App::new`
     /// substitutes [`PresetStore::in_memory`] under test, so no test writes
     /// the developer's own library.
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg_attr(
+        test,
+        allow(dead_code, reason = "App::new uses an in-memory store under test")
+    )]
     pub fn load() -> PresetStore {
         PresetStore::from_text(&crate::persist::prefs::load(KEY).unwrap_or_default(), true)
     }
@@ -141,7 +144,10 @@ impl PresetStore {
     ///
     /// Only the native Lightroom import batches, so the browser build compiles
     /// this with no caller until a wasm file picker exists.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "only the native Lightroom import batches")
+    )]
     pub fn add_all(&mut self, looks: Vec<(String, Adjustments, Vec<String>)>) -> Vec<String> {
         let stored: Vec<String> = looks
             .into_iter()

@@ -24,7 +24,14 @@
 //! ```
 
 // Off macOS only the stub `main` below is built.
-#![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "off macOS only the stub main is built"
+    )
+)]
 
 use lightphotos::decode::{image_decode, image_encode};
 use lightphotos::develop::image_ops;

@@ -323,7 +323,7 @@ impl Centering {
 
     /// The saved choice, or [`Centering::Range`] when none is saved or
     /// Settings hides the choice.
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg_attr(test, allow(dead_code, reason = "tests never load the saved value"))]
     pub(crate) fn load() -> Centering {
         Centering::chosen(
             crate::app::SHOW_AUTOTONE_CENTERING,

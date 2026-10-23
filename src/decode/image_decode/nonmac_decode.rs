@@ -68,7 +68,6 @@ pub fn read_photo(path: &Path) -> Result<Vec<u8>, String> {
 /// The non-RAW half of [`decode`], from bytes. The wasm32 worker shares it
 /// so browser decodes get the same orientation handling and Lanczos3 resize.
 #[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedImage, String> {
     let img = crate::decode::image_decode::decode_fit(bytes, None, max_dim, None)?;
@@ -204,7 +203,6 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
 /// browser has bytes, not a path. File facts and `source_size` are left to
 /// the caller.
 #[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
 pub fn fill_metadata_from_bytes(meta: &mut ImageMetadata, bytes: &[u8], raw: bool) {
     if raw {
         crate::decode::rawler::fill_raw_metadata_from_bytes(meta, bytes);

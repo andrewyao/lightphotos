@@ -63,10 +63,6 @@ impl Plan {
     /// an image decoded at `native_bpp` bytes a pixel with `scratch` more
     /// bytes of decoder working memory. `turns` when the orientation copies
     /// the output.
-    #[cfg_attr(
-        not(target_arch = "wasm32"),
-        allow(dead_code, reason = "only wasm32 has a decode budget")
-    )]
     pub(crate) fn peak_bytes(&self, native_bpp: u64, scratch: u64, turns: bool) -> u64 {
         let px = |(w, h): (u32, u32)| u64::from(w) * u64::from(h);
         let native = px(self.src).saturating_mul(native_bpp);
@@ -152,10 +148,6 @@ pub fn fit_decoded(
 
 /// What to reserve for decoding a `src`-sized 8-bit RGB image elsewhere and
 /// then [`fit_decoded`]: the caller's grant, taken before that decode.
-#[cfg_attr(
-    not(target_arch = "wasm32"),
-    allow(dead_code, reason = "only wasm32 has a decode budget")
-)]
 pub fn decoded_grant_bytes(src: (u32, u32), max_dim: u32) -> usize {
     // A camera JPEG decodes to RGB8, with up to as much again for the
     // decoder's own working memory; the turn may copy the output.
@@ -164,10 +156,6 @@ pub fn decoded_grant_bytes(src: (u32, u32), max_dim: u32) -> usize {
     clamp_usize(Plan::new(src, max_dim).peak_bytes(native, px.saturating_mul(native), true))
 }
 
-#[cfg_attr(
-    not(target_arch = "wasm32"),
-    allow(dead_code, reason = "only wasm32 has a decode budget")
-)]
 fn clamp_usize(bytes: u64) -> usize {
     usize::try_from(bytes).unwrap_or(usize::MAX)
 }

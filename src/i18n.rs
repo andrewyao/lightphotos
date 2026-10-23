@@ -158,7 +158,13 @@ const WEB: bool = cfg!(target_arch = "wasm32");
 
 // wasm32 lacks the folder picker, Lightroom preset import, and Immich export,
 // so their strings go unread there.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg_attr(
+    target_arch = "wasm32",
+    allow(
+        dead_code,
+        reason = "the web build has no folder picker, Lightroom import or Immich"
+    )
+)]
 pub struct Strings {
     // Settings dialog.
     pub settings: &'static str,
@@ -223,11 +229,13 @@ pub struct Strings {
     pub remove_folder: &'static str,
     /// Hover text on a Folders root that isn't there, such as on an
     /// unplugged drive. Takes the folder's path.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub folder_missing: fn(&str) -> String,
     /// The same on the web, for a root whose access this browser no longer
     /// keeps. Takes the folder's name.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(dead_code, reason = "a message only the browser build shows")
+    )]
     pub folder_not_kept: fn(&str) -> String,
     /// The home page's empty actions bar.
     pub select_photos_hint: &'static str,
@@ -581,7 +589,10 @@ pub struct Strings {
     pub delete_in_progress: &'static str,
     pub group_refused_loading: &'static str,
     pub group_name_unsaveable: &'static str,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(dead_code, reason = "a message only the browser build shows")
+    )]
     pub delete_no_handle: fn(&str) -> String,
     pub copied_settings_from: fn(&str) -> String,
     pub applied_settings: fn(usize) -> String,
@@ -619,17 +630,35 @@ pub struct Strings {
     pub export_limit: &'static str,
     pub export_limit_none: &'static str,
     pub export_limit_kb: fn(u32) -> String,
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(
+        target_os = "macos",
+        allow(dead_code, reason = "ImageIO's JPEG encoder has no presets")
+    )]
     pub export_jpeg_preset: &'static str,
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(
+        target_os = "macos",
+        allow(dead_code, reason = "ImageIO's JPEG encoder has no presets")
+    )]
     pub export_jpeg_fastest: &'static str,
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(
+        target_os = "macos",
+        allow(dead_code, reason = "ImageIO's JPEG encoder has no presets")
+    )]
     pub export_jpeg_baseline: &'static str,
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(
+        target_os = "macos",
+        allow(dead_code, reason = "ImageIO's JPEG encoder has no presets")
+    )]
     pub export_jpeg_progressive: &'static str,
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(
+        target_os = "macos",
+        allow(dead_code, reason = "ImageIO's JPEG encoder has no presets")
+    )]
     pub export_jpeg_smallest: &'static str,
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(
+        target_os = "macos",
+        allow(dead_code, reason = "ImageIO's JPEG encoder has no presets")
+    )]
     pub export_jpeg_preset_hint: &'static str,
     pub export_naming: &'static str,
     pub export_naming_hint: &'static str,
@@ -653,9 +682,11 @@ pub struct Strings {
     pub export_needs_immich: &'static str,
     pub immich_server_url: &'static str,
     pub immich_url_example: &'static str,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub immich_plain_http: &'static str,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(dead_code, reason = "a message only the browser build shows")
+    )]
     pub immich_native_only: &'static str,
     pub immich_api_key: &'static str,
     pub immich_connect: &'static str,
@@ -680,7 +711,10 @@ pub struct Strings {
     pub export_nothing_selected: &'static str,
     pub export_in_progress: &'static str,
     pub export_edits_loading: &'static str,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(dead_code, reason = "a message only the browser build shows")
+    )]
     pub export_no_handle: &'static str,
     pub export_no_folder: fn(&str) -> String,
     pub exporting: fn(usize, usize) -> String,
@@ -734,7 +768,6 @@ pub struct Strings {
     pub touch_up_needs_full: &'static str,
     pub wb_no_image: &'static str,
     pub wb_pick_brighter: &'static str,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub open_folder_failed: fn(&str) -> String,
     /// The last catalog could not open at launch, so the default one did.
     /// Takes why.
@@ -760,22 +793,31 @@ pub struct Strings {
     pub catalog_picker_title: &'static str,
     /// The browser's New Catalog prompt: its field's label and hint, and
     /// the button that makes the catalog.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(dead_code, reason = "a message only the browser build shows")
+    )]
     pub catalog_name_label: &'static str,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(dead_code, reason = "a message only the browser build shows")
+    )]
     pub catalog_name_hint: &'static str,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(dead_code, reason = "a message only the browser build shows")
+    )]
     pub create: &'static str,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(dead_code, reason = "a message only the browser build shows")
+    )]
     pub preview_failed: fn(&str) -> String,
     /// The group tiles' page, as first, last and group size.
     pub group_page: fn(usize, usize, usize) -> String,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub tile_load: &'static str,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub tile_speed: &'static str,
     /// Names its cost, so the person knows why the tiles take a moment.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub tile_full: &'static str,
     pub set_as_rep: &'static str,
     pub representative: &'static str,
@@ -783,9 +825,15 @@ pub struct Strings {
     /// Hover text on the info bar's icon for the Compare pane.
     pub view_compare: &'static str,
     pub view_compare_needs_group: &'static str,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(dead_code, reason = "a message only the browser build shows")
+    )]
     pub folder_handle_missing: fn(&str) -> String,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        allow(dead_code, reason = "a message only the browser build shows")
+    )]
     pub list_folder_failed: fn(&str, &str) -> String,
     pub edits_save_failed: fn(&str) -> String,
     pub presets_load_failed: fn(&str) -> String,
@@ -798,7 +846,10 @@ pub struct Strings {
 
 /// Titles and items of the macOS menu bar, which a photo's right-click
 /// menu borrows on every platform.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only the macOS menu bar reads them")
+)]
 pub struct MenuStrings {
     pub about: &'static str,
     pub settings: &'static str,
