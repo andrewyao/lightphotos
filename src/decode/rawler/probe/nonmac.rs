@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use lightphotos::decode::image_decode;
-use lightphotos::decode::rawler::{self as lp_rawler, raw_preview};
+use lightphotos::decode::rawler as lp_rawler;
+use lightphotos::decode::rawler::raw_preview::{self, DemosaicMode};
 #[cfg(test)]
 use lightphotos::hash;
 
@@ -126,8 +127,8 @@ fn run_wasm_quality_decode_probe(args: &[String]) -> Result<(), String> {
 
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let t0 = std::time::Instant::now();
-    let img = raw_preview::decode_raw_quality_from_bytes(&bytes, max_px)
-        .map_err(|e| format!("decode_raw_quality_from_bytes failed: {e}"))?;
+    let img = raw_preview::decode_raw_from_bytes(&bytes, max_px, DemosaicMode::Quality)
+        .map_err(|e| format!("decode_raw_from_bytes(Quality) failed: {e}"))?;
     println!(
         "wasm-quality-decode {}x{} in {:?}",
         img.width,
@@ -932,7 +933,7 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read fixture");
         let _ = std::fs::remove_file(&path);
 
-        if let Err(e) = raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX) {
+        if let Err(e) = raw_preview::decode_raw_from_bytes(&bytes, u32::MAX, DemosaicMode::Fast) {
             panic!("a 40,000 px wide DNG was refused: {e}");
         }
     }
@@ -956,7 +957,7 @@ mod tests {
         claim(&mut bytes, 30, 20_000);
         claim(&mut bytes, 42, 10_000);
 
-        match raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX) {
+        match raw_preview::decode_raw_from_bytes(&bytes, u32::MAX, DemosaicMode::Fast) {
             Ok(_) => panic!("a 600 million sample claim decoded"),
             Err(e) => assert!(e.contains("too large"), "not refused by the check: {e}"),
         }
@@ -1166,8 +1167,8 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
-        let decoded = raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
-            .expect("decode_raw_fast_from_bytes failed on synthetic Bayer DNG fixture");
+        let decoded = raw_preview::decode_raw_from_bytes(&bytes, u32::MAX, DemosaicMode::Fast)
+            .expect("decode_raw_from_bytes(Fast) failed on synthetic Bayer DNG fixture");
 
         let mut hasher = hash::Fnv1a::new();
         hasher.write(&decoded.width.to_le_bytes());
@@ -1206,8 +1207,8 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
-        let decoded = raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
-            .expect("decode_raw_fast_from_bytes failed on the white-balanced Linear DNG fixture");
+        let decoded = raw_preview::decode_raw_from_bytes(&bytes, u32::MAX, DemosaicMode::Fast)
+            .expect("decode_raw_from_bytes(Fast) failed on the white-balanced Linear DNG fixture");
 
         let mut hasher = hash::Fnv1a::new();
         hasher.write(&decoded.width.to_le_bytes());
@@ -1249,8 +1250,8 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
-        let decoded = raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
-            .expect("decode_raw_fast_from_bytes failed without AsShotNeutral");
+        let decoded = raw_preview::decode_raw_from_bytes(&bytes, u32::MAX, DemosaicMode::Fast)
+            .expect("decode_raw_from_bytes(Fast) failed without AsShotNeutral");
         assert!(
             decoded
                 .rgba
@@ -1308,7 +1309,7 @@ mod tests {
         raw.apply_scaling().expect("apply_scaling failed");
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            raw_preview::demosaic_cfa(&mut raw, raw_preview::DemosaicMode::Quality, u32::MAX)
+            raw_preview::demosaic_cfa(&mut raw, DemosaicMode::Quality, u32::MAX)
         }));
         let (w, h, rgba) = result
             .expect("PPGDemosaic panicked")
@@ -1349,8 +1350,8 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
-        let decoded = raw_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX)
-            .expect("decode_raw_quality_from_bytes failed on synthetic Bayer DNG fixture");
+        let decoded = raw_preview::decode_raw_from_bytes(&bytes, u32::MAX, DemosaicMode::Quality)
+            .expect("decode_raw_from_bytes(Quality) failed on synthetic Bayer DNG fixture");
         assert!(decoded.width > 0 && decoded.height > 0);
         assert_eq!(decoded.pixel_format, image_decode::PixelFormat::LinearF16);
         assert_eq!(
@@ -1374,8 +1375,8 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         // The fixture must be larger than MAX_PX or the resize never runs.
-        let unbounded = raw_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX)
-            .expect("unbounded decode_raw_quality_from_bytes failed");
+        let unbounded = raw_preview::decode_raw_from_bytes(&bytes, u32::MAX, DemosaicMode::Quality)
+            .expect("unbounded decode_raw_from_bytes(Quality) failed");
         let natural_longest = unbounded.width.max(unbounded.height);
 
         const MAX_PX: u32 = 4;
@@ -1384,8 +1385,8 @@ mod tests {
             "fixture's natural size ({natural_longest}) must exceed MAX_PX ({MAX_PX}) for this test to mean anything"
         );
 
-        let bounded = raw_preview::decode_raw_quality_from_bytes(&bytes, MAX_PX)
-            .expect("bounded decode_raw_quality_from_bytes failed");
+        let bounded = raw_preview::decode_raw_from_bytes(&bytes, MAX_PX, DemosaicMode::Quality)
+            .expect("bounded decode_raw_from_bytes(Quality) failed");
         assert!(
             bounded.width.max(bounded.height) <= MAX_PX,
             "Quality tier must respect max_px: got {}x{}, longest side must be <= {MAX_PX}",
@@ -1430,10 +1431,10 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
+            raw_preview::decode_raw_from_bytes(&bytes, u32::MAX, DemosaicMode::Fast)
         }))
         .expect(
-            "decode_raw_fast_from_bytes panicked on an unsupported CFA pattern (fatal on wasm32)",
+            "decode_raw_from_bytes(Fast) panicked on an unsupported CFA pattern (fatal on wasm32)",
         );
 
         // `DecodedImage` is not `Debug`, so `expect_err` is unavailable.
@@ -1522,8 +1523,9 @@ mod tests {
         let native_mean = mean_rgb(&native_pixels);
 
         // wasm: the `Quality` tier.
-        let wasm_decoded = raw_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX)
-            .expect("decode_raw_quality_from_bytes failed");
+        let wasm_decoded =
+            raw_preview::decode_raw_from_bytes(&bytes, u32::MAX, DemosaicMode::Quality)
+                .expect("decode_raw_from_bytes(Quality) failed");
         assert_eq!(
             wasm_decoded.pixel_format,
             image_decode::PixelFormat::LinearF16,
@@ -1647,8 +1649,8 @@ mod tests {
         let path = std::path::Path::new("/Users/andyyao/Desktop/07-26 Jackie/DSC02468.ARW");
         let bytes = std::fs::read(path).expect("read real ARW file");
 
-        let decoded = raw_preview::decode_raw_quality_from_bytes(&bytes, 1600)
-            .expect("decode_raw_quality_from_bytes failed");
+        let decoded = raw_preview::decode_raw_from_bytes(&bytes, 1600, DemosaicMode::Quality)
+            .expect("decode_raw_from_bytes(Quality) failed");
         assert_eq!(decoded.pixel_format, image_decode::PixelFormat::LinearF16);
 
         let (w, h) = (decoded.width, decoded.height);

@@ -312,12 +312,6 @@ fn imageio_writes(uti: &str) -> bool {
 /// nothing without one: TIFF and WebP.
 const SRGB_ICC: &[u8] = include_bytes!("../../assets/icc/sRGB-v2-micro.icc");
 
-/// Encode `pixels` as `enc` with no metadata. JPEG, PNG and WebP keep 8
-/// bits per channel; TIFF keeps 16 when given them.
-pub fn encode(enc: Encoding, width: u32, height: u32, pixels: Pixels) -> Result<Vec<u8>, String> {
-    Prepared::new(width, height, pixels)?.encode(enc, Embedded::NONE)
-}
-
 /// Metadata to put in an encoded file, each part already serialized: a
 /// TIFF-structured EXIF block (`export::metadata::block`) and an XMP packet
 /// (`export::metadata::xmp`).

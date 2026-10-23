@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use lightphotos::control_auth::{self, Side};
 use lightphotos::decode::image_decode;
-use lightphotos::decode::image_encode::{self, Encoding, Pixels};
+use lightphotos::decode::image_encode::{Embedded, Encoding, Pixels, Prepared};
 use lightphotos::sidecar::{self, Flag};
 use serde_json::{json, Value};
 
@@ -85,13 +85,9 @@ fn temp_dir(tag: &str) -> PathBuf {
 /// A 300x200 mid-gray JPEG.
 fn write_jpeg(path: &Path) {
     let rgba: Vec<u8> = [110, 110, 110, 255].repeat(300 * 200);
-    let jpeg = image_encode::encode(
-        Encoding::Jpeg(Default::default()),
-        300,
-        200,
-        Pixels::Rgba8(&rgba),
-    )
-    .unwrap();
+    let jpeg = Prepared::new(300, 200, Pixels::Rgba8(&rgba))
+        .and_then(|p| p.encode(Encoding::Jpeg(Default::default()), Embedded::NONE))
+        .unwrap();
     std::fs::write(path, jpeg).unwrap();
 }
 
@@ -377,13 +373,9 @@ fn fake_app(png: Vec<u8>) -> (u16, Arc<Mutex<Vec<Value>>>) {
 
 #[test]
 fn an_attached_session_runs_commands_and_returns_screenshots_through_the_control_channel() {
-    let png = image_encode::encode(
-        Encoding::Png,
-        2,
-        1,
-        Pixels::Rgba8(&[255, 0, 0, 255, 0, 0, 255, 255]),
-    )
-    .unwrap();
+    let png = Prepared::new(2, 1, Pixels::Rgba8(&[255, 0, 0, 255, 0, 0, 255, 255]))
+        .and_then(|p| p.encode(Encoding::Png, Embedded::NONE))
+        .unwrap();
     let (port, seen) = fake_app(png.clone());
     let port_arg = port.to_string();
     let lines = vec![

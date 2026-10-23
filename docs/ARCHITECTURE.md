@@ -79,7 +79,7 @@ flowchart TD
     subgraph web["wasm32 (browser)"]
         direction TB
         wt["request_web_preview, app/web.rs\n-> JobKind::Speed"] --> wtd["web_decode.rs on a loader thread -> rawler::raw_preview\nquarter-res Fast tier, sRGB8 output\n(shown first — this is the Loupe's placeholder)"]
-        wtd --> wp["JobKind::Preview\nrawler::raw_preview::decode_raw_quality_from_bytes\nfull PPG demosaic, LinearF16 output"]
+        wtd --> wp["JobKind::Preview\nrawler::raw_preview::decode_raw_from_shared_vec\nfull PPG demosaic, LinearF16 output"]
         wp -.->|photo shows larger than the preview\n(zoom, or fit on a large window)| wf["request_web_full, app/web.rs\n-> JobKind::Full, full-resolution decode"]
     end
 
