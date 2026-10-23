@@ -211,15 +211,24 @@ impl Drop for FolderLock {
 
 /// Whether a lock call's error means the volume has no file locks at all,
 /// rather than a failure that can pass.
+///
+/// `ENOTSUP`, `ENOLCK` (no lock manager, as on some NFS mounts) and `EINVAL`
+/// (the file system can't lock this kind of file) mean that. `EIO` and the
+/// rest can pass, so they make the lock unavailable for this try only.
 fn is_unsupported(e: &std::io::Error) -> bool {
-    // ENOLCK has no `ErrorKind` of its own.
+    // ENOLCK and EINVAL have no `ErrorKind` of their own.
     #[cfg(target_os = "macos")]
     const ENOLCK: i32 = 77;
     #[cfg(target_os = "linux")]
     const ENOLCK: i32 = 37;
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     const ENOLCK: i32 = i32::MIN;
-    e.kind() == std::io::ErrorKind::Unsupported || e.raw_os_error() == Some(ENOLCK)
+    #[cfg(unix)]
+    const EINVAL: i32 = 22;
+    #[cfg(not(unix))]
+    const EINVAL: i32 = i32::MIN;
+    e.kind() == std::io::ErrorKind::Unsupported
+        || matches!(e.raw_os_error(), Some(n) if n == ENOLCK || n == EINVAL)
 }
 
 impl FolderLock {
@@ -260,13 +269,21 @@ impl FolderLock {
             _ => {}
         }
         let path = sidecars.join(LOCK_FILE);
-        let file = std::fs::OpenOptions::new()
+        // The OS lock works on a file opened for reading only, so a lock
+        // file this user can't write (another user made it) still locks.
+        let file = match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&path)
-            .map_err(unavailable)?;
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                std::fs::File::open(&path).map_err(unavailable)?
+            }
+            Err(e) => return Err(unavailable(e)),
+        };
         // A folder someone else supplied can plant a link here. Writing the
         // holder through it would overwrite whatever it points at, so the
         // file opened must be the regular file at this name.
@@ -435,6 +452,26 @@ mod tests {
         }
         assert_ne!(other, Some(key));
         assert!(gone.is_none());
+    }
+
+    /// A lock file this user can't write, as another user's would be,
+    /// still locks: the OS lock needs only read access.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_this_user_cant_write_still_locks() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_folder("read-only-lock");
+        drop(FolderLock::try_acquire(&dir, Writer::Mcp).unwrap());
+        let file = dir.join(SIDECAR_DIR).join(LOCK_FILE);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let held = FolderLock::try_acquire(&dir, Writer::App);
+        let second = FolderLock::try_acquire(&dir, Writer::Mcp).err();
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644));
+        let taken = held.is_ok();
+        drop(held);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(taken, "the app takes it");
+        assert!(matches!(second, Some(LockError::Busy(_))), "and it locks");
     }
 
     /// A quitting app renames itself in its line, so a relaunch can tell.
