@@ -387,6 +387,10 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(not(target_arch = "wasm32"))]
         self.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
+        // The sidecars are on the disk: a relaunch may have the folder now,
+        // not after the flushes below. See docs/design/folder-lock.md §5.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.folder_store.release_locks();
         // The catalog's copy of the marks follows the records just flushed.
         #[cfg(not(target_arch = "wasm32"))]
         {

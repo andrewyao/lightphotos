@@ -158,6 +158,10 @@ pub struct SignalCache {
     writer: Option<writer::Writer>,
     #[cfg(not(target_arch = "wasm32"))]
     last_write: std::time::Instant,
+    /// The folder is read-only for this visit (or still opening): nothing
+    /// is written into it or swept from it. See docs/design/folder-lock.md §6.
+    #[cfg(not(target_arch = "wasm32"))]
+    read_only: bool,
 }
 
 impl SignalCache {
@@ -171,7 +175,16 @@ impl SignalCache {
             writer: None,
             #[cfg(not(target_arch = "wasm32"))]
             last_write: std::time::Instant::now(),
+            #[cfg(not(target_arch = "wasm32"))]
+            read_only: false,
         }
+    }
+
+    /// Whether the folder takes no write: while it is set, the cache keeps
+    /// what it records in memory only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
     }
 
     /// Read `dir`'s cache. A missing, unreadable or corrupt file is not an
@@ -301,7 +314,7 @@ impl SignalCache {
     #[cfg(not(target_arch = "wasm32"))]
     #[hotpath::measure]
     fn queue_write(&mut self) {
-        if self.writer.is_none() {
+        if self.writer.is_none() || self.read_only {
             return;
         }
         self.sweep_orphans();

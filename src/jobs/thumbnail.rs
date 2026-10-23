@@ -370,7 +370,7 @@ fn current_key(photo: &Path) -> Option<u64> {
 /// (`docs/design/folder-lock.md` §6): its thumbnails decode each time.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct ThumbCache {
-    read_only: std::sync::Mutex<Option<crate::sidecar::FolderKey>>,
+    read_only: std::sync::Mutex<std::collections::HashSet<crate::sidecar::FolderKey>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -379,16 +379,17 @@ impl ThumbCache {
     pub fn new() -> ThumbCache {
         remove_legacy_cache();
         ThumbCache {
-            read_only: std::sync::Mutex::new(None),
+            read_only: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
-    /// The folder the app opened read-only, if one is.
-    pub fn set_read_only(&self, folder: Option<crate::sidecar::FolderKey>) {
+    /// The folders the app opened read-only, which a thumbnail job still
+    /// running after the user moved on must not write into either.
+    pub fn set_read_only(&self, folders: std::collections::HashSet<crate::sidecar::FolderKey>) {
         *self
             .read_only
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = folder;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = folders;
     }
 
     /// Whether a new entry for `photo` may be written.
@@ -397,9 +398,10 @@ impl ThumbCache {
             .read_only
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        read_only.as_ref().is_none_or(|folder| {
-            crate::sidecar::FolderKey::of_photo(photo).as_ref() != Some(folder)
-        })
+        if read_only.is_empty() {
+            return true;
+        }
+        crate::sidecar::FolderKey::of_photo(photo).is_none_or(|k| !read_only.contains(&k))
     }
 
     /// The cached thumbnail if current, else decode, cache, and return it.
@@ -807,7 +809,7 @@ mod tests {
         fs::create_dir_all(&ro).unwrap();
         fs::create_dir_all(&rw).unwrap();
         let cache = ThumbCache::default();
-        cache.set_read_only(crate::sidecar::FolderKey::of(&ro));
+        cache.set_read_only(crate::sidecar::FolderKey::of(&ro).into_iter().collect());
         let mut written = Vec::new();
         for dir in [&ro, &rw] {
             let photo = dir.join("a.png");

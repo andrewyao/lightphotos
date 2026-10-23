@@ -998,8 +998,8 @@ impl Loader {
     /// The folder the app opened read-only, if one is: its thumbnails are
     /// not written to the cache.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn set_read_only(&self, folder: Option<crate::sidecar::FolderKey>) {
-        self.thumbs.set_read_only(folder);
+    pub fn set_read_only(&self, folders: std::collections::HashSet<crate::sidecar::FolderKey>) {
+        self.thumbs.set_read_only(folders);
     }
 
     /// Requests the screen-fit view the loupe shows for `path` at `target_px`.
