@@ -145,6 +145,28 @@ pub fn refuse_linked_sidecar_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Make `dir` and the folders above it that are missing, but never the
+/// photo folder a `.lightphotos` in it belongs to: a folder deleted or
+/// unplugged while the app works in it stays gone, and the write fails.
+/// A `dir` outside any `.lightphotos` is made as `create_dir_all` makes it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn create_sidecar_dir(dir: &Path) -> std::io::Result<()> {
+    let sidecar_dir = std::ffi::OsStr::new(crate::sidecar::SIDECAR_DIR);
+    let photos = dir
+        .ancestors()
+        .find(|a| a.file_name() == Some(sidecar_dir))
+        .and_then(Path::parent);
+    if let Some(photos) = photos {
+        if !photos.as_os_str().is_empty() && !photos.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{} is gone", photos.display()),
+            ));
+        }
+    }
+    std::fs::create_dir_all(dir)
+}
+
 /// [`refuse_linked_sidecar_dir`] for the folder `file` is in.
 #[cfg(not(target_arch = "wasm32"))]
 fn refuse_linked_parent(file: &Path) -> std::io::Result<()> {
@@ -158,7 +180,7 @@ pub fn write_atomic_in_dir(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .parent()
         .ok_or_else(|| std::io::Error::other("path has no parent"))?;
     refuse_linked_sidecar_dir(parent)?;
-    std::fs::create_dir_all(parent)?;
+    create_sidecar_dir(parent)?;
     write_atomic(file, bytes)
 }
 
@@ -260,6 +282,24 @@ pub fn resolve(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write into the `.lightphotos` of a photo folder that is gone fails
+    /// and does not make the folder again.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_sidecar_write_never_makes_a_gone_folder_again() {
+        let gone = std::env::temp_dir().join(format!("lp-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&gone);
+        let file = gone
+            .join(crate::sidecar::SIDECAR_DIR)
+            .join("groups")
+            .join("g.json");
+        let wrote = write_atomic_in_dir(&file, b"{}");
+        let made = gone.exists();
+        let _ = std::fs::remove_dir_all(&gone);
+        assert!(wrote.is_err());
+        assert!(!made, "the gone folder was made again");
+    }
 
     #[cfg(unix)]
     #[test]
