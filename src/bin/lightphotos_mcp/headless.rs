@@ -325,6 +325,13 @@ mod tests {
     use super::*;
     use lightphotos::develop::{DetectTarget, Mask};
 
+    /// Whether Vision failed because this machine can't run a model at all,
+    /// as on GitHub's macOS runners: VMs with no GPU or Neural Engine.
+    fn no_model_here(e: &lightphotos::scoring::detect::DetectError) -> bool {
+        let why = e.to_string();
+        why.contains("Could not create inference context") || why.contains("Unspecified error")
+    }
+
     fn folder_with_photo(tag: &str) -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!("lp-mcp-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -362,7 +369,7 @@ mod tests {
     fn detect_for_records_what_it_can_and_notes_the_rest() {
         let (dir, photo) = folder_with_photo("detect-for");
         if let Err(e) = lightphotos::scoring::detect::run(&photo, DetectTarget::Subject) {
-            if e.is_no_model_here() {
+            if no_model_here(&e) {
                 eprintln!("skipping: Vision cannot run a model here ({e})");
                 std::fs::remove_dir_all(&dir).unwrap();
                 return;

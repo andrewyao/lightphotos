@@ -845,8 +845,9 @@ mod tests {
         assert_eq!(app.add_mask(Mask::detected(DetectTarget::Subject)), Some(0));
         app.save_edit_unless_dragging();
         assert_eq!(app.mask_status(0), Some(MaskStatus::Detecting));
-        assert!(
-            app.current_mask_set().coverage(0).is_none(),
+        assert_eq!(
+            app.current_photo_masks().coverage_key(),
+            0,
             "renders as nothing while pending"
         );
         let before = app.edit_sig_for(&photo);
@@ -862,8 +863,9 @@ mod tests {
             "and the sidecar"
         );
         assert_ne!(app.edit_sig_for(&photo), before, "the landing re-bakes");
-        assert!(
-            app.current_mask_set().coverage(0).is_some(),
+        assert_ne!(
+            app.current_photo_masks().coverage_key(),
+            0,
             "and the Loupe gets the coverage"
         );
 
@@ -1213,11 +1215,10 @@ mod tests {
         app.add_mask(m);
         paint(&mut app, &[[0.3, 0.5], [0.7, 0.5]]);
         let placed = app.current_photo_masks();
-        let c = placed.coverage(0).expect("a raster");
-        assert_eq!(c.at_uv([0.5, 0.5]), 1.0);
-        assert_eq!(c.at_uv([0.5, 0.95]), 0.0);
+        assert_ne!(placed.coverage_key(), 0, "a raster");
         let base = crate::develop::LocalAmounts::default();
         assert_eq!(placed.local_tone(base, [0.5, 0.5]).exposure, 1.0);
+        assert_eq!(placed.local_tone(base, [0.5, 0.95]).exposure, 0.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

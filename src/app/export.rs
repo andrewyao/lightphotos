@@ -1026,13 +1026,19 @@ mod status_tests {
         }
         // A camera time in UTC-7: the server should see 2024-06-02T01:00Z.
         let a = dir.join("a.jpg");
-        let stamp =
-            crate::decode::image_decode::CaptureStamp::new("2024:06:01 18:00:00", Some("-07:00"));
         let tagged = {
             use crate::decode::image_encode::{Embedded, Encoding, Pixels, Prepared};
-            use crate::export::metadata::{block, fields, Keep, SourceMeta};
-            let source = SourceMeta::from_parts(None, stamp);
-            let exif = block(&fields(&source, Keep::default(), "", 300, 200)).unwrap();
+            use exif::{Field, In, Tag, Value};
+            let ascii = |tag, s: &str| Field {
+                tag,
+                ifd_num: In::PRIMARY,
+                value: Value::Ascii(vec![s.as_bytes().to_vec()]),
+            };
+            let exif = crate::export::metadata::block(&[
+                ascii(Tag::DateTimeOriginal, "2024:06:01 18:00:00"),
+                ascii(Tag::OffsetTimeOriginal, "-07:00"),
+            ])
+            .unwrap();
             let rgba = crate::decode::image_decode::decode(&a, u32::MAX)
                 .unwrap()
                 .rgba;
