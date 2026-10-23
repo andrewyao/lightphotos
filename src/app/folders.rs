@@ -1129,4 +1129,52 @@ mod tests {
         assert!(opening);
         assert_eq!(deferred, Some(vec![photo]), "deferred, not dropped");
     }
+
+    /// Review 3.7 round 4: a folder decided read-only earlier in the session
+    /// stays read-only for derived files when a later visit is left while
+    /// its lock is undecided; that visit added nothing to take away.
+    #[test]
+    fn leaving_undecided_keeps_an_earlier_read_only_decision() {
+        use crate::sidecar::{FolderLock, Writer};
+        let (a, a_photo) = one_photo("lock-keep-ro-a");
+        let (b, _) = one_photo("lock-keep-ro-b");
+        let mut app = App::new(None);
+        let other = FolderLock::try_acquire(&a, Writer::Mcp).unwrap();
+        crate::app::test_support::load_folder(&mut app, &a);
+        drop(other);
+        let mut quitting = FolderLock::try_acquire(&a, Writer::App).unwrap();
+        quitting.mark_quitting();
+        app.load_playlist(Playlist::from_dir(&a), a.clone());
+        let opening = app.folder_store.opening();
+        crate::app::test_support::load_folder(&mut app, &b);
+        let still = app.coverage.read_only_photo(&a_photo);
+        drop(quitting);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+        assert!(opening);
+        assert!(still, "decided read-only earlier, so it stays");
+    }
+
+    /// Review 3.7 round 4: after a close, the left visit's cache is neither
+    /// editable nor held, so a carried-over result goes the left-folder way,
+    /// onto the sidecar on disk.
+    #[test]
+    fn a_closed_folder_is_not_held_and_results_land_on_disk() {
+        let (dir, photo) = one_photo("lock-closed-held");
+        let mut app = App::new(None);
+        crate::app::test_support::load_folder(&mut app, &dir);
+        app.close_folder();
+        let held = app.folder_store.holds(&photo);
+        let editable = app.folder_store.editable();
+        app.save_patch(&photo, exposure_patch());
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(5));
+        let after = crate::sidecar::read_record(&photo)
+            .unwrap()
+            .adjustments
+            .exposure;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!held && !editable);
+        assert_eq!(after, 1.0);
+    }
 }
