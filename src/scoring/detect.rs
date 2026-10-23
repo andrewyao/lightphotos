@@ -27,16 +27,6 @@ pub enum DetectError {
     Failed(String),
 }
 
-impl DetectError {
-    /// Whether Vision failed because this machine can't run a model at all,
-    /// as on GitHub's macOS runners: VMs with no GPU or Neural Engine.
-    /// Tests that need a real detection skip on it.
-    pub fn is_no_model_here(&self) -> bool {
-        matches!(self, DetectError::Failed(e)
-            if e.contains("Could not create inference context") || e.contains("Unspecified error"))
-    }
-}
-
 impl fmt::Display for DetectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -426,6 +416,14 @@ mod tests {
 mod file_tests {
     use super::*;
 
+    /// Whether Vision failed because this machine can't run a model at all,
+    /// as on GitHub's macOS runners: VMs with no GPU or Neural Engine.
+    #[cfg(target_os = "macos")]
+    fn no_model_here(e: &DetectError) -> bool {
+        let why = e.to_string();
+        why.contains("Could not create inference context") || why.contains("Unspecified error")
+    }
+
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir =
             std::env::temp_dir().join(format!("lightphotos-detect-{tag}-{}", std::process::id()));
@@ -470,7 +468,7 @@ mod file_tests {
         )
         .unwrap();
         let coverage = match run(&photo, DetectTarget::Subject) {
-            Err(e) if e.is_no_model_here() => {
+            Err(e) if no_model_here(&e) => {
                 eprintln!("skipping: Vision cannot run a model here ({e})");
                 std::fs::remove_dir_all(&dir).unwrap();
                 return;

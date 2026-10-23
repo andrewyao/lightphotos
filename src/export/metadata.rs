@@ -97,9 +97,12 @@ impl SourceMeta {
             .and_then(|t| CaptureStamp::new(&t, text(Tag::OffsetTimeOriginal).as_deref()))
             .or_else(|| self.stamp.clone())
     }
+}
 
-    /// A source known by its parts, such as a test's.
-    pub fn from_parts(exif: Option<exif::Exif>, stamp: Option<CaptureStamp>) -> SourceMeta {
+#[cfg(test)]
+impl SourceMeta {
+    /// A source known by its parts, for this crate's tests.
+    pub(crate) fn from_parts(exif: Option<exif::Exif>, stamp: Option<CaptureStamp>) -> SourceMeta {
         SourceMeta { exif, stamp }
     }
 }

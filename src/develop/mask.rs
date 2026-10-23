@@ -543,11 +543,6 @@ impl MaskSet {
         }
     }
 
-    /// The detected coverage layer `i` renders with, if it has one.
-    pub fn coverage(&self, i: usize) -> Option<&Arc<Coverage>> {
-        self.layers.get(i).and_then(|(_, c)| c.as_ref())
-    }
-
     /// The masks placed on a photo whose width over height is `aspect`, each
     /// brush mask with its strokes' raster. What the Loupe uploads and every
     /// bake and histogram samples, so none can render a brush mask without
@@ -580,11 +575,6 @@ pub struct PhotoMasks {
 impl PhotoMasks {
     pub fn is_empty(&self) -> bool {
         self.layers.is_empty()
-    }
-
-    /// The coverage layer `i` renders with, if it has one.
-    pub fn coverage(&self, i: usize) -> Option<&Arc<Coverage>> {
-        self.layers.get(i).and_then(|(_, c)| c.as_ref())
     }
 
     /// The sliders at source UV `uv`: `base` plus every mask's weighted
@@ -766,6 +756,12 @@ impl From<&Mask> for GpuMask {
 mod tests {
     use super::*;
 
+    /// The coverage layer `i` of a [`MaskSet`] or [`PhotoMasks`] renders
+    /// with, if it has one.
+    fn coverage(layers: &[(Mask, Option<Arc<Coverage>>)], i: usize) -> Option<&Arc<Coverage>> {
+        layers.get(i).and_then(|(_, c)| c.as_ref())
+    }
+
     fn radial(feather: f32) -> Mask {
         Mask::radial([0.5, 0.5], [0.2, 0.1]).with_feather(feather)
     }
@@ -901,7 +897,7 @@ mod tests {
         });
         assert_eq!(asked, [DetectTarget::Subject, DetectTarget::Sky]);
         assert_eq!(set.layers.len(), 4);
-        assert!(set.coverage(0).is_some() && set.coverage(1).is_none());
+        assert!(coverage(&set.layers, 0).is_some() && coverage(&set.layers, 1).is_none());
         let set = set.on_photo(2.0);
 
         let packed = set.pack_coverage();
@@ -1107,14 +1103,17 @@ mod tests {
         empty.invert = true;
         empty.amounts.temp = 10.0;
         let set = MaskSet::new(&[m.clone(), empty], |_| None);
-        assert!(set.coverage(0).is_none(), "no raster until it has a shape");
+        assert!(
+            coverage(&set.layers, 0).is_none(),
+            "no raster until it has a shape"
+        );
         let placed = set.on_photo(1.5);
         let base = LocalAmounts::default();
         assert_eq!(placed.local_tone(base, [0.3, 0.5]).exposure, 1.0);
         assert_eq!(placed.local_tone(base, [0.8, 0.5]).exposure, 0.0);
         assert_eq!(placed.local_tone(base, [0.8, 0.9]).temp, 10.0);
         let gpu = placed.gpu_masks();
-        let raster = placed.coverage(0).unwrap();
+        let raster = coverage(&placed.layers, 0).unwrap();
         assert_eq!(gpu[0].params[0], 2.0);
         assert_eq!(gpu[0].coverage, [0, raster.width(), raster.height(), 0]);
         let after = raster.alpha().len() as u32;
