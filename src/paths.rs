@@ -181,7 +181,7 @@ pub fn write_atomic_in_dir(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::other("path has no parent"))?;
     refuse_linked_sidecar_dir(parent)?;
     create_sidecar_dir(parent)?;
-    write_atomic(file, bytes)
+    write_atomic(file, bytes, None)
 }
 
 /// Remove `file`. A file that is already gone counts as removed.
@@ -199,9 +199,15 @@ pub fn remove_if_present(file: &Path) -> std::io::Result<()> {
 /// which refuses any existing name, a symlink included. A folder someone else
 /// prepared can plant a link at a temp name, and a plain write would follow it
 /// and overwrite whatever it points at.
+///
+/// `mode` sets the Unix permission bits of the new file (`0o600` for a file
+/// only its owner may read), less the umask. The temp file is created with
+/// them, so the content is never readable more widely, and the rename
+/// replaces whatever bits `dest` had. `None` gives the default (`0o666` less
+/// the umask). Ignored off Unix.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    write_atomic_then(dest, bytes, || Ok(()))
+pub fn write_atomic(dest: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
+    write_atomic_then(dest, bytes, mode, || Ok(()))
 }
 
 /// [`write_atomic`], running `before` once the temp file is written and
@@ -211,6 +217,7 @@ pub fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
 pub fn write_atomic_then(
     dest: &Path,
     bytes: &[u8],
+    mode: Option<u32>,
     before: impl FnOnce() -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     use std::io::Write;
@@ -224,11 +231,15 @@ pub fn write_atomic_then(
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         name.push(format!(".{}-{n}.tmp", std::process::id()));
         let tmp = PathBuf::from(name);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-        {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, mode);
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        match opts.open(&tmp) {
             Ok(file) => break (tmp, file),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempts < 100 => {
                 attempts += 1;
@@ -367,7 +378,7 @@ mod tests {
         std::fs::create_dir_all(side.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &side).unwrap();
 
-        assert!(write_atomic(&side.join("a.xmp"), b"x").is_err());
+        assert!(write_atomic(&side.join("a.xmp"), b"x", None).is_err());
         assert!(write_atomic_in_dir(&side.join("groups").join("g.json"), b"x").is_err());
         assert!(remove_if_present(&side.join("keep")).is_err());
         let left: Vec<_> = std::fs::read_dir(&elsewhere)
@@ -385,6 +396,24 @@ mod tests {
             .join("a.xmp");
         assert!(write_atomic_in_dir(&real, b"x").is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A mode given to `write_atomic` holds even over a file that was
+    /// readable by everyone.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_gives_the_new_file_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("lp-write-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("key");
+        write_atomic(&path, b"old", Some(0o644)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_atomic(&path, b"new", Some(0o600)).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     /// A sparse file claims its length without the disk to back it, so the
@@ -475,7 +504,7 @@ mod tests {
             std::os::unix::fs::symlink(&victim, link).unwrap();
         }
 
-        write_atomic(&dest, b"{}").unwrap();
+        write_atomic(&dest, b"{}", None).unwrap();
         assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
         assert_eq!(std::fs::read(&dest).unwrap(), b"{}");
         std::fs::remove_dir_all(&dir).unwrap();

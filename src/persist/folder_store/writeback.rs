@@ -1104,7 +1104,7 @@ fn replace_unreadable(
         .find(|aside| !aside.exists())
         .ok_or_else(|| format!("could not keep {} aside: no free name", sidecar.display()))?;
     let bytes = serde_json::to_vec_pretty(&rec).map_err(|e| e.to_string())?;
-    crate::paths::write_atomic_then(&sidecar, &bytes, || std::fs::rename(&sidecar, &aside))
+    crate::paths::write_atomic_then(&sidecar, &bytes, None, || std::fs::rename(&sidecar, &aside))
         .map_err(|e| format!("could not save {}: {e}", name(path)))?;
     super::locks::notice(
         shared,

@@ -10,6 +10,9 @@
     clippy::unreachable,
     clippy::undocumented_unsafe_blocks
 )]
+// Tests write their fixtures with `std::fs::write`; clippy.toml says why
+// non-test code may not.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 //! `score_probe`: does the quality score agree with the user? Given a folder,
 //! it scores every photo through `quality.rs` and `judge.rs`, the same

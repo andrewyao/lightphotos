@@ -261,7 +261,7 @@ impl FolderLock {
             return;
         };
         let line = format!("{pid} {}\n", Writer::AppQuitting.as_str());
-        if crate::paths::write_atomic(&self.who, line.as_bytes()).is_ok() {
+        if crate::paths::write_atomic(&self.who, line.as_bytes(), None).is_ok() {
             self.line = line;
         }
     }
@@ -336,7 +336,7 @@ impl FolderLock {
         }
         let line = format!("{} {}\n", std::process::id(), who.as_str());
         let who_path = sidecars.join(WHO_FILE);
-        if let Err(e) = crate::paths::write_atomic(&who_path, line.as_bytes()) {
+        if let Err(e) = crate::paths::write_atomic(&who_path, line.as_bytes(), None) {
             // The holder's name is for messages only; the lock still holds.
             eprintln!("[sidecar] could not name the lock holder: {e}");
         }

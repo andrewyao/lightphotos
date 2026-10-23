@@ -6,6 +6,7 @@
 //! write 16-bit TIFF through `kamadak-exif`'s TIFF writer, lossless WebP
 //! through `image-webp` and AVIF through `ravif`, each with an EXIF block.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 #[cfg(target_os = "macos")]
@@ -150,7 +151,7 @@ pub fn encode_jpeg_to_vec(
 }
 
 /// Encode `rgba` to a JPEG file at `out` with `mozjpeg-rs`.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
 #[hotpath::measure]
 pub fn encode_jpeg(
     out: &Path,
@@ -160,7 +161,7 @@ pub fn encode_jpeg(
     quality: JpegQuality,
 ) -> Result<(), String> {
     let jpeg_data = encode_jpeg_to_vec(width, height, rgba, quality)?;
-    std::fs::write(out, jpeg_data).map_err(|e| e.to_string())
+    crate::paths::write_atomic(out, &jpeg_data, None).map_err(|e| e.to_string())
 }
 
 /// Baked pixels to encode: tightly packed sRGB RGBA, row-major, opaque.

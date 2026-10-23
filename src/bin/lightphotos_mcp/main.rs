@@ -10,6 +10,9 @@
     clippy::unreachable,
     clippy::undocumented_unsafe_blocks
 )]
+// Tests write their fixtures with `std::fs::write`; clippy.toml says why
+// non-test code may not.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 //! `lightphotos-mcp`: an MCP server over stdio that lets an agent cull, edit
 //! and look at photos. Two modes:

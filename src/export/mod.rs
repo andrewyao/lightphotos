@@ -713,7 +713,7 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
     )?;
     match &job.dest {
         ExportDest::Folder(dest) => {
-            crate::paths::write_atomic(dest, &file).map_err(|e| format!("write: {e}"))?;
+            crate::paths::write_atomic(dest, &file, None).map_err(|e| format!("write: {e}"))?;
             Ok(ExportLanding::File(dest.clone()))
         }
         ExportDest::Immich {

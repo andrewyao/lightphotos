@@ -10,6 +10,9 @@
     clippy::unreachable,
     clippy::undocumented_unsafe_blocks
 )]
+// Tests write their fixtures with `std::fs::write`; clippy.toml says why
+// non-test code may not.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 // A console-subsystem program gets a console window of its own when launched
 // from Explorer. Debug builds keep it for their log output.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]

@@ -879,7 +879,7 @@ impl Driver {
         let path = self.out_dir.join(format!("{slug}.png"));
         let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
         let png = frame.to_png().map_err(|e| err(&e))?;
-        std::fs::write(&path, png).map_err(|e| err(&e))?;
+        crate::paths::write_atomic(&path, &png, None).map_err(|e| err(&e))?;
         eprintln!(
             "[drive] wrote {} ({}x{})",
             path.display(),

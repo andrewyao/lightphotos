@@ -10,6 +10,9 @@
     clippy::unreachable,
     clippy::undocumented_unsafe_blocks
 )]
+// Tests write their fixtures with `std::fs::write`; clippy.toml says why
+// non-test code may not.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 //! `seg_probe`: writes Vision subject masks as images so a person can check
 //! `segmentation.rs` on real photos. For each input it writes, into the
@@ -116,7 +119,8 @@ fn write_coverage(path: &Path, out: &Path) -> Result<(), String> {
     let coverage =
         detect(&DetectInput::file(path), DetectTarget::Subject).map_err(|e| e.to_string())?;
     let bytes = coverage.encode().map_err(|e| e.to_string())?;
-    std::fs::write(out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
+    lightphotos::paths::write_atomic(out, &bytes, None)
+        .map_err(|e| format!("{}: {e}", out.display()))?;
     let back = Coverage::decode(
         &std::fs::read(out).map_err(|e| e.to_string())?,
         coverage.id(),

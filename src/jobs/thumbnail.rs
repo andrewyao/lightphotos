@@ -503,7 +503,7 @@ fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
             &img.rgba,
             crate::decode::image_encode::JpegQuality::Thumbnail,
         )?;
-        crate::paths::write_atomic(file, &jpeg).map_err(|e| format!("write: {e}"))
+        crate::paths::write_atomic(file, &jpeg, None).map_err(|e| format!("write: {e}"))
     }
     // ImageIO writes the file itself and replaces a symlink rather than
     // following it. Append `.tmp` to the full name so `sweep_orphans` can
