@@ -184,6 +184,19 @@ pub(super) struct Writeback {
     /// The folder locks this store holds. See [`super::locks`].
     #[cfg(not(target_arch = "wasm32"))]
     locks: super::locks::SharedLocks,
+    /// Writes waiting for a folder another program holds, in order. Shared
+    /// with the writer thread, so a writer that dies leaves them for the
+    /// next one, or for the inline path, to try again.
+    #[cfg(not(target_arch = "wasm32"))]
+    parked: Parked,
+    /// Each queued photo folder's key, as spelled, worked out once when a
+    /// write for it is first queued, so nothing here touches the disk later.
+    #[cfg(not(target_arch = "wasm32"))]
+    folder_keys: HashMap<PathBuf, Option<crate::sidecar::FolderKey>>,
+    /// Queued, running or parked writes per folder. See
+    /// [`Writeback::writes_pending_in`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pending_folders: HashMap<crate::sidecar::FolderKey, u32>,
 
     done_tx: Sender<Done>,
     done_rx: Receiver<Done>,
@@ -215,6 +228,12 @@ impl Writeback {
             loads: 0,
             #[cfg(not(target_arch = "wasm32"))]
             locks,
+            #[cfg(not(target_arch = "wasm32"))]
+            parked: Parked::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            folder_keys: HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            pending_folders: HashMap::new(),
             done_tx,
             done_rx,
             #[cfg(not(target_arch = "wasm32"))]
@@ -337,6 +356,10 @@ impl Writeback {
         let seq = self.writes;
         self.outstanding.insert(seq);
         *self.pending.entry(path.to_path_buf()).or_insert(0) += 1;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(key) = self.folder_key_of(path) {
+            *self.pending_folders.entry(key).or_insert(0) += 1;
+        }
         let op = match (op, self.authored.get(path).map(|a| &a.op)) {
             (WriteOp::Patch(patch), Some(WriteOp::Put(rec))) => {
                 let mut rec = rec.clone();
@@ -357,6 +380,15 @@ impl Writeback {
 
     fn retire(&mut self, path: &Path, seq: u64) {
         self.outstanding.remove(&seq);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(key) = self.folder_key_of(path) {
+            if let Some(n) = self.pending_folders.get_mut(&key) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    self.pending_folders.remove(&key);
+                }
+            }
+        }
         if let Some(inflight) = self.pending.get_mut(path) {
             *inflight -= 1;
             if *inflight == 0 {
@@ -404,16 +436,59 @@ impl Writeback {
         }
     }
 
-    /// Without a worker thread the write runs here; one that would park
-    /// runs unlocked instead, since nothing would try it again.
+    /// Without a worker thread the write runs here, under the same lock
+    /// rules: one that would park joins the parked writes, behind any for
+    /// its folder, and is tried again on the next write or flush.
     fn perform_inline(&self, path: &Path, seq: u64, op: &WriteOp) {
         let mut locks = super::locks::SaveLocks::new(self.locks.clone());
-        let err = match perform_locked(&mut locks, path, op) {
-            Saved::Done(result) => result.err(),
-            Saved::Parked => perform(path, op).err(),
-        };
+        let mut parked = lock_parked(&self.parked);
+        retry_parked(&mut parked, &mut locks, &self.done_tx);
+        if !behind_parked(&parked, path, op) {
+            match perform_locked(&mut locks, path, op) {
+                Saved::Done(result) => {
+                    let _ = self.done_tx.send((path.to_path_buf(), seq, result.err()));
+                }
+                Saved::Parked => parked.push_back((path.to_path_buf(), seq, op.clone())),
+            }
+        } else {
+            parked.push_back((path.to_path_buf(), seq, op.clone()));
+        }
+        drop(parked);
         locks.release_except(None);
-        let _ = self.done_tx.send((path.to_path_buf(), seq, err));
+    }
+
+    /// Try the parked writes again here, for when no writer thread runs.
+    fn retry_parked_inline(&self) {
+        let mut locks = super::locks::SaveLocks::new(self.locks.clone());
+        retry_parked(&mut lock_parked(&self.parked), &mut locks, &self.done_tx);
+        locks.release_except(None);
+    }
+
+    /// The key of the photo folder `path` writes into, worked out on its
+    /// first write and then kept.
+    fn folder_key_of(&mut self, path: &Path) -> Option<crate::sidecar::FolderKey> {
+        let dir = photo_folder(path)?;
+        if let Some(key) = self.folder_keys.get(dir) {
+            return key.clone();
+        }
+        let key = crate::sidecar::FolderKey::of(dir);
+        self.folder_keys.insert(dir.to_path_buf(), key.clone());
+        key
+    }
+
+    /// The key of the folder `op` writes into, as [`Self::folder_key_of`].
+    pub(super) fn op_folder_key(
+        &mut self,
+        path: &Path,
+        op: &WriteOp,
+    ) -> Option<crate::sidecar::FolderKey> {
+        let dir = op_folder(path, op)?;
+        if let Some(key) = self.folder_keys.get(dir) {
+            return key.clone();
+        }
+        let key = crate::sidecar::FolderKey::of(dir);
+        self.folder_keys.insert(dir.to_path_buf(), key.clone());
+        key
     }
 
     fn sender(&mut self) -> Option<&Sender<(PathBuf, u64, WriteOp)>> {
@@ -421,9 +496,10 @@ impl Writeback {
             let (tx, rx) = channel::<(PathBuf, u64, WriteOp)>();
             let done_tx = self.done_tx.clone();
             let locks = super::locks::SaveLocks::new(self.locks.clone());
+            let parked = self.parked.clone();
             let spawned = std::thread::Builder::new()
                 .name("folder-store-write".into())
-                .spawn(move || write_loop(&rx, &done_tx, locks));
+                .spawn(move || write_loop(&rx, &done_tx, locks, &parked));
             match spawned {
                 Ok(handle) => {
                     self.worker = Some(handle);
@@ -456,6 +532,13 @@ impl Writeback {
             let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
                 break;
             };
+            // Without a writer thread, parked writes are tried here.
+            let left = if self.tx.is_none() {
+                self.retry_parked_inline();
+                left.min(std::time::Duration::from_millis(100))
+            } else {
+                left
+            };
             match self.done_rx.recv_timeout(left) {
                 Ok((path, seq, err)) => {
                     self.retire(&path, seq);
@@ -463,6 +546,7 @@ impl Writeback {
                         errors.push(e);
                     }
                 }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if self.tx.is_none() => {}
                 Err(_) => break,
             }
         }
@@ -509,11 +593,11 @@ fn write_loop(
     rx: &std::sync::mpsc::Receiver<(PathBuf, u64, WriteOp)>,
     done_tx: &Sender<Done>,
     mut locks: super::locks::SaveLocks,
+    shared: &Parked,
 ) {
     use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
-    let mut parked: std::collections::VecDeque<(PathBuf, u64, WriteOp)> =
-        std::collections::VecDeque::new();
     loop {
+        let waiting = !lock_parked(shared).is_empty();
         let next = match rx.try_recv() {
             Ok(next) => Some(next),
             Err(TryRecvError::Disconnected) => None,
@@ -521,32 +605,28 @@ fn write_loop(
                 // Idle: a left folder's lock goes now, so the other
                 // program can get in.
                 locks.release_except(None);
-                if parked.is_empty() {
-                    rx.recv().ok()
-                } else {
+                if waiting {
                     match rx.recv_timeout(PARKED_RETRY) {
                         Ok(next) => Some(next),
                         Err(RecvTimeoutError::Timeout) => {
-                            retry_parked(&mut parked, &mut locks, done_tx);
+                            retry_parked(&mut lock_parked(shared), &mut locks, done_tx);
                             continue;
                         }
                         Err(RecvTimeoutError::Disconnected) => None,
                     }
+                } else {
+                    rx.recv().ok()
                 }
             }
         };
+        let mut parked = lock_parked(shared);
+        retry_parked(&mut parked, &mut locks, done_tx);
         let Some((path, seq, op)) = next else {
-            retry_parked(&mut parked, &mut locks, done_tx);
+            drop(parked);
             locks.release_except(None);
             return;
         };
-        retry_parked(&mut parked, &mut locks, done_tx);
-        let behind = op_key(&path, &op).is_some_and(|key| {
-            parked
-                .iter()
-                .any(|(p, _, o)| op_key(p, o).as_ref() == Some(&key))
-        });
-        if behind {
+        if behind_parked(&parked, &path, &op) {
             parked.push_back((path, seq, op));
             continue;
         }
@@ -557,6 +637,38 @@ fn write_loop(
             Saved::Parked => parked.push_back((path, seq, op)),
         }
     }
+}
+
+/// Writes waiting for a folder another program holds, shared by the
+/// writer thread and the inline path.
+#[cfg(not(target_arch = "wasm32"))]
+type Parked = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<(PathBuf, u64, WriteOp)>>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_parked(
+    parked: &Parked,
+) -> std::sync::MutexGuard<'_, std::collections::VecDeque<(PathBuf, u64, WriteOp)>> {
+    parked
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Whether a write for `path` must wait behind a parked one for its folder,
+/// so writes to one folder keep their order.
+#[cfg(not(target_arch = "wasm32"))]
+fn behind_parked(
+    parked: &std::collections::VecDeque<(PathBuf, u64, WriteOp)>,
+    path: &Path,
+    op: &WriteOp,
+) -> bool {
+    if parked.is_empty() {
+        return false;
+    }
+    op_key(path, op).is_some_and(|key| {
+        parked
+            .iter()
+            .any(|(p, _, o)| op_key(p, o).as_ref() == Some(&key))
+    })
 }
 
 /// Try the parked writes again, in order; a folder still held keeps the
@@ -628,16 +740,11 @@ fn perform_locked(locks: &mut super::locks::SaveLocks, path: &Path, op: &WriteOp
 impl Writeback {
     /// Whether a write into the folder `key`, a photo's or one of its
     /// groups', is still queued, running or parked.
+    ///
+    /// It reads only the counts kept as writes are queued and retired, so
+    /// it never touches the disk.
     pub(super) fn writes_pending_in(&self, key: &crate::sidecar::FolderKey) -> bool {
-        let mut seen: HashMap<&Path, bool> = HashMap::new();
-        self.pending.keys().any(|p| {
-            let Some(dir) = photo_folder(p) else {
-                return false;
-            };
-            *seen
-                .entry(dir)
-                .or_insert_with(|| crate::sidecar::FolderKey::of(dir).as_ref() == Some(key))
-        })
+        self.pending_folders.contains_key(key)
     }
 }
 
@@ -972,6 +1079,84 @@ mod tests {
 
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("1 photos'"), "{errors:?}");
+    }
+
+    fn temp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lightphotos-wb-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn rated(stars: u8) -> WriteOp {
+        WriteOp::Put(Box::new(ImageRecord {
+            rating: Some(stars),
+            ..Default::default()
+        }))
+    }
+
+    /// Review 3.7 #3: with no writer thread, a write into a folder another
+    /// program holds is parked like any other, not written unlocked, and
+    /// lands once the folder is free.
+    #[test]
+    fn an_inline_write_into_a_held_folder_parks_too() {
+        use crate::sidecar::{FolderLock, Writer};
+        let dir = temp("inline-park");
+        let path = dir.join("a.jpg");
+        let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
+        let mut wb = new_wb();
+        let (tx, rx) = channel();
+        drop(rx);
+        wb.tx = Some(tx);
+        wb.enqueue(&path, rated(3));
+        let while_held = crate::sidecar::read_record(&path).unwrap().rating;
+        drop(other);
+        let errors = wb.flush_blocking(std::time::Duration::from_secs(5));
+        let after = crate::sidecar::read_record(&path).unwrap().rating;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(while_held, None, "nothing written while held");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(after, Some(3));
+        assert_eq!(wb.backlog(), 0);
+    }
+
+    /// Review 3.7 #7: parked writes live outside the writer thread, so a
+    /// writer that is gone leaves them for the inline path, and none is
+    /// lost or left pending.
+    #[test]
+    fn parked_writes_outlive_their_writer() {
+        let dir = temp("parked-outlive");
+        let path = dir.join("a.jpg");
+        let mut wb = new_wb();
+        // As a writer thread leaves it when it stops: one write parked.
+        let seq = wb.accept(&path, &rated(4));
+        lock_parked(&wb.parked).push_back((path.clone(), seq, rated(4)));
+        let errors = wb.flush_blocking(std::time::Duration::from_secs(5));
+        let after = crate::sidecar::read_record(&path).unwrap().rating;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(after, Some(4));
+        assert_eq!(wb.backlog(), 0);
+    }
+
+    /// Review 3.7 #8: a folder's pending count is kept as writes are queued,
+    /// so it still holds when the folder can no longer be looked up (here
+    /// renamed away), and settle never touches the disk.
+    #[test]
+    fn a_folders_pending_writes_are_counted_without_the_disk() {
+        use crate::sidecar::{FolderKey, FolderLock, Writer};
+        let dir = temp("pending-count");
+        let key = FolderKey::of(&dir).unwrap();
+        let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
+        let mut wb = new_wb();
+        wb.enqueue(&dir.join("a.jpg"), rated(2));
+        let moved = dir.with_extension("moved");
+        let _ = std::fs::remove_dir_all(&moved);
+        std::fs::rename(&dir, &moved).unwrap();
+        let pending = wb.writes_pending_in(&key);
+        drop(other);
+        let _ = std::fs::remove_dir_all(&moved);
+        assert!(pending, "the parked write still counts for its folder");
     }
 
     /// A worker that has died must not swallow the edits sent to it.
