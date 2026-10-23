@@ -177,7 +177,8 @@ Every channel signs in and obeys the anchor rule. See
 
 `bin/lightphotos_mcp/` is a separate binary. It links only the lib. With `--attach`, it
 sends each tool call to `shell/control/tcp.rs`. With `--folder`, no app runs: it writes the
-sidecars and renders through `export/`.
+sidecars and renders through `export/`. It takes the folder lock for each write, and refuses
+while the app has the folder open (see [the folder lock](design/folder-lock.md)).
 
 `scoring/facequality.rs`, `scoring/segmentation.rs` and the aesthetics part of
 `scoring/judge.rs` build on all platforms. On Linux, Windows and the browser, they return
