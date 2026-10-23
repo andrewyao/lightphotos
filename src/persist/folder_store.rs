@@ -25,15 +25,6 @@ mod writeback;
 pub(crate) use writeback::{changed_onto, LoadMark, Patch};
 use writeback::{WriteOp, Writeback};
 
-/// A photo's record from before a write held back while its folder opens.
-#[cfg(not(target_arch = "wasm32"))]
-enum Before {
-    /// As loaded; `None` when it had no sidecar.
-    Known(Option<Box<ImageRecord>>),
-    /// The load has not landed yet; it fills this in.
-    Unloaded,
-}
-
 /// Records for the active directory, backed by its sidecar files. `images`
 /// is a read cache keyed by filename, so it answers only for photos in the
 /// active directory. See [`FolderStore::cache_key`].
@@ -67,15 +58,6 @@ pub struct FolderStore {
     /// The open folder's key, for the read-only test on each write.
     #[cfg(not(target_arch = "wasm32"))]
     open_key: Option<crate::sidecar::FolderKey>,
-    /// Writes into the open folder made while its visit is `Opening`, in
-    /// order. Once the visit is decided they are queued, or refused if it
-    /// is read-only.
-    #[cfg(not(target_arch = "wasm32"))]
-    held_back: Vec<(PathBuf, WriteOp)>,
-    /// The record each photo with a held-back write had before it, to put
-    /// back if the visit turns out read-only.
-    #[cfg(not(target_arch = "wasm32"))]
-    held_before: HashMap<OsString, Before>,
     /// The visit changed since the app last asked. See
     /// [`FolderStore::take_visit_changed`].
     #[cfg(not(target_arch = "wasm32"))]
@@ -119,10 +101,6 @@ impl FolderStore {
             visit: locks::Visit::Unlocked,
             #[cfg(not(target_arch = "wasm32"))]
             open_key: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            held_back: Vec::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            held_before: HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             visit_changed: false,
             #[cfg(not(target_arch = "wasm32"))]
@@ -196,7 +174,7 @@ impl FolderStore {
         let photos = crate::navigation::Playlist::from_dir(dir);
         let mark = self.switch_dir(dir, !photos.entries().is_empty());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while self.opening() && std::time::Instant::now() < deadline {
+        while self.visit == locks::Visit::Opening && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(5));
             self.pump();
         }
@@ -224,7 +202,7 @@ impl FolderStore {
     ) -> LoadMark {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.refuse_held_back();
+            self.forget_undecided();
             // A folder opened again may be on another volume now (an SD
             // card mounted at the same path), so its key is worked out afresh.
             self.writeback.forget_folder_key(dir);
@@ -242,8 +220,8 @@ impl FolderStore {
         self.writeback.begin_load()
     }
 
-    /// Take in the open folder's visit: the derived-file writers' set, the
-    /// lockless notice, and the writes held back while it was `Opening`.
+    /// Take in the open folder's visit: the derived-file writers' set and
+    /// the lockless notice.
     #[cfg(not(target_arch = "wasm32"))]
     fn set_visit(&mut self, visit: locks::Visit) {
         if visit == (locks::Visit::Lockless { new: true }) {
@@ -259,56 +237,19 @@ impl FolderStore {
         }
         self.visit = visit;
         self.visit_changed = true;
-        match &self.visit {
-            locks::Visit::Opening => {}
-            locks::Visit::ReadOnly(_) => self.refuse_held_back(),
-            _ => {
-                self.held_before.clear();
-                for (path, op) in std::mem::take(&mut self.held_back) {
-                    self.writeback.enqueue(&path, op);
-                }
-            }
-        }
     }
 
-    /// Drop the writes held back while the visit was `Opening`, put back
-    /// the records they changed, and report their photos as refused, so
-    /// the app puts its own copies back too.
+    /// The open folder is being left: if its lock was never decided, it
+    /// leaves the derived-file writers' read-only set. Only a folder decided
+    /// read-only stays in it.
     #[cfg(not(target_arch = "wasm32"))]
-    fn refuse_held_back(&mut self) {
-        for (name, before) in std::mem::take(&mut self.held_before) {
-            self.dirty.remove(&name);
-            match before {
-                Before::Known(Some(rec)) => {
-                    self.images.insert(name, *rec);
-                }
-                // Not loaded yet: the load fills it in, now it isn't dirty.
-                Before::Known(None) | Before::Unloaded => {
-                    self.images.remove(&name);
-                }
-            }
-            self.sort_revision += 1;
-            self.marks_revision += 1;
-        }
-        for (path, _) in std::mem::take(&mut self.held_back) {
-            if !self.refused.contains(&path) {
-                self.refused.push(path);
-            }
-        }
-    }
-
-    /// Keep `name`'s record from before its first held-back write.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn hold_before(&mut self, name: &OsStr) {
-        if self.visit != locks::Visit::Opening || self.held_before.contains_key(name) {
+    fn forget_undecided(&mut self) {
+        if self.visit != locks::Visit::Opening {
             return;
         }
-        let before = if self.groups.is_some() {
-            Before::Known(self.images.get(name).cloned().map(Box::new))
-        } else {
-            Before::Unloaded
-        };
-        self.held_before.insert(name.to_os_string(), before);
+        if let Some(key) = &self.open_key {
+            self.read_only_folders.remove(key);
+        }
     }
 
     /// The load thread could not start, so nothing is known of the folder's
@@ -317,6 +258,16 @@ impl FolderStore {
     pub(crate) fn fail_open(&mut self) {
         self.locks.leave();
         self.set_visit(locks::Visit::ReadOnly(HeldBy::Unlockable));
+    }
+
+    /// Whether no derived file is written into the open folder now: its
+    /// visit is read-only, or its lock is not decided yet.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn derived_quiet(&self) -> bool {
+        matches!(
+            self.visit,
+            locks::Visit::ReadOnly(_) | locks::Visit::Opening
+        )
     }
 
     /// Whether the visit may sweep derived files: decided and writable.
@@ -335,11 +286,23 @@ impl FolderStore {
         std::mem::take(&mut self.visit_changed)
     }
 
-    /// Whether the folder showing is still opening: its lock and records
-    /// are on their way.
+    /// Whether the open folder takes edits: its lock is decided writable
+    /// (held, lockless, or a folder with no photos) and its sidecars have
+    /// loaded. Before both, an edit could only build a record from an empty
+    /// cache and replace the photo's saved sidecar with it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn editable(&self) -> bool {
+        matches!(
+            self.visit,
+            locks::Visit::Held | locks::Visit::Lockless { .. } | locks::Visit::Unlocked
+        ) && self.groups.is_some()
+    }
+
+    /// Whether the folder showing is still opening: not read-only, and not
+    /// editable yet (its lock undecided, or its sidecars still loading).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn opening(&self) -> bool {
-        self.visit == locks::Visit::Opening
+        self.open_key.is_some() && self.read_only().is_none() && !self.editable()
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -392,7 +355,7 @@ impl FolderStore {
     /// writes have landed.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn leave_dir(&mut self) {
-        self.refuse_held_back();
+        self.forget_undecided();
         self.locks.leave();
         // Before the visit, so a read-only folder left stays in the set.
         self.open_key = None;
@@ -412,8 +375,19 @@ impl FolderStore {
         std::mem::take(&mut self.refused)
     }
 
-    /// Refuse an edit to `path` in a read-only folder, before anything
-    /// changes. True when refused.
+    /// Refuse an edit to `path` in the open folder while it takes none
+    /// (read-only, or still opening), before anything changes. True when
+    /// refused.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refuse(&mut self, path: &Path) -> bool {
+        if self.editable() || !self.in_open_folder(path) {
+            return false;
+        }
+        self.refused.push(path.to_path_buf());
+        true
+    }
+
+    #[cfg(target_arch = "wasm32")]
     fn refuse(&mut self, path: &Path) -> bool {
         if self.read_only().is_none() || !self.in_open_folder(path) {
             return false;
@@ -482,17 +456,6 @@ impl FolderStore {
             for (name, rec) in loaded.images {
                 if !self.dirty.contains(&name) {
                     self.images.insert(name, rec);
-                    continue;
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(before @ Before::Unloaded) = self.held_before.get_mut(&name) {
-                    *before = Before::Known(Some(Box::new(rec)));
-                }
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            for before in self.held_before.values_mut() {
-                if matches!(before, Before::Unloaded) {
-                    *before = Before::Known(None);
                 }
             }
             let names: HashSet<&OsStr> = if loaded.groups.is_empty() {
@@ -639,9 +602,15 @@ impl FolderStore {
         self.update_edits(path, |rec| rec.adjustments = adj);
     }
 
-    /// Whether the cache holds `path`'s record: the photo is in the active
-    /// directory and that directory's load has landed.
+    /// Whether the cache holds `path`'s record to edit: the photo is in the
+    /// active directory and that directory's load has landed. Natively the
+    /// visit must also take edits ([`FolderStore::editable`]); a job result
+    /// for a photo this is false for goes to [`FolderStore::patch_uncached`].
     pub(crate) fn holds(&self, path: &Path) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.editable() {
+            return false;
+        }
         self.cache_key(path).is_some() && self.groups.is_some()
     }
 
@@ -651,13 +620,12 @@ impl FolderStore {
     /// fields survive and a same-named photo in the active directory is never
     /// touched.
     ///
-    /// A photo of the open folder is refused while the visit is read-only,
-    /// as any edit is.
+    /// A job result for the open folder before its visit takes edits (still
+    /// opening, or read-only) comes here too. Like a write into a left
+    /// folder it is parked until the app holds the folder's lock, and lands
+    /// under it; it never lands while another program holds the folder.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn patch_uncached(&mut self, path: &Path, patch: Patch) {
-        if self.refuse(path) {
-            return;
-        }
         self.writeback
             .enqueue(path, WriteOp::Patch(Box::new(patch)));
     }
@@ -757,7 +725,6 @@ impl FolderStore {
     pub fn forget_photos(&mut self, paths: &[PathBuf]) {
         for path in paths {
             if let Some(name) = self.cache_key(path).map(OsStr::to_os_string) {
-                self.hold_before(&name);
                 self.images.remove(&name);
                 self.dirty.insert(name);
                 self.marks_revision += 1;
@@ -811,8 +778,6 @@ impl FolderStore {
             self.note_persist_error(format!("{} is not in the open folder", path.display()));
             return;
         };
-        #[cfg(not(target_arch = "wasm32"))]
-        self.hold_before(&name);
         self.dirty.insert(name.clone());
         let mut rec = self.images.remove(&name).unwrap_or_default();
         let sorted_by = (rec.rating, rec.edited);
@@ -832,23 +797,11 @@ impl FolderStore {
         }
     }
 
-    /// A read-only visit writes nothing into its folder, a photo's removal
-    /// or a group's included. An `Opening` one holds its writes back until
-    /// it is decided.
+    /// Every write goes to the writeback, which lands it under its folder's
+    /// lock, or parks it while another program holds that folder. Edits from
+    /// the user never get here for a folder that takes none (`refuse`).
     #[cfg(not(target_arch = "wasm32"))]
     fn enqueue(&mut self, path: &Path, op: WriteOp) {
-        let undecided = matches!(
-            self.visit,
-            locks::Visit::ReadOnly(_) | locks::Visit::Opening
-        );
-        if let (true, Some(open)) = (undecided, self.open_key.clone()) {
-            if self.writeback.op_folder_key(path, &op) == Some(open) {
-                if self.visit == locks::Visit::Opening {
-                    self.held_back.push((path.to_path_buf(), op));
-                }
-                return;
-            }
-        }
         self.writeback.enqueue(path, op);
     }
 
@@ -1673,29 +1626,32 @@ mod tests {
     }
 
     #[test]
-    fn apply_loaded_does_not_clobber_a_local_write_made_after_switch() {
+    fn an_edit_before_the_load_lands_is_refused_not_written_over_the_sidecar() {
         let dir = temp_folder("folder-store-test");
         let written = dir.join("written.jpg");
         let other = dir.join("other.jpg");
 
-        // `other.jpg` already has a rating on disk from a previous session.
+        // Both already have marks on disk from a previous session.
         let mut seed = FolderStore::with_dir(dir.clone());
         seed.set(&other, 3);
+        seed.set(&written, 2);
+        seed.set_flag(&written, Some(Flag::Pick));
         drop(seed);
 
         let mut cat = FolderStore::new();
         let mark = cat.switch_dir(&dir, true);
-        // A write lands after switch_dir but before the background load,
-        // whose snapshot predates the write, returns.
+        // An edit after switch_dir, before the background load returns,
+        // would build a record from nothing and replace the sidecar.
         cat.set(&written, 5);
-        let loaded = load_sidecars(&dir); // snapshot predates `written`'s sidecar...
+        let refused = cat.take_refused();
+        let loaded = load_sidecars(&dir);
         cat.apply_loaded(&dir, mark, loaded, &images_in(&dir));
+        flush(&mut cat);
 
-        assert_eq!(
-            cat.get(&written),
-            Some(5),
-            "a local write made while a load was in flight must survive apply_loaded"
-        );
+        assert_eq!(refused, std::slice::from_ref(&written));
+        assert_eq!(cat.get(&written), Some(2), "the edit was refused");
+        let on_disk = crate::sidecar::read_record(&written).unwrap();
+        assert_eq!((on_disk.rating, on_disk.flag), (Some(2), Some(Flag::Pick)));
         assert_eq!(
             cat.get(&other),
             Some(3),

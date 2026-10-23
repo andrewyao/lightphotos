@@ -368,8 +368,8 @@ impl App {
             if let Some(loader) = self.loader.as_ref() {
                 loader.set_read_only(folders);
             }
-            let quiet = self.folder_store.read_only().is_some() || self.folder_store.opening();
-            self.signals.set_read_only(quiet);
+            self.signals
+                .set_read_only(self.folder_store.derived_quiet());
         }
     }
 
@@ -381,7 +381,9 @@ impl App {
     /// Refuse a job that would write the open folder while it is read-only,
     /// saying why. True when refused. A folder still opening is not
     /// refused: the job goes ahead or defers as it would while the folder
-    /// loads, and its writes are held back until the visit is decided.
+    /// loads, and a result for a photo the folder store can't take an edit
+    /// for yet is parked until the app holds the folder's lock
+    /// (`save_patch`, docs/design/folder-lock.md rule 5).
     pub(super) fn refuse_if_read_only(&mut self) -> bool {
         let Some(why) = self.folder_read_only_text() else {
             return false;

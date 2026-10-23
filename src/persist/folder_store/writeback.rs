@@ -458,7 +458,7 @@ impl Writeback {
         let mut parked = lock_parked(&self.parked);
         retry_parked(&mut parked, &mut locks, &self.done_tx);
         if !behind_parked(&parked, path, op) {
-            match perform_locked(&mut locks, path, op) {
+            match guarded(path, || perform_locked(&mut locks, path, op)) {
                 Saved::Done(result) => {
                     let _ = self.done_tx.send((path.to_path_buf(), seq, result.err()));
                 }
@@ -485,16 +485,6 @@ impl Writeback {
         self.key_of_dir(dir)
     }
 
-    /// The key of the folder `op` writes into, as [`Self::folder_key_of`].
-    pub(super) fn op_folder_key(
-        &mut self,
-        path: &Path,
-        op: &WriteOp,
-    ) -> Option<crate::sidecar::FolderKey> {
-        let dir = op_folder(path, op)?;
-        self.key_of_dir(dir)
-    }
-
     fn key_of_dir(&mut self, dir: &Path) -> Option<crate::sidecar::FolderKey> {
         if let Some(key) = self.folder_keys.get(dir) {
             return Some(key.clone());
@@ -515,6 +505,24 @@ impl Writeback {
     pub(super) fn note_folder_key(&mut self, dir: &Path, key: crate::sidecar::FolderKey) {
         self.folder_keys.insert(spelled_as_parent(dir), key.clone());
         self.folder_keys.insert(dir.to_path_buf(), key);
+    }
+
+    /// A writer thread that has ended (it should not, short of a panic)
+    /// is let go, so the inline path takes over its parked writes and the
+    /// next write starts a fresh one.
+    fn reap_dead_writer(&mut self) {
+        if self.tx.is_none() {
+            return;
+        }
+        if self.worker.as_ref().is_some_and(|h| !h.is_finished()) {
+            return;
+        }
+        self.tx = None;
+        if let Some(handle) = self.worker.take() {
+            if handle.join().is_err() {
+                eprintln!("[folder store] the sidecar writer stopped; writing inline");
+            }
+        }
     }
 
     fn sender(&mut self) -> Option<&Sender<(PathBuf, u64, WriteOp)>> {
@@ -544,6 +552,7 @@ impl Writeback {
     pub(super) fn pump(&mut self) -> Vec<String> {
         let mut errors = Vec::new();
         self.drain_completions(&mut errors);
+        self.reap_dead_writer();
         // With no writer thread, parked writes are tried here, as often as
         // the writer would.
         if self.tx.is_none() && self.inline_retry.elapsed() >= PARKED_RETRY {
@@ -567,22 +576,24 @@ impl Writeback {
             let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
                 break;
             };
-            // Without a writer thread, parked writes are tried here.
-            let left = if self.tx.is_none() {
+            // A writer that has died is noticed here, and its parked
+            // writes are then tried inline, so nothing waits on it.
+            self.reap_dead_writer();
+            if self.tx.is_none() {
                 self.retry_parked_inline();
-                left.min(std::time::Duration::from_millis(100))
-            } else {
-                left
-            };
-            match self.done_rx.recv_timeout(left) {
+            }
+            match self
+                .done_rx
+                .recv_timeout(left.min(std::time::Duration::from_millis(100)))
+            {
                 Ok((path, seq, err)) => {
                     self.retire(&path, seq);
                     if let Some(e) = err {
                         errors.push(e);
                     }
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if self.tx.is_none() => {}
-                Err(_) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
         if !self.pending.is_empty() {
@@ -665,7 +676,7 @@ fn write_loop(
             parked.push_back((path, seq, op));
             continue;
         }
-        match perform_locked(&mut locks, &path, &op) {
+        match guarded(&path, || perform_locked(&mut locks, &path, &op)) {
             Saved::Done(result) => {
                 let _ = done_tx.send((path, seq, result.err()));
             }
@@ -717,8 +728,22 @@ fn retry_parked(
     retry_parked_with(parked, done_tx, |path, op| perform_locked(locks, path, op));
 }
 
+/// A write that panics (it should not) fails with an error the user sees,
+/// rather than end the writer thread, or stay parked first and end every
+/// writer after it.
+#[cfg(not(target_arch = "wasm32"))]
+fn guarded(path: &Path, write: impl FnOnce() -> Saved) -> Saved {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(write)) {
+        Ok(saved) => saved,
+        Err(_) => Saved::Done(Err(format!(
+            "could not save {}: the write stopped unexpectedly",
+            path.display()
+        ))),
+    }
+}
+
 /// [`retry_parked`] with the write given. Each write leaves the queue only
-/// once it is done, so a panic in one loses none of the others.
+/// once it is done; one that panics fails with an error ([`guarded`]).
 #[cfg(not(target_arch = "wasm32"))]
 fn retry_parked_with(
     parked: &mut std::collections::VecDeque<(PathBuf, u64, WriteOp)>,
@@ -733,7 +758,7 @@ fn retry_parked_with(
             i += 1;
             continue;
         }
-        match write(path, op) {
+        match guarded(path, || write(path, op)) {
             Saved::Done(result) => {
                 let _ = done_tx.send((path.clone(), *seq, result.err()));
                 parked.remove(i);
@@ -1222,20 +1247,20 @@ mod tests {
         let dir = temp("key-afresh");
         let photo = dir.join("a.jpg");
         let mut wb = new_wb();
-        let first = wb.op_folder_key(&photo, &rated(1));
+        let first = wb.folder_key_of(&photo);
         std::fs::remove_dir_all(&dir).unwrap();
-        let gone = wb.op_folder_key(&dir.with_extension("none").join("a.jpg"), &rated(1));
+        let gone = wb.folder_key_of(&dir.with_extension("none").join("a.jpg"));
         std::fs::create_dir_all(&dir).unwrap();
         // Hold the old inode's slot so the new folder can't reuse it.
         let keep = temp("key-afresh-keep");
         wb.forget_folder_key(&dir);
-        let again = wb.op_folder_key(&photo, &rated(1));
+        let again = wb.folder_key_of(&photo);
         let fresh = FolderKey::of(&dir);
         let missing = dir.with_extension("later");
         let _ = std::fs::remove_dir_all(&missing);
-        let none_yet = wb.op_folder_key(&missing.join("a.jpg"), &rated(1));
+        let none_yet = wb.folder_key_of(&missing.join("a.jpg"));
         std::fs::create_dir_all(&missing).unwrap();
-        let found = wb.op_folder_key(&missing.join("a.jpg"), &rated(1));
+        let found = wb.folder_key_of(&missing.join("a.jpg"));
         for d in [&dir, &keep, &missing] {
             let _ = std::fs::remove_dir_all(d);
         }
@@ -1259,7 +1284,7 @@ mod tests {
         let keep = temp("key-count-keep");
         std::fs::create_dir_all(&dir).unwrap();
         wb.forget_folder_key(&dir);
-        let _ = wb.op_folder_key(&photo, &rated(1));
+        let _ = wb.folder_key_of(&photo);
         wb.retire(&photo, seq);
         let still = wb.writes_pending_in(&old);
         for d in [&dir, &keep] {
@@ -1294,40 +1319,57 @@ mod tests {
         assert_eq!(wb.backlog(), 0);
     }
 
-    /// Review 3.7 round 2 #8: a write that panics while the parked writes
-    /// are tried again loses none of the others.
+    /// Review 3.7 round 2 #8 and round 3 #5: a write that panics while
+    /// the parked writes are tried again fails with an error, and neither
+    /// stays first nor takes the others with it.
     #[test]
-    fn a_panic_while_retrying_parked_writes_loses_none() {
+    fn a_parked_write_that_panics_fails_alone_with_an_error() {
         let dir = temp("parked-panic");
         let mut parked = std::collections::VecDeque::new();
         for (seq, name) in (1u64..).zip(["a.jpg", "b.jpg", "c.jpg"]) {
             parked.push_back((dir.join(name), seq, rated(1)));
         }
         let (done_tx, done_rx) = channel();
-        let shared: Parked = std::sync::Arc::new(std::sync::Mutex::new(parked));
-        let for_panic = shared.clone();
-        let unwound = std::panic::catch_unwind(move || {
-            let mut parked = lock_parked(&for_panic);
-            retry_parked_with(&mut parked, &done_tx, |path, _| {
-                if path.ends_with("b.jpg") {
-                    panic!("a write that panics");
-                }
-                Saved::Done(Ok(()))
-            });
+        retry_parked_with(&mut parked, &done_tx, |path, _| {
+            if path.ends_with("b.jpg") {
+                panic!("a write that panics");
+            }
+            Saved::Done(Ok(()))
         });
-        let left: Vec<u64> = lock_parked(&shared)
-            .iter()
-            .map(|(_, seq, _)| *seq)
+        let done: Vec<(u64, bool)> = done_rx
+            .try_iter()
+            .map(|(_, seq, err)| (seq, err.is_some()))
             .collect();
-        let done: Vec<u64> = done_rx.try_iter().map(|(_, seq, _)| seq).collect();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(unwound.is_err());
-        assert_eq!(done, vec![1], "the write before the panic is done");
-        assert_eq!(
-            left,
-            vec![2, 3],
-            "the panicking write and the rest stay parked"
-        );
+        assert_eq!(done, vec![(1, false), (2, true), (3, false)]);
+        assert!(parked.is_empty(), "nothing stays parked behind it");
+    }
+
+    /// Review 3.7 round 3 #6: a writer thread that has died with writes
+    /// parked is noticed by `pump`, which then lands them inline.
+    #[test]
+    fn a_dead_writers_parked_writes_land_from_pump() {
+        let dir = temp("dead-writer-pump");
+        let path = dir.join("a.jpg");
+        let mut wb = new_wb();
+        let (tx, rx) = channel::<(PathBuf, u64, WriteOp)>();
+        let worker = std::thread::spawn(move || drop(rx));
+        while !worker.is_finished() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        wb.tx = Some(tx);
+        wb.worker = Some(worker);
+        let seq = wb.accept(&path, &rated(4));
+        lock_parked(&wb.parked).push_back((path.clone(), seq, rated(4)));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while wb.backlog() > 0 && std::time::Instant::now() < deadline {
+            let _ = wb.pump();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let after = crate::sidecar::read_record(&path).unwrap().rating;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(after, Some(4));
+        assert_eq!(wb.backlog(), 0);
     }
 
     /// A worker that has died must not swallow the edits sent to it.

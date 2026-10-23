@@ -974,70 +974,141 @@ mod tests {
         assert!(!after, "derived writes once it opens writable");
     }
 
-    /// Review 3.7 round 2, finding 3: a job's write while the visit is
-    /// undecided is held back, and lands once the folder opens writable.
+    /// Review 3.7 round 3, finding 1 (data loss): before the folder's
+    /// sidecars have loaded, the visit takes no edit, even with its lock
+    /// held. An edit then would build a default record and its write would
+    /// replace the photo's whole saved sidecar.
     #[test]
-    fn a_write_while_opening_lands_once_writable() {
-        let (dir, photo, old) = quitting_holder("lock-held-back-rw");
+    fn an_edit_before_the_load_lands_is_refused_and_the_sidecar_kept() {
+        use crate::sidecar::Flag;
+        let (dir, photo) = one_photo("lock-edit-before-load");
+        {
+            let mut saved = crate::persist::folder_store::FolderStore::with_dir(dir.clone());
+            saved.set(&photo, 3);
+            saved.set_flag(&photo, Some(Flag::Pick));
+            saved.flush_blocking(std::time::Duration::from_secs(5));
+        }
         let mut app = App::new(None);
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        // The records land; the visit is still undecided.
+        let held = !lock_free(&dir);
+        let not_editable = app.read_only() && app.folder_store.opening();
+        app.folder_store.set(&photo, 5);
+        let refused = app.folder_store.take_refused();
+        settle_visit(&mut app);
+        let editable = !app.read_only();
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(5));
+        let on_disk = crate::sidecar::read_record(&photo).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(held, "the lock is held at once");
+        assert!(not_editable, "but no edit until the sidecars load");
+        assert_eq!(refused, std::slice::from_ref(&photo));
+        assert_eq!(on_disk.rating, Some(3), "the saved sidecar is untouched");
+        assert_eq!(on_disk.flag, Some(Flag::Pick));
+        assert!(editable, "editable once the load lands");
+    }
+
+    /// An Exposure change, as a job's patch.
+    fn exposure_patch() -> crate::persist::folder_store::Patch {
+        let after = crate::develop::Adjustments {
+            exposure: 1.0,
+            ..Default::default()
+        };
+        crate::persist::folder_store::Patch::adjustments(
+            crate::develop::Adjustments::default(),
+            after,
+        )
+    }
+
+    /// Review 3.7 round 3, findings 2-4: a job result carried over into a
+    /// folder another program holds (here the visit is read-only) is
+    /// parked: it never lands while that program holds the folder, and
+    /// lands under the app's own lock once it is free.
+    #[test]
+    fn a_carried_over_result_never_lands_while_another_program_holds_the_folder() {
+        use crate::sidecar::{FolderLock, Writer};
+        let (dir, photo) = one_photo("lock-carried-over");
+        let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
+        let mut app = App::new(None);
+        crate::app::test_support::load_folder(&mut app, &dir);
+        let read_only = app.folder_store.read_only().is_some();
+        app.save_patch(&photo, exposure_patch());
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_millis(600));
+        let while_held = crate::sidecar::read_record(&photo)
+            .unwrap()
+            .adjustments
+            .exposure;
+        let parked = app.folder_store.backlog();
+        drop(other);
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(5));
+        let after = crate::sidecar::read_record(&photo)
+            .unwrap()
+            .adjustments
+            .exposure;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(read_only);
+        assert_eq!(
+            while_held, 0.0,
+            "nothing lands while the other program holds it"
+        );
+        assert_eq!(parked, 1, "parked, not dropped");
+        assert_eq!(after, 1.0, "lands once the folder is free");
+    }
+
+    /// Review 3.7 round 3: a job result while the folder is still opening
+    /// (an app that is quitting holds it) is parked the same way and lands
+    /// once the app holds the folder.
+    #[test]
+    fn a_result_while_opening_lands_once_the_app_holds_the_folder() {
+        let (dir, photo, old) = quitting_holder("lock-result-opening");
+        let mut app = App::new(None);
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
         while app.poll_folder_store_load() {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        app.folder_store.set(&photo, 4);
+        let opening = app.folder_store.opening();
+        app.save_patch(&photo, exposure_patch());
         app.folder_store
-            .flush_blocking(std::time::Duration::from_secs(5));
-        let while_opening = crate::sidecar::read_record(&photo).unwrap().rating;
+            .flush_blocking(std::time::Duration::from_millis(600));
+        let while_opening = crate::sidecar::read_record(&photo)
+            .unwrap()
+            .adjustments
+            .exposure;
         drop(old);
         settle_visit(&mut app);
         app.folder_store
             .flush_blocking(std::time::Duration::from_secs(5));
-        let after = crate::sidecar::read_record(&photo).unwrap().rating;
+        let after = crate::sidecar::read_record(&photo)
+            .unwrap()
+            .adjustments
+            .exposure;
+        let held = !lock_free(&dir);
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(while_opening, None, "held back while opening");
-        assert_eq!(after, Some(4), "written once writable");
+        assert!(opening);
+        assert_eq!(while_opening, 0.0, "parked while the other app holds it");
+        assert_eq!(after, 1.0);
+        assert!(held, "and the app holds the folder now");
     }
 
-    /// Review 3.7 round 2, finding 3: a write held back while opening is
-    /// refused when the folder turns out read-only (here a holder that names
-    /// no one and never lets go), and the cache is put back.
+    /// Review 3.7 round 3, finding 8: a folder left while its lock was
+    /// still undecided does not stay read-only for derived files; only one
+    /// decided read-only does.
     #[test]
-    fn a_write_while_opening_is_refused_when_read_only() {
-        use crate::sidecar::{FolderLock, Writer};
-        let (dir, photo) = one_photo("lock-held-back-ro");
-        let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
-        std::fs::remove_file(
-            dir.join(crate::sidecar::SIDECAR_DIR)
-                .join(crate::sidecar::WHO_FILE),
-        )
-        .unwrap();
+    fn a_folder_left_while_opening_is_not_kept_read_only() {
+        let (a, a_photo, old) = quitting_holder("lock-left-opening");
+        let (b, _) = one_photo("lock-left-opening-b");
         let mut app = App::new(None);
-        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        while app.poll_folder_store_load() {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        app.folder_store.set(&photo, 4);
-        let cached = app.folder_store.get(&photo);
-        // A frame at a time, as the app does, until the wait runs out.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while app.folder_store.opening() && std::time::Instant::now() < deadline {
-            app.folder_store.pump();
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        let read_only = app.folder_store.read_only();
-        let refused = app.folder_store.take_refused();
-        let put_back = app.folder_store.get(&photo);
-        app.folder_store
-            .flush_blocking(std::time::Duration::from_secs(5));
-        let on_disk = crate::sidecar::read_record(&photo).unwrap().rating;
-        drop(other);
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(cached, Some(4), "shown while opening");
-        assert_eq!(read_only, Some(crate::persist::folder_store::HeldBy::Other));
-        assert_eq!(refused, std::slice::from_ref(&photo));
-        assert_eq!(put_back, None, "the cache is put back");
-        assert_eq!(on_disk, None, "nothing written");
+        app.load_playlist(Playlist::from_dir(&a), a.clone());
+        let quiet_while_opening = app.coverage.read_only_photo(&a_photo);
+        crate::app::test_support::load_folder(&mut app, &b);
+        let quiet_after = app.coverage.read_only_photo(&a_photo);
+        drop(old);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+        assert!(quiet_while_opening);
+        assert!(!quiet_after, "left undecided, so not read-only");
     }
 
     /// Review 3.7 round 2, finding 9: Auto Tone while the folder opens
