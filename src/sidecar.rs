@@ -451,11 +451,20 @@ pub fn read_record(photo: &Path) -> Result<ImageRecord, String> {
 /// Why a sidecar couldn't be read.
 #[derive(Debug)]
 pub enum ReadError {
-    /// Opening or reading the file failed; it may pass.
-    Io(String),
+    /// Opening or reading the file failed. `lasting` when it won't pass
+    /// (no permission, not a file).
+    Io { why: String, lasting: bool },
     /// It read, but isn't a record this build understands: it doesn't parse,
     /// or is over [`MAX_SIDECAR_BYTES`].
     Unreadable(String),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn io_error(sidecar: &Path, e: &std::io::Error) -> ReadError {
+    ReadError::Io {
+        why: format!("{}: {e}", sidecar.display()),
+        lasting: lock::lasting(e.kind()),
+    }
 }
 
 /// [`read_record`], telling an I/O failure from a file that read but isn't
@@ -463,18 +472,20 @@ pub enum ReadError {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_record_checked(photo: &Path) -> Result<ImageRecord, ReadError> {
     use std::io::Read;
-    let sidecar =
-        sidecar_path(photo).ok_or_else(|| ReadError::Io("cannot determine sidecar path".into()))?;
+    let sidecar = sidecar_path(photo).ok_or_else(|| ReadError::Io {
+        why: "cannot determine sidecar path".into(),
+        lasting: true,
+    })?;
     let file = match std::fs::File::open(&sidecar) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ImageRecord::default()),
-        Err(e) => return Err(ReadError::Io(format!("{}: {e}", sidecar.display()))),
+        Err(e) => return Err(io_error(&sidecar, &e)),
     };
     let mut bytes = Vec::new();
     (&file)
         .take(MAX_SIDECAR_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| ReadError::Io(format!("{}: {e}", sidecar.display())))?;
+        .map_err(|e| io_error(&sidecar, &e))?;
     parse_record(&bytes, || {
         let saved = file.metadata().ok()?.modified().ok()?;
         Some(saved.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs())
