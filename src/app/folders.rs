@@ -756,4 +756,124 @@ mod tests {
         app.apply_ui_actions(actions);
         assert_eq!(app.folder_sel.as_deref(), Some(b.as_path()));
     }
+
+    /// Review 3.7 #2 and #5: the lock is taken on the load thread, so
+    /// opening returns at once and the visit stays "opening", every edit
+    /// off, until the load lands. A relaunch waits on an app that is still
+    /// quitting for longer than a moment (here 3 s), and then is writable.
+    #[test]
+    fn a_relaunch_waits_off_the_ui_thread_for_a_long_quit() {
+        use crate::app::test_support::wait_for_folder_store_within;
+        use crate::sidecar::{FolderLock, Writer};
+        let (dir, _) = one_photo("lock-long-quit");
+        let mut old = FolderLock::try_acquire(&dir, Writer::App).unwrap();
+        old.mark_quitting();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            drop(old);
+        });
+        let mut app = App::new(None);
+        let started = std::time::Instant::now();
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        let ui_wait = started.elapsed();
+        let opening = app.read_only();
+        let refused = app.refuse_if_read_only();
+        wait_for_folder_store_within(&mut app, std::time::Duration::from_secs(20));
+        let _ = release.join();
+        let read_only = app.folder_store.read_only();
+        let writable = !app.read_only();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            ui_wait < std::time::Duration::from_millis(500),
+            "UI waited {ui_wait:?}"
+        );
+        assert!(opening && refused, "no edit while the folder opens");
+        assert_eq!(read_only, None, "waited for the quitting app");
+        assert!(writable);
+    }
+
+    /// Review 3.7 #5: once the folder store's writes are on the disk at
+    /// quit, the app lets go of its folders, before the slower flushes.
+    #[test]
+    fn quit_lets_go_of_the_folder_once_its_writes_land() {
+        use crate::app::test_support::load_folder;
+        let (dir, photo) = one_photo("lock-quit-release");
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir);
+        app.folder_store.set(&photo, 3);
+        app.folder_store.begin_quit();
+        app.folder_store
+            .flush_blocking(std::time::Duration::from_secs(10));
+        let held = !lock_free(&dir);
+        app.folder_store.release_locks();
+        let free = lock_free(&dir);
+        let rated = crate::sidecar::read_record(&photo).unwrap().rating;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(held, "held until released");
+        assert!(free, "released after the flush");
+        assert_eq!(rated, Some(3));
+    }
+
+    /// Review 3.7 #6: a folder opened read-only stays read-only for derived
+    /// files after the user moves on, so coverage or thumbnail work still
+    /// running for it writes nothing. Reopening it writable clears that.
+    #[test]
+    fn a_read_only_folder_left_still_gets_no_derived_files() {
+        use crate::app::test_support::load_folder;
+        use crate::sidecar::{FolderLock, Writer};
+        let (ro, ro_photo) = one_photo("lock-derived-ro");
+        let (rw, rw_photo) = one_photo("lock-derived-rw");
+        let other = FolderLock::try_acquire(&ro, Writer::Mcp).unwrap();
+        let mut app = App::new(None);
+        load_folder(&mut app, &ro);
+        load_folder(&mut app, &rw);
+        let left_ro = app.coverage.read_only_photo(&ro_photo);
+        let open_rw = app.coverage.read_only_photo(&rw_photo);
+        drop(other);
+        load_folder(&mut app, &ro);
+        let reopened = app.coverage.read_only_photo(&ro_photo);
+        let _ = std::fs::remove_dir_all(&ro);
+        let _ = std::fs::remove_dir_all(&rw);
+        assert!(left_ro, "still read-only after moving on");
+        assert!(!open_rw);
+        assert!(!reopened, "writable once reopened free");
+    }
+
+    /// Review 3.7 #1: a read-only visit writes no signal cache, so it never
+    /// sweeps or replaces the other program's file.
+    #[test]
+    fn a_read_only_visit_writes_no_signal_cache() {
+        use crate::app::test_support::load_folder;
+        use crate::persist::signalcache::Signal;
+        use crate::scoring::facequality::FaceQuality;
+        use crate::sidecar::{FolderLock, Writer, SIDECAR_DIR};
+        let (dir, photo) = one_photo("lock-signals");
+        let other = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir);
+        while app.poll_signal_load() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let faces = FaceQuality {
+            faces: 1,
+            min_eye_openness: None,
+            frame: None,
+        };
+        app.signals.record(&photo, Signal::Faces(faces));
+        app.signals
+            .flush_blocking(std::time::Duration::from_secs(5));
+        let (empty, _) = one_photo("lock-signals-next");
+        load_folder(&mut app, &empty);
+        while app.poll_signal_load() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let written = dir
+            .join(SIDECAR_DIR)
+            .join(crate::persist::signalcache::CACHE_FILE)
+            .exists();
+        drop(other);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&empty);
+        assert!(!written, "a read-only visit wrote the signal cache");
+    }
 }

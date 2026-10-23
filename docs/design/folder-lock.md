@@ -27,7 +27,11 @@ Two programs must not write one folder's sidecars at the same time.
    opens the folder read-only.
 3. **Read-only is decided once, at open, and is shown.** It lasts for the
    visit. Every edit control is off. Nothing is written into the folder.
-4. **Nothing waits on the UI thread.** No lock call blocks.
+   Until the decision lands (with the folder's records) the folder is
+   "opening": edit controls are off and nothing derived is written.
+4. **Nothing waits on the UI thread.** The lock is taken on the thread
+   that loads the folder's sidecars, before it reads them. Any wait for
+   the lock is there.
 5. **A crash never blocks anyone.** The OS releases the lock.
 
 ## 3. Folder key
@@ -48,24 +52,24 @@ No `Path` comparison of folders outside that type.
 ## 4. Lock lifetime (app)
 
 ```
-open(A) --try once--> Held(A) --leave--> Draining(A) --queue for A empty--> released
+open(A) --load thread--> Held(A) --leave--> Draining(A) --queue for A empty--> released
             |                                 ^
             |                                 | reopen(A) takes it back
             +--busy, named holder--> ReadOnly visit (no lock, nothing written)
             +--busy, unnamed--> retry <= 5 x 20 ms, then ReadOnly
             +--no lock support--> Lockless visit (writes, notice once)
-quit: OS releases.   crash: OS releases.   relaunch: the old process is gone,
+quit: released after the sidecar writes land.   crash: OS releases.   relaunch: the old process is gone,
 so its lock is gone; a holder line naming a dead pid is ignored.
 ```
 
 | Event | Lock |
 |---|---|
-| Open folder with photos | taken by the UI thread, no wait |
+| Open folder with photos | taken by the load thread before it reads the sidecars; the visit is "opening" until the result arrives with the records |
 | Open folder without photos | none taken; nothing written |
 | Leave / close | kept until every queued write for the folder has landed |
-| Write into a folder the app has left | the writer thread takes the folder's lock once (no wait). It lets go as soon as the next write is for another folder, or the queue is empty. If another program holds it, the write is **parked and tried again** about every 0.5 s, and at quit (not dropped: rule 1). Later writes for that folder wait behind it, so the order stays |
-| Quit | the app first marks its holder lines `app-quitting`; queued writes flush; then the OS releases |
-| Relaunch while the old process still exits | a holder line `app-quitting` with another pid: try again for up to 1 s |
+| Write into a folder the app has left | the writer thread takes the folder's lock once (no wait). It lets go as soon as the next write is for another folder, or the queue is empty. If another program holds it, the write is **parked and tried again** about every 0.5 s, and at quit (not dropped: rule 1). Later writes for that folder wait behind it, so the order stays. A write done inline (no writer thread) parks the same way. Parked writes live in state shared with the writer, so they outlive a writer thread that dies |
+| Quit | the app first marks its holder lines `app-quitting`; queued writes flush; then it lets go of every folder whose writes have all landed, before the catalog and signal flushes. A folder with a write left keeps its lock until the process ends |
+| Relaunch while the old process still exits | a holder line `app-quitting`: the load thread tries again while that holder lives, up to about 15 s |
 
 One owner object holds each `FolderLock`. The UI thread and the writer
 thread hand locks over through it; no thread holds a mutex across I/O,
@@ -88,9 +92,14 @@ and a lock our process holds is never "busy" to our own process.
 | sidecars, groups | coverage files (even if they read as corrupt) |
 | coverage files (detection runs in memory) | thumbnails, orphan sweeps |
 | thumbnail cache entries | `.lock.who` of the holder |
+| signal cache (kept in memory) | signal cache entries (no orphan sweep) |
 
-Read-only applies to the photos of that folder only (by `FolderKey`). A
-job carried over from another folder keeps that folder's rules.
+Read-only applies to the photos of that folder only (by `FolderKey`). The
+coverage store and the thumbnail cache keep a set of every folder opened
+read-only this session, so a job still running for one after the user
+moved on writes nothing into it. Opening the folder writable takes it out
+of the set. A job carried over from another folder keeps that folder's
+rules.
 
 Shown as a line under the folder name (Grid, Loupe, Develop), with the
 holder (another window / `lightphotos-mcp`, pid). `get_state` (app and
@@ -100,7 +109,8 @@ masks bake from memory.
 **When a brief holder can cause it:** the open tries again, 5 times 20 ms
 apart, only when the busy lock names no holder (a `get_state` probe) or
 names our own process (a hand-over). A holder another process names is
-not waited for, except `app-quitting` (up to 1 s). So a headless MCP
+not waited for, except `app-quitting` (while it lives, up to about 15 s,
+on the load thread). So a headless MCP
 command that is writing at the moment of open makes the visit read-only.
 Reopen the folder to try again (there is no "Try again" button).
 
@@ -118,7 +128,10 @@ Reopen the folder to try again (there is no "Try again" button).
 |---|---|
 | Local (APFS, ext4, NTFS) | full design |
 | No lock support (`ENOTSUP`, `ENOLCK`, some SMB/NFS) | Lockless visit: app writes, one notice "don't run headless MCP here" |
-| Read-only volume / no permission | ReadOnly visit, reason "can't be locked" |
+| Lock file this user can't write (another user's `.lock`, mode 0444) | opened read-only; the OS lock works on a read-only handle, so the visit is normal |
+| `EINVAL` from the lock call (the file system can't lock this file) | Lockless visit, like `ENOLCK` |
+| `EIO` or another error (a disk or network fault, may pass) | ReadOnly visit, reason "can't be locked"; reopen to try again |
+| Read-only volume / no permission for the folder | ReadOnly visit, reason "can't be locked" |
 | Windows | `LockFileEx`; holder line in the separate file. Verified only on CI |
 | Browser | no locks; unchanged |
 
@@ -141,7 +154,7 @@ Reopen the folder to try again (there is no "Try again" button).
 | 13 | Waits on the UI thread / writer thread | rule 4 |
 | 14 | `create_dir_all` recreates a deleted folder | `FolderKey` of a gone folder = none |
 | 15 | Lock taken on empty / container folders, SD cards | only folders with photos |
-| 16 | Transient error remembered as "lockless" | only `ENOTSUP`/`ENOLCK` remembered |
+| 16 | Transient error remembered as "lockless" | only `ENOTSUP`/`ENOLCK`/`EINVAL` remembered |
 | 17 | Unavailable lock at open gives editable visit with unsaved edits | ReadOnly "can't be locked" |
 | 18 | Read-only edits shown then reverted | controls off; gates at key / command / UI action |
 | 19 | Undo, mask Delete, tool keys bypass gates | gate before tool keys; `check()` gates undo |
@@ -156,6 +169,14 @@ Reopen the folder to try again (there is no "Try again" button).
 | 28 | A carried-over scoring run uses the new folder's read-only mode | read-only is per folder (`FolderKey`) in the coverage store |
 | 29 | Quit while a left-folder write waits for another program | parked writes are tried again at quit; what is left is reported |
 | 30 | A second app instance on one folder | opens read-only (Q4) |
+| 31 | Signal cache written and swept in a read-only visit | §6: kept in memory |
+| 32 | The open sleeps on the UI thread for the lock | rule 4: the load thread takes it |
+| 33 | An inline write (no writer thread) into a held folder goes ahead unlocked | it parks like a queued one |
+| 34 | A lock file this user can't write opens read-only | the file is opened read-only (§8) |
+| 35 | The quitting app holds the lock through the catalog and signal flushes; a relaunch gives up after 1 s | released after the sidecar writes; relaunch waits up to about 15 s |
+| 36 | A folder opened read-only becomes writable for derived files once the user moves on | a set of read-only folders (§6) |
+| 37 | A writer thread that dies loses its parked writes | parked writes in shared state (§4) |
+| 38 | Each frame asks the disk for the key of every folder with a write queued | the key is worked out once, when the write is queued |
 
 ## 10. Decisions
 
@@ -163,7 +184,7 @@ Reopen the folder to try again (there is no "Try again" button).
 |---|---|
 | Q1 A write into a left folder that another program holds | stays queued and is tried again; never dropped |
 | Q2 Leaving read-only | reopen the folder; no "Try again" button |
-| Q3 Quick relaunch | try again for up to 1 s, only when the holder line is `app-quitting` with another pid |
+| Q3 Quick relaunch | try again, off the UI thread, while the holder line says `app-quitting` and that holder lives (up to about 15 s) |
 | Q4 Second app instance | opens the folder read-only |
 | Q5 Lockless volumes | a notice once; no extra MCP refusal |
 | Q6 Symlinked roots | one lock per resolved folder (`FolderKey`) |

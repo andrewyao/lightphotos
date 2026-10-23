@@ -133,13 +133,14 @@ pub(crate) struct CoverageStore {
     /// the file itself: the browser's rule, since no worker there can reach
     /// the folder. A test sets it to run the browser's path natively.
     in_memory: bool,
-    /// The folder open read-only, if one is: nothing is written into it or
-    /// deleted from it. A detection of its photos keeps the coverage in
+    /// The folders opened read-only this session: nothing is written into
+    /// them or deleted from them, even by work still running after the user
+    /// moved on. A detection of its photos keeps the coverage in
     /// memory, as the browser's does, and bakes take it from there. A
     /// photo of another folder, such as one a carried-over job scores,
     /// keeps the usual rules.
     #[cfg(not(target_arch = "wasm32"))]
-    read_only: Option<crate::sidecar::FolderKey>,
+    read_only: std::collections::HashSet<crate::sidecar::FolderKey>,
 }
 
 /// Work the app finished for the store, on the web.
@@ -251,7 +252,7 @@ impl CoverageStore {
             ready_budget: READY_BUDGET,
             in_memory: false,
             #[cfg(not(target_arch = "wasm32"))]
-            read_only: None,
+            read_only: std::collections::HashSet::new(),
         }
     }
 
@@ -467,18 +468,21 @@ impl CoverageStore {
     /// Folder switch: drop every slot. A job already running finishes and
     /// writes its file (harmless, content-addressed); its landing finds no
     /// slot and is dropped, and the next open re-detects onto the same name.
-    /// The folder open read-only, if one is: see `read_only`.
+    /// The folders opened read-only: see `read_only`.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn set_read_only(&mut self, folder: Option<crate::sidecar::FolderKey>) {
-        self.read_only = folder;
+    pub(crate) fn set_read_only(
+        &mut self,
+        folders: std::collections::HashSet<crate::sidecar::FolderKey>,
+    ) {
+        self.read_only = folders;
     }
 
-    /// Whether `photo` is in the folder open read-only.
+    /// Whether `photo` is in a folder opened read-only.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn read_only_photo(&self, photo: &Path) -> bool {
-        self.read_only.as_ref().is_some_and(|folder| {
-            crate::sidecar::FolderKey::of_photo(photo).as_ref() == Some(folder)
-        })
+        !self.read_only.is_empty()
+            && crate::sidecar::FolderKey::of_photo(photo)
+                .is_some_and(|k| self.read_only.contains(&k))
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -941,7 +945,7 @@ mod tests {
         let masks = [Mask::detected(DetectTarget::Sky)];
         let none = Detections::default();
         let mut store = CoverageStore::with_detector(half_left);
-        store.set_read_only(crate::sidecar::FolderKey::of(&dir));
+        store.set_read_only(crate::sidecar::FolderKey::of(&dir).into_iter().collect());
         assert_eq!(store.readiness(&p, &masks, &none), Readiness::Pending);
         drain_until(&mut store, |s| !s.busy());
         let ready = store.readiness(&p, &masks, &none);
@@ -961,7 +965,7 @@ mod tests {
         let (ro, p_ro) = photo("per-folder-ro");
         let (rw, p_rw) = photo("per-folder-rw");
         let mut store = CoverageStore::with_detector(half_left);
-        store.set_read_only(crate::sidecar::FolderKey::of(&ro));
+        store.set_read_only(crate::sidecar::FolderKey::of(&ro).into_iter().collect());
         let modes = (store.in_memory_for(&p_ro), store.in_memory_for(&p_rw));
         let masks = [Mask::detected(DetectTarget::Sky)];
         let none = Detections::default();
@@ -985,7 +989,7 @@ mod tests {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, b"not a coverage").unwrap();
         let mut store = CoverageStore::with_detector(half_left);
-        store.set_read_only(crate::sidecar::FolderKey::of(&dir));
+        store.set_read_only(crate::sidecar::FolderKey::of(&dir).into_iter().collect());
         let t = DetectTarget::Sky;
         assert!(matches!(store.ask(&p, t, Some(c.id())), Lookup::Pending));
         drain_until(&mut store, |s| !s.busy());

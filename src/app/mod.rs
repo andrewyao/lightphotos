@@ -424,6 +424,15 @@ pub(crate) struct ThumbTexture {
 
 /// A finished background sidecar load: its directory, the navigation token it
 /// was requested under, its place in the sidecar write order, and the records.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type FolderStoreLoadResult = (
+    PathBuf,
+    u64,
+    crate::persist::folder_store::LoadMark,
+    crate::persist::folder_store::SidecarLoad,
+    Option<crate::persist::folder_store::Opened>,
+);
+#[cfg(target_arch = "wasm32")]
 pub(crate) type FolderStoreLoadResult = (
     PathBuf,
     u64,
