@@ -394,7 +394,7 @@ app; it edits sidecars in one folder.
 |---|---|---|
 | `--control <port>` | `shell/control/tcp.rs`, native | a local program that holds the token; 127.0.0.1 only, 4 connections |
 | `lightphotos-mcp --attach <port>` | `bin/lightphotos_mcp/attached.rs` | an MCP client; it signs in to `--control` with `LIGHTPHOTOS_CONTROL_TOKEN` |
-| WebMCP | `web/web_mcp.rs`, wasm32 | an agent in the browser through `document.modelContext`; `run_command` has `destructiveHint` |
+| WebMCP | `web/web_mcp.rs`, wasm32 | an agent in the browser through `document.modelContext`; `run_command` has `consequentialHint` and `destructiveHint` |
 | `lightphotos-mcp --folder <dir>` | `bin/lightphotos_mcp/headless.rs` | an MCP client; no app runs, and only photos in `<dir>` are reachable |
 
 **The sign-in (`control_auth.rs`).** The token never crosses the socket.

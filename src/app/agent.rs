@@ -26,6 +26,20 @@ pub(super) const EXPORT_REFUSED: &str = "an agent can export only into the folde
 const USER_ONLY: &str = "an agent can't make, open or switch catalogs, or save presets or add \
                          preset folders; the user does that in the app";
 
+const NO_SCORING: &str = "scoring runs only in the macOS app, which has Apple's Vision \
+                          framework";
+
+#[cfg(target_arch = "wasm32")]
+const BROWSER_PICKS: &str = "the browser opens folders only through its folder picker; ask the \
+                             user to pick one";
+
+#[cfg(target_arch = "wasm32")]
+const BROWSER_NOTES: &str = "You are in the browser app: commands act on what it shows and \
+                             selects. Only the user picks the folder, through the browser's \
+                             picker; with none picked, ask the user to pick one. export writes \
+                             only into the picked folder's Exports folder, or to Immich when the \
+                             export form uploads there.";
+
 /// The folder the user has open, resolved once when it is set.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Anchor {
@@ -325,10 +339,11 @@ impl App {
     pub(super) fn agent_listing(&self) -> crate::command::Listing {
         let shown_held =
             self.folder_held() && self.shown.path().is_none_or(|photo| self.photo_held(photo));
-        match shown_held {
+        let listing = match shown_held {
             true => self.listing(),
             false => crate::command::listing(None),
-        }
+        };
+        self.agent_commands(listing)
     }
 
     /// In the browser no path policy applies; an agent sees what the app does.
@@ -342,9 +357,40 @@ impl App {
         super::PhotoList::for_agent(self, true, |_| false)
     }
 
+    /// With the notes the native server gives in its MCP `initialize`,
+    /// which WebMCP has no place for.
     #[cfg(target_arch = "wasm32")]
     pub(super) fn agent_listing(&self) -> crate::command::Listing {
-        self.listing()
+        let mut listing = self.agent_commands(self.listing());
+        listing.notes = Some(format!("{} {BROWSER_NOTES}", crate::command::AGENT_NOTES));
+        listing
+    }
+
+    /// Why an agent can never run `cmd` here, whatever it names. The
+    /// listing an agent gets leaves these commands out.
+    fn agent_refusal(&self, cmd: &Command) -> Option<&'static str> {
+        match cmd {
+            Command::NewCatalog(_)
+            | Command::OpenCatalog(_)
+            | Command::SwitchCatalog(_)
+            | Command::AddPresetFolder(_)
+            | Command::SavePreset(_) => Some(USER_ONLY),
+            #[cfg(target_arch = "wasm32")]
+            Command::OpenFolder(_) => Some(BROWSER_PICKS),
+            Command::Score(_) if !self.scoring_available() => Some(NO_SCORING),
+            _ => None,
+        }
+    }
+
+    /// `listing` less the commands `agent_refusal` refuses.
+    fn agent_commands(&self, mut listing: crate::command::Listing) -> crate::command::Listing {
+        let refused: Vec<&str> = Command::examples()
+            .iter()
+            .filter(|cmd| self.agent_refusal(cmd).is_some())
+            .map(Command::id)
+            .collect();
+        listing.commands.retain(|info| !refused.contains(&info.id));
+        listing
     }
 
     /// Runs a command an agent sent, once it passes the checks here. The
@@ -353,13 +399,17 @@ impl App {
         let refuse = |reason: &str| CommandError::Failed {
             reason: reason.into(),
         };
+        if let Some(why) = self.agent_refusal(&cmd) {
+            return Err(refuse(why));
+        }
         match &cmd {
             Command::Export(p) => return self.agent_export(p.clone()),
+            // `agent_refusal` refused these above.
             Command::NewCatalog(_)
             | Command::OpenCatalog(_)
             | Command::SwitchCatalog(_)
             | Command::AddPresetFolder(_)
-            | Command::SavePreset(_) => return Err(refuse(USER_ONLY)),
+            | Command::SavePreset(_) => {}
             Command::OpenFolder(p) => {
                 let real = resolve(&p.path).filter(|real| {
                     self.folder_anchor
@@ -559,6 +609,36 @@ mod tests {
             cwd.parent().unwrap().join("x")
         );
         assert_eq!(absolute(PathBuf::from("/a/b/../c")), PathBuf::from("/a/c"));
+    }
+
+    #[test]
+    fn the_agents_listing_leaves_out_what_it_refuses() {
+        let mut app = App::new(None);
+        let listed: Vec<&str> = app.agent_listing().commands.iter().map(|c| c.id).collect();
+        for id in [
+            "catalog.new",
+            "catalog.open",
+            "catalog.switch",
+            "preset.save",
+            "preset.add_folder",
+        ] {
+            assert!(!listed.contains(&id), "{id} listed: {listed:?}");
+        }
+        assert!(listed.contains(&"photo.rate"), "{listed:?}");
+        assert_eq!(listed.contains(&"photo.score"), app.scoring_available());
+        for cmd in Command::examples() {
+            if listed.contains(&cmd.id()) {
+                continue;
+            }
+            let id = cmd.id();
+            let Err(CommandError::Failed { reason }) = app.run_from_agent(cmd) else {
+                panic!("{id} is left out of the listing but runs");
+            };
+            assert!(
+                [USER_ONLY, NO_SCORING].contains(&reason.as_str()),
+                "{id}: {reason}"
+            );
+        }
     }
 
     #[test]

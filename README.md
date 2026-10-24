@@ -148,7 +148,7 @@ An agent works under tighter rules than the person at the keyboard. It is held t
 
 To cull a folder headless, by the app score on macOS, a local vision model in Ollama on Linux and Windows, or Claude Code, see [tools/cull](tools/cull/README.md).
 
-In the browser, the app registers `list_commands`, `run_command`, `get_state` and `list_photos` with WebMCP when the browser offers `document.modelContext` (or `navigator.modelContext`, as the `@mcp-b` polyfill does). An agent in the browser then drives the open app with the same requests as the control channel. There is no `screenshot` tool: the agent already sees the page. `run_command` carries `destructiveHint: true`, so a browser that asks before a tool changes things asks before each command. A browser without WebMCP logs one console line and the app runs as usual.
+In the browser, the app registers `list_commands`, `run_command`, `get_state` and `list_photos` with WebMCP when the browser offers `document.modelContext` (or `navigator.modelContext`, as the `@mcp-b` polyfill does). An agent in the browser then drives the open app with the same requests as the control channel. There is no `screenshot` tool: the agent already sees the page. `run_command` carries `consequentialHint` (Chrome) and `destructiveHint` (MCP bridges), so the browser asks the user before each command. `list_commands` leaves out the commands the browser can't run (`folder.open`, catalogs, preset saving, and `photo.score` off macOS) and adds `notes`, the instructions the native server gives in its `initialize`. A browser without WebMCP logs one console line and the app runs as usual.
 
 ## Releasing and packaging
 

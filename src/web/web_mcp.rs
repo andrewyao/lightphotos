@@ -14,6 +14,34 @@ use crate::shell::control::{ChannelError, Failure, Op, DEFAULT_WAIT};
 #[cfg(target_arch = "wasm32")]
 pub(crate) use wasm::{register, Reply};
 
+/// Which WebMCP the page found. Each wants its results in its own shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Host {
+    /// The browser's own `document.modelContext`.
+    Native,
+    /// `navigator.modelContext`: older builds and the @mcp-b polyfill, which
+    /// pass a result on as an MCP `CallToolResult`.
+    Polyfill,
+}
+
+/// What `execute` settles with for the app's answer, `Err` being the
+/// message of a failure. `Ok` resolves the call's promise; `Err` rejects it
+/// with an `Error` carrying that message.
+fn result(host: Host, answer: Result<Value, String>) -> Result<Value, String> {
+    match (host, answer) {
+        (Host::Native, Ok(v)) => Ok(Value::String(v.to_string())),
+        (Host::Native, Err(message)) => Err(message),
+        (Host::Polyfill, Ok(v)) => {
+            Ok(json!({ "content": [{ "type": "text", "text": v.to_string() }] }))
+        }
+        // An MCP client reads a tool error from the result, not a rejection.
+        (Host::Polyfill, Err(message)) => Ok(json!({
+            "content": [{ "type": "text", "text": message }],
+            "isError": true,
+        })),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tool {
     ListCommands,
@@ -93,11 +121,15 @@ impl Tool {
             "name": self.name(),
             "description": self.description(),
             "inputSchema": self.input_schema(),
-            // `destructiveHint` asks the browser to confirm a run with the
-            // user: a command can export, delete to the Trash or rewrite edits.
+            // `consequentialHint` asks Chrome to confirm a run with the user,
+            // `destructiveHint` asks the same of an MCP bridge: a command can
+            // export, delete to the Trash or rewrite edits. Every result
+            // carries file names from the folder.
             "annotations": {
                 "readOnlyHint": self.read_only(),
+                "consequentialHint": !self.read_only(),
                 "destructiveHint": !self.read_only(),
+                "untrustedContentHint": true,
             },
         })
     }
@@ -138,52 +170,75 @@ impl Tool {
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use js_sys::{Function, Promise, Reflect, JSON};
     use serde_json::Value;
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::{JsCast, JsValue};
+    use web_sys::{AbortSignal, AddEventListenerOptions};
     use winit::event_loop::{EventLoopClosed, EventLoopProxy};
 
-    use super::Tool;
+    use super::{result, Host, Tool};
     use crate::shell::control::{Answer, ChannelError, Failure, Payload, Request};
     use crate::shell::macos_delegate::UserEvent;
 
     const DROPPED: &str = "the app dropped the request before running it, so nothing \
                            changed; try again";
+    const ABORTED: &str = "the call was cancelled; a command the app had already \
+                           started may still finish, so read get_state before trying again";
 
     /// Settles one `execute` call's promise with the app's answer.
     #[derive(Debug)]
     pub(crate) struct Reply {
-        settle: Option<Settle>,
+        settle: Shared,
     }
+
+    /// Shared with the call's `abort` listener: whichever comes first
+    /// settles the promise, and the other finds it settled.
+    type Shared = Rc<RefCell<Option<Settle>>>;
 
     #[derive(Debug)]
     struct Settle {
+        host: Host,
         resolve: Function,
         reject: Function,
     }
 
-    impl Reply {
-        pub(crate) fn send(mut self, answer: Answer) -> Result<(), JsValue> {
-            let Some(settle) = self.settle.take() else {
-                return Ok(());
-            };
-            let (with, value) = match answer {
-                Ok(Payload::Json(v)) => match JSON::parse(&v.to_string()) {
-                    Ok(result) => (settle.resolve, result),
-                    Err(e) => (settle.reject, e),
+    impl Settle {
+        fn send(self, answer: Result<Value, String>) -> Result<(), JsValue> {
+            let (with, value) = match result(self.host, answer) {
+                Ok(v) => match JSON::parse(&v.to_string()) {
+                    Ok(value) => (self.resolve, value),
+                    Err(e) => (self.reject, e),
                 },
-                Err(failure) => (settle.reject, error(&failure.message)),
+                Err(message) => (self.reject, error(&message)),
             };
             with.call1(&JsValue::UNDEFINED, &value).map(drop)
         }
     }
 
+    fn settle(shared: &Shared, answer: Result<Value, String>) -> Result<(), JsValue> {
+        let taken = shared.borrow_mut().take();
+        match taken {
+            Some(settle) => settle.send(answer),
+            None => Ok(()),
+        }
+    }
+
+    impl Reply {
+        pub(crate) fn send(self, answer: Answer) -> Result<(), JsValue> {
+            let answer = answer
+                .map(|Payload::Json(v)| v)
+                .map_err(|failure| failure.message);
+            settle(&self.settle, answer)
+        }
+    }
+
     impl Drop for Reply {
         fn drop(&mut self) {
-            if let Some(settle) = self.settle.take() {
-                let _ = settle.reject.call1(&JsValue::UNDEFINED, &error(DROPPED));
-            }
+            let _ = settle(&self.settle, Err(DROPPED.into()));
         }
     }
 
@@ -194,7 +249,7 @@ mod wasm {
     /// Registers every tool when the browser offers WebMCP. A browser without
     /// it, or a refused tool, gets a console line and the app runs on.
     pub(crate) fn register(proxy: EventLoopProxy<UserEvent>) {
-        let Some(context) = model_context() else {
+        let Some((context, host)) = model_context() else {
             web_sys::console::log_1(
                 &"[webmcp] no document.modelContext; agent tools are off".into(),
             );
@@ -207,7 +262,7 @@ mod wasm {
             return;
         };
         for tool in Tool::ALL {
-            if let Err(e) = register_tool(&context, &register, tool, proxy.clone()) {
+            if let Err(e) = register_tool(&context, &register, tool, host, proxy.clone()) {
                 refused(tool, &e);
             }
         }
@@ -215,7 +270,7 @@ mod wasm {
 
     /// `document.modelContext`, or `navigator.modelContext` from older
     /// builds and the @mcp-b polyfill.
-    fn model_context() -> Option<JsValue> {
+    fn model_context() -> Option<(JsValue, Host)> {
         let window = web_sys::window()?;
         let on = |host: &JsValue| {
             Reflect::get(host, &"modelContext".into())
@@ -225,18 +280,21 @@ mod wasm {
         window
             .document()
             .and_then(|document| on(&document))
-            .or_else(|| on(&window.navigator()))
+            .map(|context| (context, Host::Native))
+            .or_else(|| on(&window.navigator()).map(|context| (context, Host::Polyfill)))
     }
 
     fn register_tool(
         context: &JsValue,
         register: &Function,
         tool: Tool,
+        host: Host,
         proxy: EventLoopProxy<UserEvent>,
     ) -> Result<(), JsValue> {
         let definition = JSON::parse(&tool.definition().to_string())?;
-        let execute =
-            Closure::<dyn Fn(JsValue) -> Promise>::new(move |args| execute(tool, &args, &proxy));
+        let execute = Closure::<dyn Fn(JsValue, JsValue) -> Promise>::new(move |args, client| {
+            execute(tool, host, &args, &client, &proxy)
+        });
         Reflect::set(&definition, &"execute".into(), execute.as_ref())?;
         // The browser may call `execute` for as long as the page is open.
         execute.forget();
@@ -256,24 +314,68 @@ mod wasm {
         web_sys::console::warn_2(&line.into(), e);
     }
 
-    fn execute(tool: Tool, args: &JsValue, proxy: &EventLoopProxy<UserEvent>) -> Promise {
-        let op = match args_json(args).and_then(|args| tool.op(&args)) {
-            Ok(op) => op,
-            Err(failure) => return Promise::reject(&error(&failure.message)),
-        };
-        let mut request = Some(Request::new(op));
+    /// One call. `client` is `execute`'s second argument, `{ signal }` in
+    /// Chrome and `undefined` from the polyfill.
+    fn execute(
+        tool: Tool,
+        host: Host,
+        args: &JsValue,
+        client: &JsValue,
+        proxy: &EventLoopProxy<UserEvent>,
+    ) -> Promise {
+        let signal = Reflect::get(client, &"signal".into())
+            .ok()
+            .and_then(|s| s.dyn_into::<AbortSignal>().ok());
+        let op = args_json(args).and_then(|args| tool.op(&args));
+        let mut op = Some(op);
         Promise::new(&mut |resolve, reject| {
-            let Some(request) = request.take() else {
-                return;
+            let shared: Shared = Rc::new(RefCell::new(Some(Settle {
+                host,
+                resolve,
+                reject,
+            })));
+            let answer = |message: &str| {
+                let _ = settle(&shared, Err(message.into()));
             };
+            let op = match op.take() {
+                Some(Ok(op)) => op,
+                Some(Err(failure)) => return answer(&failure.message),
+                None => return,
+            };
+            if let Some(signal) = &signal {
+                if signal.aborted() {
+                    return answer(ABORTED);
+                }
+                on_abort(signal, &shared);
+            }
             let reply = Reply {
-                settle: Some(Settle { resolve, reject }),
+                settle: shared.clone(),
             };
-            let sent = proxy.send_event(UserEvent::Control(request, reply));
+            let sent = proxy.send_event(UserEvent::Control(Request::new(op), reply));
             if let Err(EventLoopClosed(UserEvent::Control(_, reply))) = sent {
                 let _ = reply.send(Err(ChannelError::AppClosed.into()));
             }
         })
+    }
+
+    /// Settles the call as cancelled once `signal` aborts. The listener
+    /// frees itself when it runs; one whose call ends first stays with the
+    /// signal, which the browser drops with the call.
+    fn on_abort(signal: &AbortSignal, shared: &Shared) {
+        let shared = shared.clone();
+        let listener = Closure::once_into_js(move || {
+            let _ = settle(&shared, Err(ABORTED.into()));
+        });
+        let options = AddEventListenerOptions::new();
+        options.set_once(true);
+        let added = signal.add_event_listener_with_callback_and_add_event_listener_options(
+            "abort",
+            listener.unchecked_ref(),
+            &options,
+        );
+        if let Err(e) = added {
+            web_sys::console::warn_2(&"[webmcp] can't watch the call's signal:".into(), &e);
+        }
     }
 
     fn args_json(args: &JsValue) -> Result<Value, Failure> {
@@ -350,18 +452,48 @@ mod tests {
             .map(|d| d["annotations"]["readOnlyHint"] == true)
             .collect();
         assert_eq!(read_only, [true, false, true, true]);
-        let confirm: Vec<bool> = defs
-            .iter()
-            .map(|d| d["annotations"]["destructiveHint"] == true)
-            .collect();
-        assert_eq!(
-            confirm,
-            [false, true, false, false],
-            "run_command asks first"
+        for hint in ["consequentialHint", "destructiveHint"] {
+            let confirm: Vec<bool> = defs
+                .iter()
+                .map(|d| d["annotations"][hint] == true)
+                .collect();
+            assert_eq!(
+                confirm,
+                [false, true, false, false],
+                "run_command asks first ({hint})"
+            );
+        }
+        assert!(
+            defs.iter()
+                .all(|d| d["annotations"]["untrustedContentHint"] == true),
+            "every result carries folder file names"
         );
         assert_eq!(defs[1]["inputSchema"]["required"], json!(["id"]));
         assert!(defs
             .iter()
             .all(|d| d["description"].as_str().is_some_and(|s| !s.is_empty())));
+    }
+
+    #[test]
+    fn each_host_gets_its_own_result_shape() {
+        let answer = json!({ "photos": 2 });
+        let native = result(Host::Native, Ok(answer.clone()));
+        assert_eq!(native, Ok(Value::String(answer.to_string())));
+        assert_eq!(
+            result(Host::Native, Err("no".into())),
+            Err("no".to_string())
+        );
+
+        let Ok(ok) = result(Host::Polyfill, Ok(answer.clone())) else {
+            panic!("the polyfill gets a result, not a rejection");
+        };
+        assert_eq!(ok["content"][0]["type"], "text");
+        assert_eq!(ok["content"][0]["text"], answer.to_string());
+        assert!(ok.get("isError").is_none());
+        let Ok(failed) = result(Host::Polyfill, Err("pass `id`".into())) else {
+            panic!("the polyfill reads a failure from the result");
+        };
+        assert_eq!(failed["isError"], true);
+        assert_eq!(failed["content"][0]["text"], "pass `id`");
     }
 }

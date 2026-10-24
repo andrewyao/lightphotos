@@ -263,6 +263,9 @@ web-sys = { version = "0.3", features = [
     "Storage",
     "Response",
     "Clipboard",
+    "AbortSignal",
+    "AddEventListenerOptions",
+    "EventTarget",
 ] }
 js-sys = "0.3"
 wasm_thread = "0.3"
