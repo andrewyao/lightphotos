@@ -788,8 +788,9 @@ impl Straighten {
 }
 
 impl Adjustments {
-    /// Every slider held to its range, a NaN put back to its default. A sidecar
-    /// is a file anyone can edit, so a render never trusts its values.
+    /// Every slider and the straighten angle held to its range, a NaN put back
+    /// to its default. A sidecar is a file anyone can edit, so a render never
+    /// trusts its values.
     pub fn clamped(mut self) -> Self {
         for s in &SLIDERS {
             let v = (s.field)(&mut self);
@@ -799,6 +800,12 @@ impl Adjustments {
                 v.clamp(*s.range.start(), *s.range.end())
             };
         }
+        self.straighten = if self.straighten.is_nan() {
+            0.0
+        } else {
+            self.straighten
+                .clamp(*STRAIGHTEN_RANGE.start(), *STRAIGHTEN_RANGE.end())
+        };
         self
     }
 
@@ -1852,6 +1859,23 @@ mod tests {
         );
         let gpu = GpuAdjust::from(&nan);
         assert_eq!((gpu.exposure, gpu.contrast), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_straighten_angle_out_of_range_renders_as_the_nearest_end() {
+        let with = |straighten| Adjustments {
+            straighten,
+            ..Adjustments::default()
+        };
+        for (bad, end) in [
+            (1e30_f32, 45.0_f32),
+            (f32::INFINITY, 45.0),
+            (f32::NEG_INFINITY, -45.0),
+            (f32::NAN, 0.0),
+        ] {
+            let gpu = GpuAdjust::from(&with(bad));
+            assert_eq!(gpu.straighten, end.to_radians(), "{bad}");
+        }
     }
 
     #[test]
