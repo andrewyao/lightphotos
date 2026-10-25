@@ -621,8 +621,10 @@ impl CropParams {
             if c.left >= c.right || c.top >= c.bottom {
                 return Err(bad("crop needs left < right and top < bottom"));
             }
-            if c.right - c.left < MIN_CROP || c.bottom - c.top < MIN_CROP {
-                return Err(bad("crop must be at least 0.02 wide and tall"));
+            if !c.holds_min_size() {
+                return Err(bad(&format!(
+                    "crop must be at least {MIN_CROP} wide and tall"
+                )));
             }
         }
         if let Some(deg) = self.straighten {
@@ -1773,6 +1775,10 @@ mod tests {
             "narrower than the crop tool can hold"
         );
         assert!(crop(0.0, 0.0, 0.02, 0.02).validate().is_ok());
+        assert!(
+            crop(0.011_256, 0.0, 0.031_255_998, 1.0).validate().is_ok(),
+            "the crop tool's own smallest box, a hair under 0.02 in f32"
+        );
         let unturned = || -> Result<(f32, f32), CommandError> { panic!("no size needed") };
         let full = crop(0.0, 0.0, 1.0, 1.0);
         let cropped = crop(0.1, 0.1, 0.9, 0.9)

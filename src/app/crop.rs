@@ -574,10 +574,12 @@ impl App {
             }
             CropGrab::Edge(edge) => {
                 match edge {
-                    CropEdge::Left => r.left = u.clamp(0.0, r.right - MIN_CROP),
-                    CropEdge::Right => r.right = u.clamp(r.left + MIN_CROP, 1.0),
-                    CropEdge::Top => r.top = v.clamp(0.0, r.bottom - MIN_CROP),
-                    CropEdge::Bottom => r.bottom = v.clamp(r.top + MIN_CROP, 1.0),
+                    // A box a hair under MIN_CROP (see `Crop::holds_min_size`)
+                    // would make a bound cross its partner, and `clamp` panics.
+                    CropEdge::Left => r.left = u.clamp(0.0, (r.right - MIN_CROP).max(0.0)),
+                    CropEdge::Right => r.right = u.clamp((r.left + MIN_CROP).min(1.0), 1.0),
+                    CropEdge::Top => r.top = v.clamp(0.0, (r.bottom - MIN_CROP).max(0.0)),
+                    CropEdge::Bottom => r.bottom = v.clamp((r.top + MIN_CROP).min(1.0), 1.0),
                 }
                 // The texture-space pixel w/h to hold, if any.
                 let lock = match d.aspect.w_over_h(d.orientation, w, h) {
@@ -1335,6 +1337,65 @@ mod tests {
                 ordered && 0.0 <= r.top && r.top < r.bottom && r.bottom <= 1.0,
                 "{json} -> {r:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_crop_dragged_to_its_smallest_size_survives_a_reload() {
+        for i in 0..200 {
+            let at = 0.01 + i as f32 * 0.0049;
+            for edge in [
+                CropEdge::Left,
+                CropEdge::Right,
+                CropEdge::Top,
+                CropEdge::Bottom,
+            ] {
+                let start = Crop {
+                    left: at.min(0.9),
+                    top: at.min(0.9),
+                    right: 1.0 - (1.0 - at).max(0.0) * 0.1,
+                    bottom: 1.0 - (1.0 - at).max(0.0) * 0.1,
+                };
+                let mut app = photo_app(0, start.sanitized());
+                app.enter_crop();
+                app.crop_grab(edge);
+                app.crop_drag_to(0.5, 0.5);
+                app.crop_drag_to(1.0, 1.0);
+                app.crop_drag_to(0.0, 0.0);
+                let Some(r) = app.crop_rect() else { continue };
+                let json = serde_json::to_string(&Adjustments {
+                    crop: Some(r),
+                    ..Adjustments::default()
+                })
+                .unwrap();
+                let back = serde_json::from_str::<Adjustments>(&json).unwrap();
+                assert_eq!(back.crop, Some(r), "{edge:?} from {start:?} -> {r:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_crop_a_hair_under_the_smallest_size_cannot_panic_the_crop_tool() {
+        for (left, right) in [
+            (0.0, 0.019_999_996),
+            (0.980_000_1, 1.0),
+            (0.4, 0.419_999_96),
+        ] {
+            let saved = Crop {
+                left,
+                top: 0.0,
+                right,
+                bottom: 1.0,
+            };
+            let mut app = photo_app(0, Some(saved));
+            app.enter_crop();
+            for edge in [CropEdge::Left, CropEdge::Right] {
+                app.crop_grab(edge);
+                app.crop_drag_to(0.0, 0.0);
+                app.crop_drag_to(1.0, 1.0);
+            }
+            let r = app.crop_rect().unwrap();
+            assert!(0.0 <= r.left && r.left < r.right && r.right <= 1.0, "{r:?}");
         }
     }
 

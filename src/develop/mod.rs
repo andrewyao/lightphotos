@@ -618,6 +618,14 @@ pub struct Crop {
 pub const MIN_CROP: f32 = 0.02;
 
 impl Crop {
+    /// Whether the box is at least [`MIN_CROP`] wide and tall. The crop tool
+    /// builds its smallest box as `edge ± MIN_CROP`, and f32 subtraction can
+    /// give back a hair under `MIN_CROP`, so a few ulps of slack count as met.
+    pub fn holds_min_size(&self) -> bool {
+        const SLACK: f32 = 1e-6;
+        self.right - self.left >= MIN_CROP - SLACK && self.bottom - self.top >= MIN_CROP - SLACK
+    }
+
     /// This crop with every edge held to 0..1, or `None` if an edge isn't a
     /// number or the box is narrower or shorter than [`MIN_CROP`]. A crop comes
     /// from sidecars and presets, and the crop tool clamps against these
@@ -628,12 +636,13 @@ impl Crop {
             return None;
         }
         let [left, top, right, bottom] = edges.map(|v| v.clamp(0.0, 1.0));
-        (right - left >= MIN_CROP && bottom - top >= MIN_CROP).then_some(Crop {
+        let held = Crop {
             left,
             top,
             right,
             bottom,
-        })
+        };
+        held.holds_min_size().then_some(held)
     }
 }
 
