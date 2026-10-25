@@ -1213,7 +1213,7 @@ mod tests {
     }
 
     #[test]
-    fn a_quarter_straighten_bakes_as_a_quarter_turn() {
+    fn a_straighten_past_the_range_bakes_as_its_nearest_end() {
         let src: Vec<u8> = (0..9u8).flat_map(|i| px(i * 25)).collect();
         let img = DecodedImage::new_tracked(DecodedImageFields {
             width: 3,
@@ -1221,15 +1221,19 @@ mod tests {
             rgba: src,
             pixel_format: PixelFormat::Srgb8,
         });
-        let adj = Adjustments {
-            straighten: 90.0,
-            ..Default::default()
+        let bake = |straighten| {
+            let adj = Adjustments {
+                straighten,
+                ..Default::default()
+            };
+            bake_edited(&img, &adj, &[], &MaskSet::default(), 0)
         };
-        // A positive angle shows the photo turned anti-clockwise.
-        assert_eq!(
-            bake_edited(&img, &adj, &[], &MaskSet::default(), 0),
-            bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 3)
-        );
+        let end = bake(45.0);
+        assert_ne!(end, bake(0.0), "the end of the range does turn the photo");
+        for bad in [90.0, 1e30, f32::INFINITY] {
+            assert_eq!(bake(bad), end, "{bad}");
+        }
+        assert_eq!(bake(f32::NAN), bake(0.0));
     }
 
     #[test]

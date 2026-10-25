@@ -729,9 +729,19 @@ pub struct Straighten {
     h: f32,
 }
 
+/// An angle held to `STRAIGHTEN_RANGE`, a NaN to no turn.
+fn clamp_straighten(degrees: f32) -> f32 {
+    if degrees.is_nan() {
+        0.0
+    } else {
+        degrees.clamp(*STRAIGHTEN_RANGE.start(), *STRAIGHTEN_RANGE.end())
+    }
+}
+
 impl Straighten {
+    /// A sidecar's angle can be anything, so it is held to `STRAIGHTEN_RANGE`.
     pub fn new(degrees: f32, w: f32, h: f32) -> Self {
-        let (sin, cos) = degrees.to_radians().sin_cos();
+        let (sin, cos) = clamp_straighten(degrees).to_radians().sin_cos();
         Self { cos, sin, w, h }
     }
 
@@ -800,12 +810,7 @@ impl Adjustments {
                 v.clamp(*s.range.start(), *s.range.end())
             };
         }
-        self.straighten = if self.straighten.is_nan() {
-            0.0
-        } else {
-            self.straighten
-                .clamp(*STRAIGHTEN_RANGE.start(), *STRAIGHTEN_RANGE.end())
-        };
+        self.straighten = clamp_straighten(self.straighten);
         self
     }
 
@@ -1876,6 +1881,25 @@ mod tests {
             let gpu = GpuAdjust::from(&with(bad));
             assert_eq!(gpu.straighten, end.to_radians(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_straighten_turn_from_a_bad_angle_stays_finite_and_in_range() {
+        let (w, h) = (4000.0, 3000.0);
+        let at = |deg| Straighten::new(deg, w, h).to_source(0.9, 0.1);
+        assert_eq!(at(f32::NAN), at(0.0), "a NaN is no turn");
+        assert_eq!(at(1e30), at(45.0));
+        assert_eq!(at(f32::NEG_INFINITY), at(-45.0));
+        let (u, v) = at(f32::INFINITY);
+        assert!(u.is_finite() && v.is_finite());
+    }
+
+    #[test]
+    fn a_positive_straighten_reads_the_source_clockwise_of_the_canvas() {
+        // The canvas's right-middle reads the source below its right-middle,
+        // which shows the photo turned anti-clockwise.
+        let (_, v) = Straighten::new(10.0, 4000.0, 3000.0).to_source(1.0, 0.5);
+        assert!(v > 0.5, "{v}");
     }
 
     #[test]
