@@ -17,7 +17,7 @@ use winit::keyboard::{KeyCode, ModifiersState};
 use winit::window::Window;
 
 use crate::decode::image_decode;
-use crate::develop::{Adjustments, Crop, Mask, TouchUp};
+use crate::develop::{Adjustments, Crop, Mask, TouchUp, MIN_CROP};
 use crate::export::Exporter;
 use crate::jobs::loader::Loader;
 use crate::navigation::{Cmp, FlagFilter, Playlist};
@@ -142,8 +142,6 @@ const FULL_CROP: Crop = Crop {
     right: 1.0,
     bottom: 1.0,
 };
-/// Smallest crop edge separation, in normalized units, so the rect never collapses.
-const MIN_CROP: f32 = 0.02;
 
 /// The UI region that receives arrow and Enter keys. `Toolbar` and `Filmstrip`
 /// are chrome, reached only with F6 / Shift+F6, which toggles between them and

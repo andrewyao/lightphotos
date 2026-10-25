@@ -614,6 +614,33 @@ pub struct Crop {
     pub bottom: f32,
 }
 
+/// Smallest crop edge separation, in normalized units, so the rect never collapses.
+pub const MIN_CROP: f32 = 0.02;
+
+impl Crop {
+    /// This crop with every edge held to 0..1, or `None` if an edge isn't a
+    /// number or the box is narrower or shorter than [`MIN_CROP`]. A crop comes
+    /// from sidecars and presets, and the crop tool clamps against these
+    /// bounds, which panics on a box that breaks them.
+    pub fn sanitized(self) -> Option<Crop> {
+        let edges = [self.left, self.top, self.right, self.bottom];
+        if !edges.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let [left, top, right, bottom] = edges.map(|v| v.clamp(0.0, 1.0));
+        (right - left >= MIN_CROP && bottom - top >= MIN_CROP).then_some(Crop {
+            left,
+            top,
+            right,
+            bottom,
+        })
+    }
+}
+
+fn deserialize_crop<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Crop>, D::Error> {
+    Ok(Option::<Crop>::deserialize(d)?.and_then(Crop::sanitized))
+}
+
 /// The edit applied to one image. `Default` is no edit. Zero fields are left
 /// out when serialized, so an unedited image writes nothing.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
@@ -670,7 +697,11 @@ pub struct Adjustments {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub denoise: f32,
     /// `None` means the full frame of the straightened photo.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_crop"
+    )]
     pub crop: Option<Crop>,
     /// Degrees the photo turns about its center before the crop, within
     /// [`STRAIGHTEN_RANGE`]. See [`Straighten`].
@@ -1892,6 +1923,50 @@ mod tests {
         assert_eq!(at(f32::NEG_INFINITY), at(-45.0));
         let (u, v) = at(f32::INFINITY);
         assert!(u.is_finite() && v.is_finite());
+    }
+
+    #[test]
+    fn a_crop_that_is_not_a_box_is_dropped_or_held_to_the_frame() {
+        let at = |left, top, right, bottom| {
+            Crop {
+                left,
+                top,
+                right,
+                bottom,
+            }
+            .sanitized()
+        };
+        let nan = f32::NAN;
+        let edges = |c: Option<Crop>| c.map(|c| [c.left, c.top, c.right, c.bottom]);
+        assert_eq!(edges(at(0.1, 0.2, 0.8, 0.9)), Some([0.1, 0.2, 0.8, 0.9]));
+        for gone in [
+            at(nan, 0.0, 1.0, 1.0),
+            at(0.0, 0.0, f32::INFINITY, 1.0),
+            at(0.5, 0.0, 0.2, 1.0),
+            at(0.0, 0.0, 0.01, 1.0),
+            at(2.0, 0.0, 3.0, 1.0),
+        ] {
+            assert_eq!(gone, None);
+        }
+        assert_eq!(edges(at(-5.0, -1.0, 5.0, 1.5)), Some([0.0, 0.0, 1.0, 1.0]));
+        assert_eq!(edges(at(0.7, 0.0, 5.0, 1.0)), Some([0.7, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn a_crop_in_a_sidecar_is_sanitized_as_it_loads() {
+        let load = |crop: &str| {
+            serde_json::from_str::<Adjustments>(&format!("{{\"crop\":{crop}}}")).unwrap()
+        };
+        let good = load(r#"{"left":0.1,"top":0.2,"right":0.8,"bottom":0.9}"#);
+        assert_eq!(good.crop.map(|c| c.right), Some(0.8));
+        let wide = load(r#"{"left":-5,"top":0,"right":5,"bottom":1}"#);
+        assert_eq!(wide.crop.map(|c| (c.left, c.right)), Some((0.0, 1.0)));
+        for bad in [
+            r#"{"left":0.5,"top":0,"right":0.2,"bottom":1}"#,
+            r#"{"left":0,"top":0,"right":0.001,"bottom":1}"#,
+        ] {
+            assert_eq!(load(bad).crop, None, "{bad}");
+        }
     }
 
     #[test]

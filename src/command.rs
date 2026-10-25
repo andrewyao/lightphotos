@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::develop::copy::{CopyItem, CopyItems};
 use crate::develop::{
     mask::{MAX_BRUSH_POINTS, MAX_STROKES_PER_MASK},
-    Adjustments, Crop, LocalAmounts, Mask, MaskShape, SliderId, Straighten, MAX_MASKS, SLIDERS,
-    STRAIGHTEN_RANGE,
+    Adjustments, Crop, LocalAmounts, Mask, MaskShape, SliderId, Straighten, MAX_MASKS, MIN_CROP,
+    SLIDERS, STRAIGHTEN_RANGE,
 };
 use crate::export::ExportSettings;
 use crate::sidecar::{ColorLabel, ImageRecord, MAX_RATING};
@@ -620,6 +620,9 @@ impl CropParams {
             }
             if c.left >= c.right || c.top >= c.bottom {
                 return Err(bad("crop needs left < right and top < bottom"));
+            }
+            if c.right - c.left < MIN_CROP || c.bottom - c.top < MIN_CROP {
+                return Err(bad("crop must be at least 0.02 wide and tall"));
             }
         }
         if let Some(deg) = self.straighten {
@@ -1765,6 +1768,11 @@ mod tests {
         assert!(crop(0.9, 0.1, 0.1, 0.9).validate().is_err());
         assert!(crop(-0.1, 0.0, 1.0, 1.0).validate().is_err());
         assert!(crop(0.0, 0.0, f32::NAN, 1.0).validate().is_err());
+        assert!(
+            crop(0.0, 0.0, 0.01, 1.0).validate().is_err(),
+            "narrower than the crop tool can hold"
+        );
+        assert!(crop(0.0, 0.0, 0.02, 0.02).validate().is_ok());
         let unturned = || -> Result<(f32, f32), CommandError> { panic!("no size needed") };
         let full = crop(0.0, 0.0, 1.0, 1.0);
         let cropped = crop(0.1, 0.1, 0.9, 0.9)

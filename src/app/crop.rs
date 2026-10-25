@@ -1305,6 +1305,40 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_crop_that_is_not_a_box_cannot_panic_the_crop_tool() {
+        // Through the sidecar's own deserializer, as a hostile file arrives.
+        for json in [
+            r#"{"left":-5,"top":0,"right":5,"bottom":1}"#,
+            r#"{"left":0,"top":0,"right":-3,"bottom":1}"#,
+            r#"{"left":0.5,"top":0.5,"right":0.2,"bottom":0.2}"#,
+            r#"{"left":0,"top":0,"right":0.01,"bottom":1}"#,
+        ] {
+            let saved = serde_json::from_str::<Adjustments>(&format!(r#"{{"crop":{json}}}"#))
+                .unwrap()
+                .crop;
+            let mut app = photo_app(0, saved);
+            app.enter_crop();
+            app.crop_grab_move(0.5, 0.5);
+            app.crop_drag_to(0.0, 0.0);
+            for edge in [
+                CropEdge::Left,
+                CropEdge::Right,
+                CropEdge::Top,
+                CropEdge::Bottom,
+            ] {
+                app.crop_grab(edge);
+                app.crop_drag_to(0.3, 0.3);
+            }
+            let r = app.crop_rect().unwrap();
+            let ordered = 0.0 <= r.left && r.left < r.right && r.right <= 1.0;
+            assert!(
+                ordered && 0.0 <= r.top && r.top < r.bottom && r.bottom <= 1.0,
+                "{json} -> {r:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_drag_stops_at_the_turned_photos_edge() {
         let mut app = photo_app(0, None);
         app.enter_crop();
