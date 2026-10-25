@@ -58,18 +58,20 @@ echo "==> Building (trunk build --release)"
 trunk build --release --config "$ROOT/Trunk.toml"
 
 DIST="$ROOT/dist"
-NEW_JS="$(find "$DIST" -maxdepth 1 -name 'lightphotos-*.js' -not -name '*_bg.wasm' | head -1)"
-if [[ -z "$NEW_JS" ]]; then
-  echo "error: no lightphotos-*.js found in $DIST after build" >&2
+NEW_JS="$(find "$DIST" -maxdepth 1 -name 'lightphotos-*.js' | head -1)"
+NEW_WASM="$(find "$DIST" -maxdepth 1 -name 'lightphotos-*_bg.wasm' | head -1)"
+if [[ -z "$NEW_JS" || -z "$NEW_WASM" ]]; then
+  echo "error: no lightphotos-*.js and lightphotos-*_bg.wasm found in $DIST after build" >&2
   exit 1
 fi
-NEW_HASH="$(basename "$NEW_JS" .js | sed 's/^lightphotos-//')"
-NEW_WASM="$DIST/lightphotos-${NEW_HASH}_bg.wasm"
-[[ -f "$NEW_WASM" ]] || { echo "error: expected $NEW_WASM, not found" >&2; exit 1; }
+# trunk hashes the JS glue and the wasm separately, so they differ.
+NEW_JS_HASH="$(basename "$NEW_JS" .js | sed 's/^lightphotos-//')"
+NEW_WASM_HASH="$(basename "$NEW_WASM" _bg.wasm | sed 's/^lightphotos-//')"
 
-OLD_HASH="$(grep -o 'lightphotos-[0-9a-f]*' "$SITE_PUBLIC/app.html" | head -1 | sed 's/^lightphotos-//')"
-echo "==> Old hash: $OLD_HASH"
-echo "==> New hash: $NEW_HASH"
+OLD_JS_HASH="$(grep -o 'lightphotos-[0-9a-f]*\.js' "$SITE_PUBLIC/app.html" | head -1 | sed 's/^lightphotos-//; s/\.js$//')"
+OLD_WASM_HASH="$(grep -o 'lightphotos-[0-9a-f]*_bg\.wasm' "$SITE_PUBLIC/app.html" | head -1 | sed 's/^lightphotos-//; s/_bg\.wasm$//')"
+echo "==> JS hash:   ${OLD_JS_HASH:-none} -> $NEW_JS_HASH"
+echo "==> wasm hash: ${OLD_WASM_HASH:-none} -> $NEW_WASM_HASH"
 
 # The icons go to the site root rather than app/, so every page on the site
 # can link them, and iOS finds /apple-touch-icon.png without being told.
@@ -122,9 +124,12 @@ if [[ -d "$DIST/snippets" ]]; then
   cp -R "$DIST/snippets" "$SITE_PUBLIC/app/"
 fi
 
-if [[ -n "$OLD_HASH" && "$OLD_HASH" != "$NEW_HASH" ]]; then
-  echo "==> Updating hashed URLs in public/app.html"
-  sed -i '' "s/lightphotos-${OLD_HASH}/lightphotos-${NEW_HASH}/g" "$SITE_PUBLIC/app.html"
+echo "==> Updating hashed URLs in public/app.html"
+if [[ -n "$OLD_JS_HASH" ]]; then
+  sed -i '' "s/lightphotos-${OLD_JS_HASH}\.js/lightphotos-${NEW_JS_HASH}.js/g" "$SITE_PUBLIC/app.html"
+fi
+if [[ -n "$OLD_WASM_HASH" ]]; then
+  sed -i '' "s/lightphotos-${OLD_WASM_HASH}_bg\.wasm/lightphotos-${NEW_WASM_HASH}_bg.wasm/g" "$SITE_PUBLIC/app.html"
 fi
 
 echo "==> Done. Review the diff in $SITE_DIR and commit/push there yourself:"

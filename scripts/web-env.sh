@@ -15,6 +15,19 @@
 WEB_TOOLCHAIN=nightly-2026-09-28
 
 export RUSTUP_TOOLCHAIN="$WEB_TOOLCHAIN"
+# A Homebrew `rust` cargo ahead of rustup's on PATH ignores RUSTUP_TOOLCHAIN
+# and has no wasm32 target, so put the pinned toolchain's own bin first.
+_web_toolchain_bin="$(find "${RUSTUP_HOME:-$HOME/.rustup}/toolchains" -maxdepth 2 \
+  -path "*/$WEB_TOOLCHAIN-*/bin" -type d 2>/dev/null | head -1)"
+if [ -n "$_web_toolchain_bin" ]; then
+  export PATH="$_web_toolchain_bin:$PATH"
+  # The rustup proxy would have set this for rust-lld, which can't find
+  # libLLVM.dylib without it; calling the toolchain's cargo directly doesn't.
+  if [ "$(uname)" = Darwin ]; then
+    export DYLD_FALLBACK_LIBRARY_PATH="${_web_toolchain_bin%/bin}/lib${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
+  fi
+fi
+unset _web_toolchain_bin
 export CARGO_UNSTABLE_BUILD_STD=std,panic_abort
 # Its own target directory, so a web build does not evict the native build's
 # artifacts, which a different compiler and a rebuilt std would otherwise do.
