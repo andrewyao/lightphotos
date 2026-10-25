@@ -5,6 +5,8 @@
 
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) mod analytics;
+#[cfg(all(target_arch = "wasm32", feature = "heap-stats"))]
+pub(crate) mod heap_stats;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod web_canvas;
 #[cfg(target_arch = "wasm32")]

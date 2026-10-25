@@ -30,3 +30,29 @@ needs.
 arrows through the strip four times at 60 ms a press, reporting the wasm
 heap after each pass and any `unreachable` trap. Before the Loupe lanes were
 pruned and capped, the heap reached the 4 GB ceiling within one pass.
+
+## Heap
+
+Every script reloads the page with `WebAssembly.Memory` wrapped, then reports
+the heap at its phase boundaries (`heapAfterOpen`, `heapAfterScroll`,
+`heapAfterFlick`, `heapAfterLoupe`, `heapBeforeExport`, `heapAfterExport`,
+and `end` in `loupe-arrows.js`):
+
+- `heapMB`: the shared wasm memory's size. It never shrinks, so a later
+  reading is the peak so far. It counts free blocks and fragmentation, not
+  just what the app holds.
+- `liveMB` and `peakLiveMB`: bytes allocated and not yet freed, now and at
+  the most. They are `null` unless the build has the `heap-stats` feature,
+  which counts every allocation and slows the app, so don't take timings from
+  it:
+
+  ```sh
+  source scripts/web-env.sh && trunk build --release --features heap-stats --config Trunk.toml
+  ```
+
+`heapMB - peakLiveMB` is memory the heap grew to hold but that was never live
+at once: mostly free blocks too fragmented to reuse, plus stacks, static data
+and allocator overhead. A large gap means reusing buffers can help. A small
+one means the live peak is the problem.
+
+Baselines: not recorded yet.

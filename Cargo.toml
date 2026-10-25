@@ -118,6 +118,14 @@ hotpath = ["hotpath/hotpath"]
 # the timings from an alloc run are not comparable with a timing-only run.
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
+# Browser build only. Counts live heap bytes through `cap`'s allocator wrapper
+# and exposes the live and peak bytes to the page as `window.__lpHeapStats()`,
+# so `tools/web-bench` can compare the committed wasm heap with what is
+# actually live. A few atomic operations per allocation on a heap every worker
+# shares, so it stays out of release builds. Don't combine it with
+# `hotpath-alloc`: both install a global allocator.
+heap-stats = ["dep:cap"]
+
 # Census. Compiles lightwatch's counters and its emit thread in; with it off,
 # every tracked type is the struct it would have been without the attribute.
 lightwatch = ["lightwatch/enabled"]
@@ -268,6 +276,7 @@ web-sys = { version = "0.3", features = [
     "EventTarget",
 ] }
 js-sys = "0.3"
+cap = { version = "0.1", features = ["stats"], optional = true }
 wasm_thread = "0.3"
 # Already in the graph through rawler. Named here so each wasm decode thread
 # can give rawler a rayon pool of its own; see `Worker::run` in jobs/loader.rs.

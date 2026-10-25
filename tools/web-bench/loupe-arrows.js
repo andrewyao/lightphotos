@@ -12,6 +12,17 @@ async (page) => {
   });
   await page.reload();
   await page.waitForSelector('canvas');
+  // `__lpHeapStats` exists only in a `--features heap-stats` build.
+  const heap = () => page.evaluate(() => {
+    const mb = b => Math.round(b / 1048576);
+    const m = window.__lpMemory;
+    const [live, peak] = window.__lpHeapStats ? window.__lpHeapStats() : [null, null];
+    return {
+      heapMB: m ? mb(m.buffer.byteLength) : null,
+      liveMB: live === null ? null : mb(live),
+      peakLiveMB: peak === null ? null : mb(peak),
+    };
+  });
 
   const photos = await page.evaluate(async () => {
     const listing = await (await fetch('/bench/')).text();
@@ -30,10 +41,6 @@ async (page) => {
 
   const traps = [];
   page.on('pageerror', e => traps.push(e.message));
-  const heapMB = () => page.evaluate(() => {
-    const m = window.__lpMemory;
-    return m ? Math.round(m.buffer.byteLength / 1048576) : null;
-  });
 
   const canvas = page.locator('canvas');
   await canvas.click({ position: { x: 800, y: 900 } });
@@ -41,7 +48,7 @@ async (page) => {
   await page.waitForTimeout(6000);
   await canvas.dblclick({ position: { x: 320, y: 220 } });
   await page.waitForTimeout(3000);
-  const heapAfterOpen = await heapMB();
+  const heapAfterOpen = await heap();
 
   const passes = [];
   for (let r = 0; r < 4 && !traps.length; r++) {
@@ -51,7 +58,8 @@ async (page) => {
       await page.waitForTimeout(60);
     }
     await page.waitForTimeout(3000);
-    passes.push({ key, heapMB: await heapMB() });
+    passes.push({ key, ...await heap() });
   }
-  return { photos, heapAfterOpen, passes, traps };
+  // The heap never shrinks, so the last reading is the peak.
+  return { photos, heapAfterOpen, passes, end: await heap(), traps };
 }

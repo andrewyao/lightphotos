@@ -1,4 +1,29 @@
 async (page) => {
+  // The shared wasm memory is created by the page's JS glue, so wrap the
+  // constructor before a reload to keep a handle on it.
+  await page.addInitScript(() => {
+    const Memory = WebAssembly.Memory;
+    WebAssembly.Memory = function (d) {
+      const m = new Memory(d);
+      if (d && d.shared) window.__lpMemory = m;
+      return m;
+    };
+    WebAssembly.Memory.prototype = Memory.prototype;
+  });
+  await page.reload();
+  await page.waitForSelector('canvas');
+  // `__lpHeapStats` exists only in a `--features heap-stats` build.
+  const heap = () => page.evaluate(() => {
+    const mb = b => Math.round(b / 1048576);
+    const m = window.__lpMemory;
+    const [live, peak] = window.__lpHeapStats ? window.__lpHeapStats() : [null, null];
+    return {
+      heapMB: m ? mb(m.buffer.byteLength) : null,
+      liveMB: live === null ? null : mb(live),
+      peakLiveMB: peak === null ? null : mb(peak),
+    };
+  });
+
   const N = 600;
   const setup = await page.evaluate(async (N) => {
     const listing = await (await fetch('/bench/')).text();
@@ -45,6 +70,7 @@ async (page) => {
     };
   });
   const open = await stats();
+  const heapAfterOpen = await heap();
 
   await page.evaluate(() => { window.__frames = []; window.__long = []; });
   await page.mouse.move(800, 900);
@@ -55,5 +81,5 @@ async (page) => {
   }
   await page.waitForTimeout(4000);
   const scroll = await stats();
-  return { photos: setup, open, scroll, scrollWallMs: Date.now() - t0 };
+  return { photos: setup, open, scroll, scrollWallMs: Date.now() - t0, heapAfterOpen, heapAfterScroll: await heap() };
 }

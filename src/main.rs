@@ -762,6 +762,8 @@ fn main() {
 #[cfg(target_arch = "wasm32")]
 fn main() {
     web::analytics::start();
+    #[cfg(feature = "heap-stats")]
+    web::heap_stats::register();
     console_error_panic_hook::set_once();
     jobs::loader::install_panic_recovery();
     jobs::loader::start_clock();
