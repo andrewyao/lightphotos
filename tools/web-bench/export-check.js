@@ -16,7 +16,9 @@ async (page) => {
   const heap = () => page.evaluate(() => {
     const mb = b => Math.round(b / 1048576);
     const m = window.__lpMemory;
-    const [live, peak] = window.__lpHeapStats ? window.__lpHeapStats() : [null, null];
+    let live = null, peak = null;
+    // A wasm trap can leave the counters unreachable; keep the rest of the report.
+    try { if (window.__lpHeapStats) [live, peak] = window.__lpHeapStats(); } catch {}
     return {
       heapMB: m ? mb(m.buffer.byteLength) : null,
       liveMB: live === null ? null : mb(live),
