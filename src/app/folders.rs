@@ -1142,7 +1142,10 @@ mod tests {
         let other = FolderLock::try_acquire(&a, Writer::Mcp).unwrap();
         crate::app::test_support::load_folder(&mut app, &a);
         drop(other);
-        let mut quitting = FolderLock::try_acquire(&a, Writer::App).unwrap();
+        // The writer thread's retry of a parked write can hold the lock for a
+        // moment right after `other` lets go, so wait it out.
+        let mut quitting =
+            FolderLock::acquire(&a, Writer::App, std::time::Duration::from_secs(5)).unwrap();
         quitting.mark_quitting();
         app.load_playlist(Playlist::from_dir(&a), a.clone());
         let opening = app.folder_store.opening();
