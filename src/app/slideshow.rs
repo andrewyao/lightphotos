@@ -96,12 +96,27 @@ pub(super) struct Deck {
     fresh: bool,
 }
 
+/// The clock's nanoseconds, to seed a shuffle or a coin flip.
+pub(super) fn clock_seed() -> u64 {
+    let nanos = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    u64::from(nanos)
+}
+
+/// The next number of an xorshift64 `state`, which must not be zero.
+pub(super) fn xorshift(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
+
 impl Deck {
     pub(super) fn new() -> Deck {
-        let nanos = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
-        Deck::seeded(u64::from(nanos))
+        Deck::seeded(clock_seed())
     }
 
     fn seeded(seed: u64) -> Deck {
@@ -162,12 +177,7 @@ impl Deck {
     }
 
     fn next_u64(&mut self) -> u64 {
-        let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.rng = x;
-        x
+        xorshift(&mut self.rng)
     }
 }
 

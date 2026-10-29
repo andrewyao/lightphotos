@@ -1432,6 +1432,12 @@ mod tests {
                 center: (0.5, 0.4),
                 side: 0.3,
             }),
+            bounds: Some(crate::scoring::facequality::FaceBounds {
+                left: 0.4,
+                top: 0.3,
+                right: 0.6,
+                bottom: 0.5,
+            }),
         };
         {
             let mut cache = SignalCache::load(&dir);
@@ -1449,6 +1455,7 @@ mod tests {
             faces: 2,
             min_eye_openness: None,
             frame: None,
+            bounds: None,
         };
         app.signals.record(&b, Signal::Faces(two_faces));
 

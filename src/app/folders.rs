@@ -862,6 +862,7 @@ mod tests {
             faces: 1,
             min_eye_openness: None,
             frame: None,
+            bounds: None,
         };
         app.signals.record(&photo, Signal::Faces(faces));
         app.signals

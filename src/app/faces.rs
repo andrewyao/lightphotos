@@ -44,8 +44,9 @@ impl Faces {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn seed(&mut self, path: PathBuf, quality: FaceQuality) {
         // Cached before faces had a frame, so Compare would have none to
-        // start on: analyze it again.
-        if quality.faces > 0 && quality.frame.is_none() {
+        // start on, or before they had bounds, for the slide show: analyze
+        // it again.
+        if quality.faces > 0 && (quality.frame.is_none() || quality.bounds.is_none()) {
             return;
         }
         self.quality.entry(path).or_insert(quality);
@@ -139,8 +140,18 @@ impl App {
         &mut self,
         path: &Path,
     ) -> Option<Option<crate::scoring::facequality::FaceFrame>> {
+        Some(self.face_analysis(path)?.and_then(|q| q.frame))
+    }
+
+    /// `path`'s face analysis, with the same answers as `face_frame`:
+    /// `Some(None)` when it can't be analyzed, `None` while it runs. A photo
+    /// with no faces gives `Some(Some(..))` with `faces` 0.
+    pub(super) fn face_analysis(
+        &mut self,
+        path: &Path,
+    ) -> Option<Option<crate::scoring::facequality::FaceQuality>> {
         if let Some(q) = self.faces.quality.get(path) {
-            return Some(q.frame);
+            return Some(Some(*q));
         }
         let Some(pool) = &self.faces.pool else {
             return Some(None);
@@ -199,6 +210,7 @@ mod tests {
                 faces: 0,
                 min_eye_openness: None,
                 frame: None,
+                bounds: None,
             },
         );
         let mut got = app.face_candidates();
@@ -217,26 +229,53 @@ mod tests {
 
     #[test]
     fn a_cached_analysis_with_faces_but_no_frame_runs_again() {
-        use crate::scoring::facequality::{FaceFrame, FaceQuality};
+        use crate::scoring::facequality::{FaceBounds, FaceFrame, FaceQuality};
         let mut faces = super::Faces::new();
         let old = FaceQuality {
             faces: 2,
             min_eye_openness: None,
             frame: None,
+            bounds: None,
         };
         faces.seed("old.jpg".into(), old);
         assert!(faces.quality.is_empty(), "no frame for Compare to start on");
         let none = FaceQuality { faces: 0, ..old };
         faces.seed("empty.jpg".into(), none);
-        let framed = FaceQuality {
-            frame: Some(FaceFrame {
-                center: (0.5, 0.5),
-                side: 0.2,
+        let frame = Some(FaceFrame {
+            center: (0.5, 0.5),
+            side: 0.2,
+        });
+        let framed = FaceQuality { frame, ..old };
+        faces.seed("framed.jpg".into(), framed);
+        assert_eq!(faces.quality.len(), 1, "no bounds for the slide show");
+        let bounded = FaceQuality {
+            bounds: Some(FaceBounds {
+                left: 0.4,
+                top: 0.4,
+                right: 0.6,
+                bottom: 0.6,
             }),
-            ..old
+            ..framed
         };
-        faces.seed("new.jpg".into(), framed);
+        faces.seed("new.jpg".into(), bounded);
         assert_eq!(faces.quality.len(), 2);
+    }
+
+    #[test]
+    fn a_photo_with_a_finished_analysis_answers_at_once_and_one_without_waits() {
+        use crate::app::test_support::folder_app;
+        use crate::scoring::facequality::FaceQuality;
+        let (mut app, dir, paths) = folder_app("faces-analysis", 2);
+        let analyzed = FaceQuality {
+            faces: 0,
+            ..FaceQuality::default()
+        };
+        app.faces.quality.insert(paths[0].clone(), analyzed);
+        assert_eq!(app.face_analysis(&paths[0]), Some(Some(analyzed)));
+        assert_eq!(app.face_frame(&paths[0]), Some(None), "no faces, no frame");
+        // A test App has no pool, so a photo never analyzed can't be.
+        assert_eq!(app.face_analysis(&paths[1]), Some(None));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

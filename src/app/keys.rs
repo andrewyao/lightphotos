@@ -932,6 +932,7 @@ mod tests {
         let (mut app, _) = editor_app();
         app.loupe_viewport = Some((0, 0, 800, 400));
         press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        app.pin_slide_direction(false);
         let t0 = Instant::now();
         let next = app.tick_slideshow(t0).unwrap_or(t0);
         let start = next - Duration::from_secs(5);
@@ -957,6 +958,96 @@ mod tests {
         assert_eq!(pan, Some((0.0, 0.0)), "the next photo's top");
         press(&mut app, ModifiersState::empty(), KeyCode::Escape);
         assert_eq!(app.slide_view(), None, "the show's zoom ends with it");
+    }
+
+    #[test]
+    fn a_slide_show_starts_a_photo_with_faces_at_the_edge_farthest_from_them_and_ends_zoomed_in() {
+        use crate::scoring::facequality::{FaceBounds, FaceFrame, FaceQuality};
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, paths) = editor_app();
+        app.loupe_viewport = Some((0, 0, 800, 400));
+        // A face high on the square photo, so the show starts at the bottom.
+        app.faces.seed(
+            paths[0].clone(),
+            FaceQuality {
+                faces: 1,
+                min_eye_openness: None,
+                frame: Some(FaceFrame {
+                    center: (0.5, 0.15),
+                    side: 0.2,
+                }),
+                bounds: Some(FaceBounds {
+                    left: 0.4,
+                    top: 0.1,
+                    right: 0.6,
+                    bottom: 0.2,
+                }),
+            },
+        );
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        let t0 = Instant::now();
+        let next = app.tick_slideshow(t0).unwrap_or(t0);
+        let start = next - Duration::from_secs(5);
+        app.tick_slideshow(start);
+        assert_eq!(
+            app.slide_view(),
+            Some((0.8, (0.0, -400.0))),
+            "the bottom first"
+        );
+        // Part way, the box is not yet on screen. The view is closing in as it goes.
+        app.tick_slideshow(start + Duration::from_millis(500));
+        assert!(app.slide_face_box().is_some_and(|[_, top, _, _]| top < 0.0));
+        app.tick_slideshow(start + Duration::from_millis(2500));
+        let [left, top, right, bottom] = app.slide_face_box().unwrap_or_default();
+        assert!(
+            left >= 0.0 && top >= 0.0 && right <= 800.0 && bottom <= 400.0,
+            "the whole box shows by the middle: {left} {top} {right} {bottom}"
+        );
+        let (zoom, _) = app.slide_view().unwrap_or_default();
+        assert!(zoom > 0.8 && zoom < 1.2, "still zooming: {zoom}");
+        app.tick_slideshow(next - Duration::from_millis(1));
+        let (zoom, (x, y)) = app.slide_view().unwrap_or_default();
+        assert!((zoom - 1.2).abs() < 1e-3, "1.5 times the fill zoom: {zoom}");
+        assert!(
+            (x + 200.0).abs() < 1.0 && y.abs() < 1.0,
+            "on the face: {x} {y}"
+        );
+    }
+
+    #[test]
+    fn a_slide_show_gives_a_photo_its_time_only_once_its_faces_are_known() {
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, _) = editor_app();
+        app.loupe_viewport = Some((0, 0, 800, 400));
+        app.start_face_pool();
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        app.pin_slide_direction(false);
+        let t0 = Instant::now();
+        // Nothing has collected the analysis yet, so the time doesn't run.
+        for waited in [1, 3, 9] {
+            let now = t0 + Duration::from_secs(waited);
+            assert!(app
+                .tick_slideshow(now)
+                .is_some_and(|at| at < now + Duration::from_secs(1)));
+            assert_eq!(app.sel, Some(0), "still on the first photo");
+            assert_eq!(app.slide_view(), Some((0.8, (0.0, 0.0))));
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.faces.submitted() > 0 {
+            app.poll_face_quality();
+            assert!(Instant::now() < deadline, "the analysis never finished");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Its faces are known, and the time starts from here.
+        let now = t0 + Duration::from_secs(9);
+        let next = app.tick_slideshow(now).unwrap_or(now);
+        assert_eq!(next, now + Duration::from_secs(5));
+        app.tick_slideshow(now + Duration::from_millis(2500));
+        assert_eq!(app.slide_view(), Some((0.8, (0.0, -200.0))));
     }
 
     #[test]

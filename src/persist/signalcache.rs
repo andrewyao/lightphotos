@@ -107,11 +107,12 @@ impl PhotoSignals {
 
 /// Validity key from the source's mtime and length, the same shape as
 /// [`crate::jobs::thumbnail::cache_key`]. The path is not hashed, so moving a folder
-/// keeps its cache valid. Bump the version string to discard every entry.
+/// keeps its cache valid. Bump the version string to discard every entry. v2:
+/// v1 kept face boxes turned a second time on photos with an EXIF orientation.
 #[cfg(not(target_arch = "wasm32"))]
 fn signal_key(mtime_ms: u64, len: u64) -> u64 {
     let mut h = crate::hash::Fnv1a::new();
-    h.write(b"lightphotos-signals-v1");
+    h.write(b"lightphotos-signals-v2");
     h.write(&mtime_ms.to_le_bytes());
     h.write(&len.to_le_bytes());
     h.finish()
@@ -481,6 +482,7 @@ mod tests {
             faces: n,
             min_eye_openness: None,
             frame: None,
+            bounds: None,
         })
     }
 
@@ -508,6 +510,7 @@ mod tests {
                     faces: 2,
                     min_eye_openness: Some(0.31),
                     frame: None,
+                    bounds: None,
                 }),
             );
             cache.flush_blocking(Duration::from_secs(5));

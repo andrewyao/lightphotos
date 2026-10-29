@@ -138,6 +138,11 @@ pub struct FaceQuality {
     /// before this was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<FaceFrame>,
+    /// The box around every face, for the slide show to pan to and zoom on.
+    /// `None` with no faces, and for an analysis cached before this was
+    /// recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<FaceBounds>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -146,14 +151,24 @@ pub struct FaceFrame {
     pub side: f32,
 }
 
+/// A box in the upright photo's uv, 0 to 1, origin top-left.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FaceBounds {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
 /// Room around the face, so the square shows it whole.
 const FRAME_MARGIN: f32 = 1.3;
 
 /// The square around one face in `faces`, the one whose center is nearest
 /// the upright photo's top-left corner, found on a stored `w`×`h` image
-/// whose EXIF orientation is `orientation`. Vision reports boxes on the
-/// stored pixels with the origin bottom-left; the square is in the upright
-/// photo's uv, origin top-left.
+/// whose EXIF orientation is `orientation`, which only tells whether the
+/// upright photo is turned on its side. Vision applies the orientation to a
+/// file itself, so its boxes are already upright, with the origin
+/// bottom-left; the square is in the upright photo's uv, origin top-left.
 pub fn face_frame(faces: &[RawFace], (w, h): (u32, u32), orientation: u8) -> Option<FaceFrame> {
     let (dw, dh) = if (5..=8).contains(&orientation) {
         (h, w)
@@ -164,20 +179,13 @@ pub fn face_frame(faces: &[RawFace], (w, h): (u32, u32), orientation: u8) -> Opt
     if short <= 0.0 {
         return None;
     }
-    let upright = |f: &RawFace| {
-        let (x, y, bw, bh) = f.bounding_box;
-        // Stored uv, origin top-left.
-        let (u0, v0, u1, v1) = (x, 1.0 - y - bh, x + bw, 1.0 - y);
-        let [a, b] = [(u0, v0), (u1, v1)].map(|(u, v)| upright_uv(u, v, orientation));
-        (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
-    };
     // In pixels, so a wide photo's x counts as much as its y.
     let distance = |(x0, y0, x1, y1): (f32, f32, f32, f32)| {
         ((x0 + x1) / 2.0 * dw as f32).hypot((y0 + y1) / 2.0 * dh as f32)
     };
     let (x0, y0, x1, y1) = faces
         .iter()
-        .map(upright)
+        .map(upright_rect)
         .filter(|b| distance(*b).is_finite())
         .min_by(|a, b| distance(*a).total_cmp(&distance(*b)))?;
     let extent = ((x1 - x0) * dw as f32).max((y1 - y0) * dh as f32);
@@ -187,18 +195,34 @@ pub fn face_frame(faces: &[RawFace], (w, h): (u32, u32), orientation: u8) -> Opt
         .then_some(FaceFrame { center, side })
 }
 
-/// A point in stored uv moved to where EXIF `orientation` shows it.
-fn upright_uv(u: f32, v: f32, orientation: u8) -> (f32, f32) {
-    match orientation {
-        2 => (1.0 - u, v),
-        3 => (1.0 - u, 1.0 - v),
-        4 => (u, 1.0 - v),
-        5 => (v, u),
-        6 => (1.0 - v, u),
-        7 => (1.0 - v, 1.0 - u),
-        8 => (v, 1.0 - u),
-        _ => (u, v),
+/// The box around every face in `faces`, in the upright photo's uv, found
+/// on a `w`×`h` image. `None` with no faces, no image, or no box left after
+/// clamping to the photo.
+pub fn face_bounds(faces: &[RawFace], (w, h): (u32, u32)) -> Option<FaceBounds> {
+    if w == 0 || h == 0 {
+        return None;
     }
+    let (left, top, right, bottom) = faces
+        .iter()
+        .map(upright_rect)
+        .filter(|&(l, t, r, b)| [l, t, r, b].iter().all(|v| v.is_finite()))
+        .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))?;
+    let [left, top, right, bottom] = [left, top, right, bottom].map(|v| v.clamp(0.0, 1.0));
+    (right > left && bottom > top).then_some(FaceBounds {
+        left,
+        top,
+        right,
+        bottom,
+    })
+}
+
+/// `face`'s box as (left, top, right, bottom) in the upright photo's uv,
+/// origin top-left. Vision reports it with the origin bottom-left, and
+/// already turned by the file's EXIF orientation: a rectangle in a photo
+/// marked orientation 6 came back with its upright width and height.
+fn upright_rect(face: &RawFace) -> (f32, f32, f32, f32) {
+    let (x, y, bw, bh) = face.bounding_box;
+    (x, 1.0 - y - bh, x + bw, 1.0 - y)
 }
 
 impl FaceQuality {
@@ -273,6 +297,7 @@ pub fn face_quality(faces: &[RawFace], aspect_wh: f32) -> FaceQuality {
         faces: faces.len() as u32,
         min_eye_openness,
         frame: None,
+        bounds: None,
     }
 }
 
@@ -283,15 +308,12 @@ pub fn analyze(path: &Path) -> Result<FaceQuality, String> {
     let faces = detect_faces(path)?;
     let size = crate::decode::image_decode::pixel_size(path);
     let aspect_wh = size.map(|(w, h)| w as f32 / h as f32).unwrap_or(1.0);
-    let frame = size.and_then(|size| {
-        face_frame(
-            &faces,
-            size,
-            crate::decode::image_decode::orientation_of(path),
-        )
-    });
+    let orientation = crate::decode::image_decode::orientation_of(path);
+    let frame = size.and_then(|size| face_frame(&faces, size, orientation));
+    let bounds = size.and_then(|size| face_bounds(&faces, size));
     Ok(FaceQuality {
         frame,
+        bounds,
         ..face_quality(&faces, aspect_wh)
     })
 }
@@ -426,14 +448,16 @@ mod tests {
     }
 
     #[test]
-    fn the_face_frame_follows_the_exif_rotation() {
+    fn the_face_frame_takes_visions_upright_boxes_and_swaps_the_stored_size() {
+        // Vision has already turned the box, so only the photo's size, which
+        // is stored sideways, depends on the orientation. The stored
+        // 4000x2000 is 2000x4000 upright, and the box 200 x 800 px of it.
         let face = [face_at(0.0, 0.0, 0.1, 0.2)];
-        // Orientation 6 turns the stored bottom-left to the top-left.
         let f = face_frame(&face, (4000, 2000), 6).expect("frames");
-        assert!(close(f.center, (0.1, 0.05)), "{f:?}");
-        // Orientation 8 turns it to the bottom-right.
+        assert!(close(f.center, (0.05, 0.9)), "{f:?}");
+        assert!((f.side - 0.4 * FRAME_MARGIN).abs() < 1e-4, "{f:?}");
         let f = face_frame(&face, (4000, 2000), 8).expect("frames");
-        assert!(close(f.center, (0.9, 0.95)), "{f:?}");
+        assert!(close(f.center, (0.05, 0.9)), "{f:?}");
     }
 
     #[test]
@@ -444,9 +468,9 @@ mod tests {
         let f = face_frame(&faces, (1000, 1000), 1).expect("frames");
         assert!(close(f.center, (0.4, 0.3)), "{f:?}");
         assert!((f.side - 0.2 * FRAME_MARGIN).abs() < 1e-4, "{f:?}");
-        // Turned by orientation 6, the low-left face lands at the top-left.
+        // A square photo turned on its side has the same upright boxes.
         let f = face_frame(&faces, (1000, 1000), 6).expect("frames");
-        assert!(close(f.center, (0.15, 0.15)), "{f:?}");
+        assert!(close(f.center, (0.4, 0.3)), "{f:?}");
     }
 
     #[test]
@@ -454,6 +478,47 @@ mod tests {
         let faces = [face_at(0.1, 0.4, 0.1, 0.1)];
         assert_eq!(face_frame(&[], (1000, 1000), 1), None);
         assert_eq!(face_frame(&faces, (0, 0), 1), None, "an empty image");
+    }
+
+    fn bounds_close(b: FaceBounds, want: (f32, f32, f32, f32)) -> bool {
+        let got = (b.left, b.top, b.right, b.bottom);
+        [
+            (got.0, want.0),
+            (got.1, want.1),
+            (got.2, want.2),
+            (got.3, want.3),
+        ]
+        .iter()
+        .all(|(g, w)| (g - w).abs() < 1e-4)
+    }
+
+    #[test]
+    fn the_face_bounds_hold_every_face_and_flip_visions_origin() {
+        // Vision's origin is bottom-left: this face is low on the left, that
+        // one high on the right.
+        let faces = [face_at(0.1, 0.1, 0.1, 0.1), face_at(0.6, 0.7, 0.2, 0.1)];
+        let b = face_bounds(&faces, (1000, 1000)).expect("two faces");
+        assert!(bounds_close(b, (0.1, 0.2, 0.8, 0.9)), "{b:?}");
+        let one = face_bounds(&faces[..1], (1000, 1000)).expect("one face");
+        assert!(bounds_close(one, (0.1, 0.8, 0.2, 0.9)), "{one:?}");
+    }
+
+    #[test]
+    fn the_face_bounds_skip_what_cannot_be_a_box() {
+        let good = face_at(0.2, 0.2, 0.1, 0.1);
+        assert_eq!(face_bounds(&[], (1000, 1000)), None, "no faces");
+        assert_eq!(
+            face_bounds(std::slice::from_ref(&good), (0, 0)),
+            None,
+            "no image"
+        );
+        let nan = face_at(f32::NAN, 0.2, 0.1, 0.1);
+        let b = face_bounds(&[nan.clone(), good], (1000, 1000)).expect("the good face");
+        assert!(bounds_close(b, (0.2, 0.7, 0.3, 0.8)), "{b:?}");
+        assert_eq!(face_bounds(&[nan], (1000, 1000)), None, "only a NaN box");
+        // Off the photo altogether, so nothing is left after clamping.
+        let off = face_at(1.5, 0.2, 0.1, 0.1);
+        assert_eq!(face_bounds(&[off], (1000, 1000)), None);
     }
 
     #[test]
@@ -474,6 +539,7 @@ mod tests {
                 faces: 0,
                 min_eye_openness: None,
                 frame: None,
+                bounds: None,
             })
         }
         let pool = FacePool::with_workers(1, panics_on_boom).expect("one worker should start");

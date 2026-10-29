@@ -100,7 +100,7 @@ impl App {
             .collect()
     }
 
-    fn cell_path(&self, pos: usize) -> Option<PathBuf> {
+    pub(super) fn cell_path(&self, pos: usize) -> Option<PathBuf> {
         let idx = *self.visible.get(pos)?;
         self.playlist.as_ref()?.entry(idx).map(Path::to_path_buf)
     }
