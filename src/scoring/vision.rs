@@ -4,9 +4,10 @@
 //! an image already in memory. Given a file, Vision decodes it itself, so
 //! this never touches our decode pipeline.
 //!
-//! Vision does not read EXIF orientation from a file here. Feature prints
-//! don't care, and face detection tolerates roll. To fix it, switch to
-//! `initWithURL:orientation:options:` and pass the EXIF value through.
+//! Given a file, Vision applies its EXIF orientation: a rectangle request on a
+//! JPEG marked orientation 6 returned boxes with the upright width and height.
+//! Face boxes are therefore already upright. A `CGImage` has no orientation,
+//! so it must arrive upright.
 
 use std::path::Path;
 
