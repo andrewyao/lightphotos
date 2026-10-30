@@ -4,7 +4,9 @@
 //! geometry scores how open each eye is. [`detect_faces`] is thin Vision glue;
 //! the scoring below it is tested with fabricated points.
 
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::thread;
 
 use crate::worker_pool::WorkerPool;
@@ -88,9 +90,12 @@ pub fn faces_from(request: &VNDetectFaceLandmarksRequest) -> Vec<RawFace> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn detect_faces(_path: &Path) -> Result<Vec<RawFace>, String> {
-    Err("face detection is unsupported on this platform".into())
+/// Faces for the image at `path`, boxes only: SeetaFace finds no eye
+/// landmarks. No faces is `Ok(vec![])`; `Err` means the photo could not be
+/// read.
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
+    detect_upright(path).map(|(faces, _)| faces)
 }
 
 /// Copy a landmark region's points out of Vision's buffer.
@@ -164,17 +169,11 @@ pub struct FaceBounds {
 const FRAME_MARGIN: f32 = 1.3;
 
 /// The square around one face in `faces`, the one whose center is nearest
-/// the upright photo's top-left corner, found on a stored `w`×`h` image
-/// whose EXIF orientation is `orientation`, which only tells whether the
-/// upright photo is turned on its side. Vision applies the orientation to a
-/// file itself, so its boxes are already upright, with the origin
-/// bottom-left; the square is in the upright photo's uv, origin top-left.
-pub fn face_frame(faces: &[RawFace], (w, h): (u32, u32), orientation: u8) -> Option<FaceFrame> {
-    let (dw, dh) = if (5..=8).contains(&orientation) {
-        (h, w)
-    } else {
-        (w, h)
-    };
+/// the upright photo's top-left corner, on an upright `dw`×`dh` photo. Vision
+/// applies a file's EXIF orientation itself, so its boxes are already
+/// upright, with the origin bottom-left; the square is in the upright photo's
+/// uv, origin top-left.
+pub fn face_frame(faces: &[RawFace], (dw, dh): (u32, u32)) -> Option<FaceFrame> {
     let short = dw.min(dh) as f32;
     if short <= 0.0 {
         return None;
@@ -301,15 +300,118 @@ pub fn face_quality(faces: &[RawFace], aspect_wh: f32) -> FaceQuality {
     }
 }
 
+/// `size`, a stored image's pixel size, as it shows upright under EXIF
+/// `orientation`: orientations 5 to 8 turn it on its side.
+#[cfg(any(target_os = "macos", test))]
+fn upright_size((w, h): (u32, u32), orientation: u8) -> (u32, u32) {
+    if (5..=8).contains(&orientation) {
+        (h, w)
+    } else {
+        (w, h)
+    }
+}
+
+/// What a detector found: the faces, and the size of the upright image their
+/// boxes are on, when it is known.
+type Detected = (Vec<RawFace>, Option<(u32, u32)>);
+
+/// The faces in `path`, and the size of the upright image their boxes are
+/// on, when it is known.
+#[cfg(target_os = "macos")]
+fn detect_upright(path: &Path) -> Result<Detected, String> {
+    let faces = detect_faces(path)?;
+    let orientation = crate::decode::image_decode::orientation_of(path);
+    let size = crate::decode::image_decode::pixel_size(path).map(|s| upright_size(s, orientation));
+    Ok((faces, size))
+}
+
+/// The faces in `path`, and the size of the upright image they were found on.
+/// That is a shrunken copy, which is fine, since boxes are fractions of it.
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+fn detect_upright(path: &Path) -> Result<Detected, String> {
+    let image = crate::decode::image_decode::decode(path, crate::scoring::seetaface::DETECT_SIDE)?;
+    detect_in(&image)
+}
+
+/// The browser cannot open a file by path: the main thread reads the bytes
+/// and sends them with the job.
+#[cfg(target_arch = "wasm32")]
+fn detect_upright(job: &FaceJob) -> Result<Detected, String> {
+    let bytes = match &job.bytes {
+        Some(Ok(bytes)) => bytes,
+        Some(Err(e)) => return Err(e.clone()),
+        None => return Err("the photo's bytes were not read".into()),
+    };
+    let side = crate::scoring::seetaface::DETECT_SIDE;
+    let image = if crate::decode::image_decode::is_raw_extension(&job.path) {
+        // The JPEG the camera embedded when it is large enough, else the
+        // fast quarter-resolution decode the thumbnails use. Never the full
+        // demosaic, and the photos go one at a time, so the heap is reused.
+        match crate::decode::rawler::rawler_embedded_for_faces(bytes, side)
+            .filter(|image| image.width.max(image.height) >= side / 2)
+        {
+            Some(image) => image,
+            None => crate::decode::rawler::raw_preview::decode_raw_from_shared_vec(
+                std::sync::Arc::clone(bytes),
+                side,
+                false,
+            )?,
+        }
+    } else {
+        crate::decode::image_decode::decode_nonraw_from_bytes(bytes, side)?
+    };
+    detect_in(&image)
+}
+
+/// The faces in an upright decoded `image`, with its size.
+#[cfg(not(target_os = "macos"))]
+fn detect_in(image: &crate::decode::image_decode::DecodedImage) -> Result<Detected, String> {
+    let faces = crate::scoring::seetaface::detect(image)?;
+    Ok((faces, Some((image.width, image.height))))
+}
+
+/// One photo to analyze. The browser cannot open it by path, so there its
+/// bytes, or why they could not be read, come along.
+pub struct FaceJob {
+    pub path: PathBuf,
+    #[cfg(target_arch = "wasm32")]
+    pub bytes: Option<Result<std::sync::Arc<Vec<u8>>, String>>,
+}
+
+impl FaceJob {
+    pub fn from_path(path: PathBuf) -> Self {
+        Self {
+            path,
+            #[cfg(target_arch = "wasm32")]
+            bytes: None,
+        }
+    }
+}
+
+/// [`analyze`] for a pool's job.
+fn analyze_job(job: &FaceJob) -> Result<FaceQuality, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let detected = detect_upright(&job.path);
+    #[cfg(target_arch = "wasm32")]
+    let detected = detect_upright(job);
+    score_detected(detected?)
+}
+
 /// Detect and score one photo. Assumes a square image if its size can't be
 /// read, which skews the ratio but keeps the signal.
+#[cfg(not(target_arch = "wasm32"))]
 #[hotpath::measure]
 pub fn analyze(path: &Path) -> Result<FaceQuality, String> {
-    let faces = detect_faces(path)?;
-    let size = crate::decode::image_decode::pixel_size(path);
-    let aspect_wh = size.map(|(w, h)| w as f32 / h as f32).unwrap_or(1.0);
-    let orientation = crate::decode::image_decode::orientation_of(path);
-    let frame = size.and_then(|size| face_frame(&faces, size, orientation));
+    score_detected(detect_upright(path)?)
+}
+
+fn score_detected((faces, size): Detected) -> Result<FaceQuality, String> {
+    // Landmarks are normalized over the upright image, so its aspect is the
+    // one that counts.
+    let aspect_wh = size
+        .filter(|&(w, h)| w > 0 && h > 0)
+        .map_or(1.0, |(w, h)| w as f32 / h as f32);
+    let frame = size.and_then(|size| face_frame(&faces, size));
     let bounds = size.and_then(|size| face_bounds(&faces, size));
     Ok(FaceQuality {
         frame,
@@ -323,35 +425,41 @@ pub struct FaceOutcome {
     pub result: Result<FaceQuality, String>,
 }
 
-/// Background workers for [`analyze`], which makes Vision decode the full-size
-/// file and is too slow for the UI thread.
+/// Background workers for [`analyze`], which decodes a photo and runs a
+/// detector over it, too slow for the UI thread.
 pub struct FacePool {
-    pool: WorkerPool<PathBuf, FaceQuality>,
+    pool: WorkerPool<FaceJob, FaceQuality>,
 }
 
 impl FacePool {
-    /// `None` when no worker could start, which is the whole story on targets
-    /// that can't spawn threads. The caller must then hold no pool at all. A
-    /// pool with no workers accepts jobs that never run, and the callers that
-    /// mark those jobs pending would spin the frame loop waiting for them.
+    /// `None` when no worker could start. The caller must then hold no pool
+    /// at all. A pool with no workers accepts jobs that never run, and the
+    /// callers that mark those jobs pending would spin the frame loop waiting
+    /// for them. In the browser it is one Web Worker, to leave the others to
+    /// decoding.
     pub fn new() -> Option<Self> {
         let cores = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        Self::with_workers(cores.saturating_sub(2).clamp(1, 2), analyze)
+        let workers = if cfg!(target_arch = "wasm32") {
+            1
+        } else {
+            cores.saturating_sub(2).clamp(1, 2)
+        };
+        Self::with_workers(workers, analyze_job)
     }
 
     fn with_workers(
         workers: usize,
-        analyze: fn(&Path) -> Result<FaceQuality, String>,
+        analyze: fn(&FaceJob) -> Result<FaceQuality, String>,
     ) -> Option<Self> {
         // Callers hold the path as pending until its outcome arrives, so a
         // panic must still send one.
-        let pool = WorkerPool::spawn(
+        let pool = WorkerPool::spawn_web(
             "facequality",
             workers,
             || {},
-            move |path: &PathBuf| analyze(path),
+            move |job: &FaceJob| analyze(job),
             |_| "face analysis panicked".into(),
         );
         (pool.workers() > 0).then_some(Self { pool })
@@ -359,7 +467,14 @@ impl FacePool {
 
     /// Queue an analysis. Ignored if the workers are gone (shutdown).
     pub fn submit(&self, path: PathBuf) {
-        self.pool.submit(path);
+        self.pool.submit(FaceJob::from_path(path));
+    }
+
+    /// A way to queue analyses from a task that does not own the pool, such
+    /// as the browser's read of a photo's bytes.
+    #[cfg(target_arch = "wasm32")]
+    pub fn sender(&self) -> std::sync::mpsc::Sender<FaceJob> {
+        self.pool.sender()
     }
 
     /// Drain finished analyses without blocking.
@@ -367,7 +482,10 @@ impl FacePool {
         self.pool
             .poll()
             .into_iter()
-            .map(|(path, result)| FaceOutcome { path, result })
+            .map(|(job, result)| FaceOutcome {
+                path: job.path,
+                result,
+            })
             .collect()
     }
 }
@@ -439,8 +557,7 @@ mod tests {
     #[test]
     fn the_face_frame_flips_visions_bottom_left_origin() {
         // A face in the stored image's bottom-left corner, on a 4000x2000.
-        let f =
-            face_frame(&[face_at(0.0, 0.0, 0.1, 0.2)], (4000, 2000), 1).expect("one face frames");
+        let f = face_frame(&[face_at(0.0, 0.0, 0.1, 0.2)], (4000, 2000)).expect("one face frames");
         assert!(close(f.center, (0.05, 0.9)), "{f:?}");
         // 0.2 of 2000 tall beats 0.1 of 4000 wide: 400 px, with margin, of a
         // 2000 px short side.
@@ -448,16 +565,22 @@ mod tests {
     }
 
     #[test]
-    fn the_face_frame_takes_visions_upright_boxes_and_swaps_the_stored_size() {
-        // Vision has already turned the box, so only the photo's size, which
-        // is stored sideways, depends on the orientation. The stored
-        // 4000x2000 is 2000x4000 upright, and the box 200 x 800 px of it.
-        let face = [face_at(0.0, 0.0, 0.1, 0.2)];
-        let f = face_frame(&face, (4000, 2000), 6).expect("frames");
+    fn the_face_frame_is_measured_against_the_upright_photos_short_side() {
+        // Vision has already turned the box, so on the upright 2000x4000 it
+        // is 200 x 800 px, and the short side is the width.
+        let f = face_frame(&[face_at(0.0, 0.0, 0.1, 0.2)], (2000, 4000)).expect("frames");
         assert!(close(f.center, (0.05, 0.9)), "{f:?}");
         assert!((f.side - 0.4 * FRAME_MARGIN).abs() < 1e-4, "{f:?}");
-        let f = face_frame(&face, (4000, 2000), 8).expect("frames");
-        assert!(close(f.center, (0.05, 0.9)), "{f:?}");
+    }
+
+    #[test]
+    fn a_stored_size_turns_on_its_side_only_for_orientations_5_to_8() {
+        for orientation in [0, 1, 2, 3, 4, 9] {
+            assert_eq!(upright_size((4000, 2000), orientation), (4000, 2000));
+        }
+        for orientation in 5..=8 {
+            assert_eq!(upright_size((4000, 2000), orientation), (2000, 4000));
+        }
     }
 
     #[test]
@@ -465,19 +588,16 @@ mod tests {
         // Vision's origin is bottom-left, so the first face sits low on the
         // photo and the larger second one high on its left.
         let faces = [face_at(0.1, 0.1, 0.1, 0.1), face_at(0.3, 0.6, 0.2, 0.2)];
-        let f = face_frame(&faces, (1000, 1000), 1).expect("frames");
+        let f = face_frame(&faces, (1000, 1000)).expect("frames");
         assert!(close(f.center, (0.4, 0.3)), "{f:?}");
         assert!((f.side - 0.2 * FRAME_MARGIN).abs() < 1e-4, "{f:?}");
-        // A square photo turned on its side has the same upright boxes.
-        let f = face_frame(&faces, (1000, 1000), 6).expect("frames");
-        assert!(close(f.center, (0.4, 0.3)), "{f:?}");
     }
 
     #[test]
     fn the_face_frame_is_none_without_a_face_or_an_image() {
         let faces = [face_at(0.1, 0.4, 0.1, 0.1)];
-        assert_eq!(face_frame(&[], (1000, 1000), 1), None);
-        assert_eq!(face_frame(&faces, (0, 0), 1), None, "an empty image");
+        assert_eq!(face_frame(&[], (1000, 1000)), None);
+        assert_eq!(face_frame(&faces, (0, 0)), None, "an empty image");
     }
 
     fn bounds_close(b: FaceBounds, want: (f32, f32, f32, f32)) -> bool {
@@ -524,15 +644,15 @@ mod tests {
     #[test]
     fn a_pool_that_started_no_workers_is_never_handed_to_a_caller() {
         assert!(
-            FacePool::with_workers(0, analyze).is_none(),
+            FacePool::with_workers(0, analyze_job).is_none(),
             "a pool with no workers would accept jobs nothing runs"
         );
     }
 
     #[test]
     fn a_panicking_analysis_still_reports_and_the_worker_keeps_going() {
-        fn panics_on_boom(path: &Path) -> Result<FaceQuality, String> {
-            if path.ends_with("boom.jpg") {
+        fn panics_on_boom(job: &FaceJob) -> Result<FaceQuality, String> {
+            if job.path.ends_with("boom.jpg") {
                 panic!("simulated Vision crash");
             }
             Ok(FaceQuality {
@@ -576,7 +696,7 @@ mod tests {
         let flat = vec![128u8; (w * h * 4) as usize];
         let path = write_jpeg("facequality_pool_blank.jpg", w, h, &flat);
 
-        let pool = FacePool::with_workers(1, analyze).expect("one worker should start");
+        let pool = FacePool::with_workers(1, analyze_job).expect("one worker should start");
         pool.submit(path.clone());
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);

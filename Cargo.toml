@@ -156,6 +156,11 @@ getrandom = "0.3"
 # already builds it, so it adds no crate.
 ring = "0.17"
 
+# Only so `scoring/seetaface.rs` can be tested on a Mac. A dev-dependency is
+# not in the macOS release build, which must not carry the model.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+rustface = { version = "0.1.7", default-features = false }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # The Immich API key lives in the login Keychain (`persist/secret.rs`).
 security-framework = "3"
@@ -218,6 +223,11 @@ mozjpeg-rs = "0.9.2"
 # `[patch.crates-io]` near the bottom of this file — see that entry's own
 # comment for why (a wasm32-only bug, harmless everywhere else).
 rawler = "0.8.0"
+# Face boxes off macOS, where Apple Vision is not there. Pure Rust, BSD-2, and
+# its model is embedded from `assets/models/`. `rayon` is off: on native it
+# made detection 3 to 4 times slower than one thread, and on wasm32 it would
+# make a face worker the one thread every rayon job queues on.
+rustface = { version = "0.1.7", default-features = false }
 # `trash` (native OS trash/recycle-bin shell-out) has no wasm32 support and no
 # browser equivalent (File System Access has no trash primitive).
 # Split out of the `not(macos)` block above so it only applies to real non-mac

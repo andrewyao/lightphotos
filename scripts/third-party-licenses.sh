@@ -3,7 +3,7 @@
 # beside LICENSE-MIT and LICENSE-APACHE. It covers every crate compiled into
 # any shipped binary (the release.yml targets plus the wasm build, per
 # about.toml), then the bundled assets that are not crates: the Noto Sans SC
-# font, the sRGB ICC profile and the modified rawler.
+# font, the sRGB ICC profile, the SeetaFace model and the modified rawler.
 #
 #   scripts/third-party-licenses.sh           rewrite the committed file
 #   scripts/third-party-licenses.sh --check   exit 1 if the committed file is stale
@@ -59,6 +59,17 @@ EOF
 sRGB ICC profile (assets/icc/sRGB-v2-micro.icc), embedded in exported TIFF and
 WebP files. From https://github.com/saucecontrol/Compact-ICC-Profiles, released
 under CC0 1.0 Universal (public domain dedication).
+
+--------------------------------------------------------------------------------
+
+SeetaFace face detection model (assets/models/seeta_fd_frontal_v1.0.bin), used
+off macOS through the rustface crate. From
+https://github.com/seetaface/SeetaFaceEngine, released under the BSD 2-Clause
+License:
+
+EOF
+  cat assets/models/SeetaFace-LICENSE.txt
+  cat <<EOF
 
 --------------------------------------------------------------------------------
 

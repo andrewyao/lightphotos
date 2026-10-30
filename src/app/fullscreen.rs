@@ -42,6 +42,27 @@ const FADE: Duration = Duration::from_millis(800);
 /// How often to look again while a photo's faces are being found.
 const FACE_WAIT: Duration = Duration::from_millis(50);
 
+/// How long a photo waits for its faces before the show goes on without them.
+/// A job that dies in the browser sends no result, so the wait needs an end.
+const FACE_PATIENCE: Duration = Duration::from_secs(3);
+
+/// How often to look again while the first photo loads.
+const LOAD_WAIT: Duration = Duration::from_millis(50);
+
+/// How long the show waits for its first photo before it starts anyway, so a
+/// photo that never loads does not leave a black screen.
+const LOAD_PATIENCE: Duration = Duration::from_secs(10);
+
+/// Whether the Loupe has uploaded a decode of `want`, not the thumbnail that
+/// stands in while it loads.
+fn photo_ready(shown: &super::Shown, want: Option<&Path>) -> bool {
+    use super::Shown as Loupe;
+    match shown {
+        Loupe::Preview(path, ..) | Loupe::Full(path) => Some(path.as_path()) == want,
+        Loupe::Nothing | Loupe::Thumb(_) => false,
+    }
+}
+
 /// The opacity of the photo fading out, `elapsed` into the fade; `None`
 /// once it is gone. Smoothstep, so the fade starts and ends gently.
 fn fade_opacity(elapsed: Duration) -> Option<f32> {
@@ -211,6 +232,24 @@ fn shown_crop(crop: Crop, rot: [f32; 4]) -> [f32; 4] {
     shown_rect([crop.left, crop.top, crop.right, crop.bottom], rot)
 }
 
+/// The box around `rect` (left, top, right, bottom) of the source photo once
+/// `to_canvas` has moved its corners onto the straightened canvas. A turned
+/// box is no longer upright, so all four corners count.
+fn canvas_rect(rect: [f32; 4], to_canvas: impl Fn(f32, f32) -> (f32, f32)) -> [f32; 4] {
+    let [left, top, right, bottom] = rect;
+    let corners =
+        [(left, top), (right, top), (left, bottom), (right, bottom)].map(|(u, v)| to_canvas(u, v));
+    let fold = |pick: fn(f32, f32) -> f32, of: fn(&(f32, f32)) -> f32, start: f32| {
+        corners.iter().map(of).fold(start, pick)
+    };
+    [
+        fold(f32::min, |c| c.0, f32::INFINITY),
+        fold(f32::min, |c| c.1, f32::INFINITY),
+        fold(f32::max, |c| c.0, f32::NEG_INFINITY),
+        fold(f32::max, |c| c.1, f32::NEG_INFINITY),
+    ]
+}
+
 /// `rect` (left, top, right, bottom) in texture UV, as the photo shows after
 /// `rot`.
 fn shown_rect(rect: [f32; 4], rot: [f32; 4]) -> [f32; 4] {
@@ -243,6 +282,16 @@ struct Slideshow {
     progress: f32,
     /// A dialog was open at the last tick; the photo gets its time again after.
     held: bool,
+    /// The first photo has loaded, so the clock runs and the photo shows.
+    /// A show with no window has nothing to wait for.
+    started: bool,
+    /// When the show began, for how long it has waited for its first photo.
+    began: Instant,
+    /// The photo whose faces the show is waiting for, and since when.
+    faces_wait: Option<(PathBuf, Instant)>,
+    /// A photo the show stopped waiting for. It pans without faces, even if
+    /// they turn up, so the view does not jump mid-slide.
+    faces_skipped: Option<PathBuf>,
     /// Whether a photo without faces pans right to left or bottom to top
     /// instead. Rolled as each photo's time starts.
     reverse: bool,
@@ -403,6 +452,10 @@ impl App {
                 deck,
                 progress: 0.0,
                 held: false,
+                started: self.renderer.is_none(),
+                began: Instant::now(),
+                faces_wait: None,
+                faces_skipped: None,
                 reverse: false,
                 // xorshift never leaves zero.
                 rng: clock_seed() | 1,
@@ -414,6 +467,25 @@ impl App {
         }
         self.push_transform();
         self.request_neighbors();
+    }
+
+    /// Whether the show is still waiting for its first photo, which a black
+    /// cover hides the thumbnail placeholder behind.
+    pub(crate) fn slide_cover(&self) -> bool {
+        self.slideshow().is_some_and(|show| !show.started)
+    }
+
+    /// Makes the show wait for its first photo again, as a window's does.
+    #[cfg(test)]
+    pub(super) fn wait_for_first_photo(&mut self) {
+        if let Some(show) = self
+            .fullscreen
+            .as_mut()
+            .and_then(|shown| shown.slideshow.as_mut())
+        {
+            show.started = false;
+            show.began = Instant::now();
+        }
     }
 
     pub(crate) fn slideshow_playing(&self) -> bool {
@@ -475,17 +547,24 @@ impl App {
         }
     }
 
-    /// The box around the shown photo's faces, in the photo as shown (0 to 1).
+    /// The box around the shown photo's faces, in the photo as shown (0 to 1):
+    /// straightened, then turned by the user's quarter turns, as the crop is.
     fn slide_focus(&self) -> Option<[f32; 4]> {
-        let b = self
-            .shown
-            .path()
+        let shown = self.shown.path();
+        if self
+            .slideshow()
+            .is_some_and(|show| show.faces_skipped.as_deref() == shown)
+        {
+            return None;
+        }
+        let b = shown
             .and_then(|p| self.face_quality_of(p))
             .and_then(|q| q.bounds)?;
-        Some(shown_rect(
-            [b.left, b.top, b.right, b.bottom],
-            self.rot_matrix(),
-        ))
+        let straighten = self.shown_straighten();
+        let canvas = canvas_rect([b.left, b.top, b.right, b.bottom], |u, v| {
+            straighten.to_canvas(u, v)
+        });
+        Some(shown_rect(canvas, self.rot_matrix()))
     }
 
     /// Where the faces' box sits on screen now, (left, top, right, bottom) in
@@ -544,14 +623,31 @@ impl App {
         let slide = self.slideshow_settings.slide();
         let dialog = self.confirm_open() || self.preset_name_edit.is_some();
         let faces_pending = self.slide_faces_pending();
+        let ready = photo_ready(&self.shown, self.want.as_deref());
+        let shown_path = self.shown.path().map(Path::to_path_buf);
         let show = self.fullscreen.as_mut()?.slideshow.as_mut()?;
         // These act on the photo shown when they are answered.
         if dialog {
             show.held = true;
+            // A dialog is not the photo's fault, so it does not use up the
+            // wait for the first one.
+            show.began = now;
             return None;
         }
         if show.held {
             show.held = false;
+            show.next_at = now + slide;
+            show.progress = 0.0;
+        }
+        // The first photo is not shown, nor its time started, until it has
+        // loaded.
+        if !show.started {
+            if !ready && now.saturating_duration_since(show.began) < LOAD_PATIENCE {
+                show.next_at = now + slide;
+                show.progress = 0.0;
+                return Some(now + LOAD_WAIT);
+            }
+            show.started = true;
             show.next_at = now + slide;
             show.progress = 0.0;
         }
@@ -568,10 +664,23 @@ impl App {
         }
         // The photo's pan depends on where its faces are, so its time waits
         // for them.
-        if faces_pending {
-            show.next_at = now + slide;
-            show.progress = 0.0;
-            return Some(now + FACE_WAIT);
+        if show.faces_skipped.is_some() && show.faces_skipped != shown_path {
+            show.faces_skipped = None;
+        }
+        if faces_pending && show.faces_skipped.is_none() {
+            let since = match &show.faces_wait {
+                Some((path, since)) if Some(path) == shown_path.as_ref() => *since,
+                _ => {
+                    show.faces_wait = shown_path.clone().map(|path| (path, now));
+                    now
+                }
+            };
+            if now.saturating_duration_since(since) < FACE_PATIENCE {
+                show.next_at = now + slide;
+                show.progress = 0.0;
+                return Some(now + FACE_WAIT);
+            }
+            show.faces_skipped = shown_path;
         }
         if !stepped && now < show.next_at {
             let left = show.next_at.saturating_duration_since(now);
@@ -1079,6 +1188,10 @@ mod tests {
             deck: None,
             progress: 0.0,
             held: false,
+            started: true,
+            began: Instant::now(),
+            faces_wait: None,
+            faces_skipped: None,
             reverse: false,
             rng: 42 | 1,
             pin: None,

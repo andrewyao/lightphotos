@@ -434,6 +434,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     if app.fullscreen_shown() {
         draw_loupe(ui, app, &mut out);
         slide_fade(ui, app);
+        slide_cover(ui, app);
         status_toast(ui, app);
         dialogs(ui, app, &mut out);
         return out;
@@ -660,6 +661,19 @@ fn slide_fade(ui: &egui::Ui, app: &App) {
         uv,
         egui::Color32::WHITE.gamma_multiply(opacity),
     );
+    ctx.request_repaint();
+}
+
+/// While a slide show waits for its first photo, black over the thumbnail
+/// that stands in for it.
+fn slide_cover(ui: &egui::Ui, app: &App) {
+    if !app.slide_cover() {
+        return;
+    }
+    let ctx = ui.ctx();
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("slide_cover"));
+    ctx.layer_painter(layer)
+        .rect_filled(ctx.content_rect(), 0.0, egui::Color32::BLACK);
     ctx.request_repaint();
 }
 

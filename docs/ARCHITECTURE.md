@@ -598,11 +598,12 @@ stroke grows: about 2 ms a point for one 3:2 brush mask.
 
 ## Vision signals (macOS only)
 
-Machine learning enters the app in exactly one place, Apple's Vision
-framework. Four Vision requests run, all of them trained models that ship
-with macOS. No model file lives in this repository, and nothing here is
-trained. The OS decides whether a request runs on the Neural Engine, the GPU,
-or the CPU, and the app has no say in it.
+Machine learning enters the app in two places. On macOS it is Apple's Vision
+framework: four Vision requests run, all of them trained models that ship
+with macOS, and the OS decides whether each runs on the Neural Engine, the
+GPU, or the CPU. Off macOS, and in the browser, one small embedded model finds
+face boxes, described under "Face boxes off macOS" below. Nothing here is
+trained by the app.
 
 `vision::perform` (`src/scoring/vision.rs`) runs every request, over one of two
 sources:
@@ -681,13 +682,44 @@ flowchart TD
   `hotpath::measure` call sites, and the profiler's `vision` and
   `select_subject` phases time them.
 
-Off macOS, every entry point here returns `Err`, and the UI keeps that out of
-the user's way rather than surfacing it. `App::selection_supported()` is
-`cfg!(target_os = "macos")`, so the Loupe's "Show Selection" button does not
-render on Linux, Windows or the browser at all. `FacePool::new` returns `None`
-when no worker thread starts, which is what happens on wasm32, and `App` then
-holds no pool to submit to. `ScorePool::new` returns `None` off macOS, so
-scoring does not run there.
+Off macOS, every entry point here but the face one returns `Err`, and the UI
+keeps that out of the user's way rather than surfacing it.
+`App::selection_supported()` is `cfg!(target_os = "macos")`, so the Loupe's
+"Show Selection" button does not render on Linux, Windows or the browser at
+all. `ScorePool::new` returns `None` off macOS, so scoring does not run there.
+
+### Face boxes off macOS
+
+`scoring/seetaface.rs` runs SeetaFace's cascade through the `rustface` crate
+(BSD-2), with its 1.2 MB model embedded from `assets/models/`. The crate and
+the model are non-mac dependencies only, like `rawler`: the macOS release
+build contains neither, and a macOS dev-dependency lets the module's tests
+run on a Mac.
+
+- It finds boxes only, no eye landmarks, so blink detection and the eyes-closed
+  filter stay macOS only. `FaceQuality` still gets `frame` and `bounds`, which
+  Compare's zoom square and the slide show use.
+- `detect_upright` in `scoring/facequality.rs` decodes the photo with
+  `image_decode::decode` at 1000 px on the long side, which applies EXIF
+  orientation, so the boxes come out upright. A RAW decodes to 16-bit float and
+  is turned to gray with a gamma. In the browser the main thread reads the
+  file's bytes first, as a worker cannot open a path, and a RAW is read from
+  its embedded JPEG when that is at least half the detection size, else by
+  the fast quarter-resolution decode, never the full demosaic. Faces there are
+  found on demand for the photo shown and the next, one at a time, not in a
+  scan of every grouped photo.
+- The boxes are put in Vision's form (normalized, origin bottom-left) so the
+  rest of the pipeline treats the two alike. A face scoring under 12% of the
+  photo's best is dropped, since the slide show aims at the box around all of
+  them and one stray box would pull it off the real faces.
+- It takes about 35 to 105 ms a photo on a desktop and about the same in V8's
+  wasm. `rayon` is off: on native it made the detector 3 to 4 times slower, and
+  on wasm32 it would make a face worker the one thread every rayon job queues
+  on.
+- `FacePool` is the one pool started with `WorkerPool::spawn_web`, so in the
+  browser it is a single Web Worker over the shared memory, as the decode
+  workers are. A job that panics there aborts its worker and sends no result,
+  so the slide show waits at most `FACE_PATIENCE` for a photo's faces.
 
 ## Catalogs
 

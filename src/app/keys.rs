@@ -1016,6 +1016,118 @@ mod tests {
         );
     }
 
+    /// A shown square photo with one face box (0.4 to 0.6 across, 0.1 to 0.2
+    /// down) in an 800 x 400 area, seeded as analyzed, with the show playing
+    /// on its last instant.
+    fn face_show_at_the_end(setup: impl FnOnce(&mut App, &Path)) -> App {
+        use crate::scoring::facequality::{FaceBounds, FaceQuality};
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, paths) = editor_app();
+        app.loupe_viewport = Some((0, 0, 800, 400));
+        setup(&mut app, &paths[0]);
+        app.faces.seed(
+            paths[0].clone(),
+            FaceQuality {
+                faces: 1,
+                min_eye_openness: None,
+                frame: Some(crate::scoring::facequality::FaceFrame {
+                    center: (0.5, 0.15),
+                    side: 0.2,
+                }),
+                bounds: Some(FaceBounds {
+                    left: 0.4,
+                    top: 0.1,
+                    right: 0.6,
+                    bottom: 0.2,
+                }),
+            },
+        );
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        let t0 = Instant::now();
+        let next = app.tick_slideshow(t0).unwrap_or(t0);
+        app.tick_slideshow(next - Duration::from_millis(1));
+        app
+    }
+
+    /// Where a face box centered at `c`, in pixels of the 1000 px photo as
+    /// shown, lands on the 800 x 400 screen when the view ends 1.2 times in.
+    /// The view can't go past the photo's edge, so a box near it sits off
+    /// center.
+    fn end_screen_center(c: (f32, f32)) -> (f32, f32) {
+        let view = (800.0 / 1.2, 400.0 / 1.2);
+        let at = |c: f32, view: f32| c.clamp(view / 2.0, 1000.0 - view / 2.0);
+        (
+            400.0 + (c.0 - at(c.0, view.0)) * 1.2,
+            200.0 + (c.1 - at(c.1, view.1)) * 1.2,
+        )
+    }
+
+    fn centered(box_on_screen: [f32; 4]) -> (f32, f32, f32, f32) {
+        let [l, t, r, b] = box_on_screen;
+        ((l + r) / 2.0, (t + b) / 2.0, r - l, b - t)
+    }
+
+    #[test]
+    fn a_slide_show_ends_on_the_faces_of_a_photo_turned_a_quarter() {
+        // Turned clockwise, the box that sat high in the photo is at its
+        // right, 100 px wide and 200 tall, and the view ends 1.2 times in.
+        // It is too near the photo's right edge to be centered.
+        let app = face_show_at_the_end(|app, path| {
+            app.rotations.insert(path.to_path_buf(), 1);
+        });
+        let (cx, cy, w, h) = centered(app.slide_face_box().unwrap_or_default());
+        let (want_x, want_y) = end_screen_center((850.0, 500.0));
+        assert!(
+            (cx - want_x).abs() < 1.0 && (cy - want_y).abs() < 1.0,
+            "{cx} {cy} not {want_x} {want_y}"
+        );
+        assert!((want_x - 400.0).abs() > 100.0, "turned, it is off center");
+        assert!(
+            (w - 120.0).abs() < 1.0 && (h - 240.0).abs() < 1.0,
+            "{w} {h}"
+        );
+    }
+
+    #[test]
+    fn a_slide_show_ends_on_the_faces_of_a_straightened_photo() {
+        use crate::develop::{Adjustments, Straighten};
+        let degrees = 10.0;
+        let app = face_show_at_the_end(|app, path| {
+            let adjustments = Adjustments {
+                straighten: degrees,
+                ..Adjustments::default()
+            };
+            app.edits.insert(path.to_path_buf(), adjustments);
+        });
+        // The box's corners, where the straighten puts them on the canvas.
+        let turn = Straighten::new(degrees, 1000.0, 1000.0);
+        let corners =
+            [(0.4, 0.1), (0.6, 0.1), (0.4, 0.2), (0.6, 0.2)].map(|(u, v)| turn.to_canvas(u, v));
+        let [min_u, max_u] =
+            [f32::min, f32::max].map(|f| corners.iter().map(|c| c.0).fold(corners[0].0, f));
+        let [min_v, max_v] =
+            [f32::min, f32::max].map(|f| corners.iter().map(|c| c.1).fold(corners[0].1, f));
+        assert!(
+            ((min_u + max_u) / 2.0 - 0.5).abs() > 0.02,
+            "the test needs the straighten to move the box"
+        );
+        let (cx, cy, w, h) = centered(app.slide_face_box().unwrap_or_default());
+        let centre = ((min_u + max_u) * 500.0, (min_v + max_v) * 500.0);
+        let (want_x, want_y) = end_screen_center(centre);
+        assert!(
+            (cx - want_x).abs() < 1.0 && (cy - want_y).abs() < 1.0,
+            "{cx} {cy} not {want_x} {want_y}"
+        );
+        // The view ends 1.2 times in on the 1000 px photo.
+        let (want_w, want_h) = ((max_u - min_u) * 1200.0, (max_v - min_v) * 1200.0);
+        assert!(
+            (w - want_w).abs() < 2.0 && (h - want_h).abs() < 2.0,
+            "{w}x{h} not {want_w}x{want_h}"
+        );
+    }
+
     #[test]
     fn a_slide_show_gives_a_photo_its_time_only_once_its_faces_are_known() {
         use std::time::Duration;
@@ -1028,7 +1140,7 @@ mod tests {
         app.pin_slide_direction(false);
         let t0 = Instant::now();
         // Nothing has collected the analysis yet, so the time doesn't run.
-        for waited in [1, 3, 9] {
+        for waited in [1, 2] {
             let now = t0 + Duration::from_secs(waited);
             assert!(app
                 .tick_slideshow(now)
@@ -1043,11 +1155,92 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         // Its faces are known, and the time starts from here.
-        let now = t0 + Duration::from_secs(9);
+        let now = t0 + Duration::from_secs(2);
         let next = app.tick_slideshow(now).unwrap_or(now);
         assert_eq!(next, now + Duration::from_secs(5));
         app.tick_slideshow(now + Duration::from_millis(2500));
         assert_eq!(app.slide_view(), Some((0.8, (0.0, -200.0))));
+    }
+
+    #[test]
+    fn a_slide_show_stops_waiting_for_faces_that_never_come_and_pans_without_them() {
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, paths) = editor_app();
+        app.loupe_viewport = Some((0, 0, 800, 400));
+        app.start_face_pool();
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        app.pin_slide_direction(false);
+        // Asked for and never answered: marked pending with no job behind it.
+        app.faces.mark_pending(paths[0].clone());
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        for ms in (0..3000).step_by(500) {
+            app.tick_slideshow(at(ms));
+            assert_eq!(app.slide_view(), Some((0.8, (0.0, 0.0))), "held at {ms} ms");
+        }
+        app.tick_slideshow(at(3000));
+        app.tick_slideshow(at(5500));
+        let (_, (_, y)) = app.slide_view().unwrap_or_default();
+        assert!(y < -50.0, "panning without faces: {y}");
+        assert_eq!(app.sel, Some(0));
+        // Its time runs from where the wait ended, so the next photo follows.
+        app.tick_slideshow(at(3000 + 5000));
+        assert_eq!(app.sel, Some(1));
+    }
+
+    #[test]
+    fn a_slide_show_waits_for_its_first_photo_to_load_before_it_shows_and_times_it() {
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, paths) = editor_app();
+        app.loupe_viewport = Some((0, 0, 800, 400));
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        app.pin_slide_direction(false);
+        assert!(
+            !app.slide_cover(),
+            "a show with no window has nothing to wait for"
+        );
+        app.wait_for_first_photo();
+        assert!(app.slide_cover(), "the placeholder is covered");
+        // Only the thumbnail is up.
+        app.shown = Shown::Thumb(paths[0].clone());
+        let t0 = Instant::now();
+        for ms in [0, 1000, 5000, 9000] {
+            let next = app.tick_slideshow(t0 + Duration::from_millis(ms));
+            assert!(next.is_some_and(|at| at < t0 + Duration::from_millis(ms + 100)));
+            assert!(app.slide_cover(), "still loading at {ms} ms");
+            assert_eq!(app.sel, Some(0), "no time has run at {ms} ms");
+        }
+        // The preview lands, and the photo's time starts from there.
+        app.shown = Shown::Preview(paths[0].clone(), 1000, 1000);
+        let loaded = t0 + Duration::from_millis(9500);
+        let next = app.tick_slideshow(loaded);
+        assert!(!app.slide_cover());
+        assert_eq!(next, Some(loaded + Duration::from_secs(5)));
+        app.tick_slideshow(loaded + Duration::from_millis(2500));
+        assert_eq!(app.slide_view(), Some((0.8, (0.0, -200.0))));
+    }
+
+    #[test]
+    fn a_slide_show_starts_anyway_when_its_first_photo_never_loads() {
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, paths) = editor_app();
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        app.wait_for_first_photo();
+        app.shown = Shown::Thumb(paths[0].clone());
+        let t0 = Instant::now();
+        app.tick_slideshow(t0 + Duration::from_secs(9));
+        assert!(app.slide_cover());
+        app.tick_slideshow(t0 + Duration::from_secs(11));
+        assert!(
+            !app.slide_cover(),
+            "a photo that cannot load must not hold the show"
+        );
     }
 
     #[test]

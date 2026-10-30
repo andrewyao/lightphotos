@@ -14,6 +14,10 @@ pub(super) struct Faces {
     pool: Option<FacePool>,
     quality: HashMap<PathBuf, FaceQuality>,
     pending: HashSet<PathBuf>,
+    /// When each pending path was asked for. In the browser a panic aborts the
+    /// one face worker and nothing answers again, so an old ask is given up.
+    #[cfg(target_arch = "wasm32")]
+    asked: HashMap<PathBuf, Instant>,
     /// Analyses that failed for good (corrupt or unsupported files).
     failed: HashSet<PathBuf>,
     /// The grid was rebuilt since grouped photos were last submitted.
@@ -29,6 +33,8 @@ impl Faces {
             pool: None,
             quality: HashMap::new(),
             pending: HashSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            asked: HashMap::new(),
             failed: HashSet::new(),
             unscanned: false,
             eyes_filter: false,
@@ -50,6 +56,12 @@ impl Faces {
             return;
         }
         self.quality.entry(path).or_insert(quality);
+    }
+
+    /// Marks `path` as asked for with no job behind it, so it never answers.
+    #[cfg(test)]
+    pub(super) fn mark_pending(&mut self, path: PathBuf) {
+        self.pending.insert(path);
     }
 
     #[cfg(test)]
@@ -86,6 +98,11 @@ impl App {
     }
 
     fn face_candidates(&self) -> Vec<PathBuf> {
+        // In the browser a scan would read every grouped file into the one
+        // heap the decode workers share. Faces there are found on demand.
+        if cfg!(target_arch = "wasm32") {
+            return Vec::new();
+        }
         let (Some(pl), Some(groups)) = (self.playlist.as_ref(), self.folder_store.groups()) else {
             return Vec::new();
         };
@@ -102,6 +119,8 @@ impl App {
     }
 
     pub(crate) fn poll_face_quality(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.give_up_on_old_faces();
         let outcomes = self
             .faces
             .pool
@@ -114,9 +133,16 @@ impl App {
         let mut changed = false;
         for o in outcomes {
             self.faces.pending.remove(&o.path);
+            #[cfg(target_arch = "wasm32")]
+            self.faces.asked.remove(&o.path);
             match o.result {
                 Ok(q) => {
-                    self.signals.record(&o.path, Signal::Faces(q));
+                    // SeetaFace finds no eye landmarks and misses faces
+                    // Vision finds. A Mac that later reads this folder's cache
+                    // must not take its answer for Vision's.
+                    if cfg!(target_os = "macos") {
+                        self.signals.record(&o.path, Signal::Faces(q));
+                    }
                     self.faces.quality.insert(o.path, q);
                     changed = true;
                 }
@@ -130,6 +156,26 @@ impl App {
                 self.recompute_visible();
             }
             self.request_redraw();
+        }
+    }
+
+    /// Treats an analysis asked for long ago as failed, so the frame loop stops
+    /// waiting on a worker that is gone.
+    #[cfg(target_arch = "wasm32")]
+    fn give_up_on_old_faces(&mut self) {
+        const GIVE_UP: std::time::Duration = std::time::Duration::from_secs(30);
+        let now = Instant::now();
+        let old: Vec<PathBuf> = self
+            .faces
+            .asked
+            .iter()
+            .filter(|(_, at)| now.saturating_duration_since(**at) >= GIVE_UP)
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in old {
+            self.faces.asked.remove(&path);
+            self.faces.pending.remove(&path);
+            self.faces.failed.insert(path);
         }
     }
 
@@ -153,16 +199,44 @@ impl App {
         if let Some(q) = self.faces.quality.get(path) {
             return Some(Some(*q));
         }
-        let Some(pool) = &self.faces.pool else {
-            return Some(None);
-        };
-        if self.faces.failed.contains(path) {
+        if self.faces.pool.is_none() || self.faces.failed.contains(path) {
             return Some(None);
         }
         if self.faces.pending.insert(path.to_path_buf()) {
-            pool.submit(path.to_path_buf());
+            #[cfg(target_arch = "wasm32")]
+            self.faces.asked.insert(path.to_path_buf(), Instant::now());
+            self.submit_face(path.to_path_buf());
         }
         None
+    }
+
+    /// Queues `path`'s analysis. The browser cannot open a file by path, so
+    /// there the main thread reads its bytes first and the job carries them.
+    /// A read that fails still sends a job, which fails, so the path does not
+    /// stay pending.
+    fn submit_face(&self, path: PathBuf) {
+        let Some(pool) = &self.faces.pool else {
+            return;
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        pool.submit(path);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let sender = pool.sender();
+            let handle = self.web.file_handles().get(&path).cloned();
+            wasm_bindgen_futures::spawn_local(async move {
+                let bytes = match handle {
+                    Some(handle) => crate::web::web_fs::read_bytes(&handle)
+                        .await
+                        .map(std::sync::Arc::new),
+                    None => Err("the photo has no file handle".to_string()),
+                };
+                let _ = sender.send(crate::scoring::facequality::FaceJob {
+                    path,
+                    bytes: Some(bytes),
+                });
+            });
+        }
     }
 
     /// The face analysis for a path. `None` while pending, after a failure, or

@@ -25,6 +25,37 @@ impl<J: Send + 'static, T: Send + 'static> WorkerPool<J, T> {
     where
         F: Fn(&J) -> Result<T, String> + Send + Sync + 'static,
     {
+        Self::start(name, workers, false, setup, run, panicked)
+    }
+
+    /// [`spawn`](Self::spawn), but on wasm32 the threads are Web Workers over
+    /// the app's shared memory, as the decode workers are, where `spawn`
+    /// starts none. A job that panics there aborts its worker and sends no
+    /// result, so a caller must not wait on one forever.
+    pub fn spawn_web<F>(
+        name: &str,
+        workers: usize,
+        setup: fn(),
+        run: F,
+        panicked: fn(&J) -> String,
+    ) -> Self
+    where
+        F: Fn(&J) -> Result<T, String> + Send + Sync + 'static,
+    {
+        Self::start(name, workers, true, setup, run, panicked)
+    }
+
+    fn start<F>(
+        name: &str,
+        workers: usize,
+        web: bool,
+        setup: fn(),
+        run: F,
+        panicked: fn(&J) -> String,
+    ) -> Self
+    where
+        F: Fn(&J) -> Result<T, String> + Send + Sync + 'static,
+    {
         let (job_tx, job_rx) = std::sync::mpsc::channel::<J>();
         let (res_tx, res_rx) = std::sync::mpsc::channel();
         let job_rx = Arc::new(Mutex::new(job_rx));
@@ -34,27 +65,42 @@ impl<J: Send + 'static, T: Send + 'static> WorkerPool<J, T> {
             let job_rx = Arc::clone(&job_rx);
             let res_tx = res_tx.clone();
             let run = Arc::clone(&run);
-            let spawned = thread::Builder::new()
-                .name(format!("{name}-worker-{i}"))
-                .spawn(move || {
-                    setup();
-                    loop {
-                        // Hold the lock only while receiving, not during the job.
-                        let job = {
-                            let Ok(rx) = job_rx.lock() else { return };
-                            let Ok(job) = rx.recv() else { return };
-                            job
-                        };
-                        let result =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&job)))
-                                .unwrap_or_else(|_| Err(panicked(&job)));
-                        if res_tx.send((job, result)).is_err() {
-                            return;
-                        }
+            let work = move || {
+                setup();
+                loop {
+                    // Hold the lock only while receiving, not during the job.
+                    let job = {
+                        let Ok(rx) = job_rx.lock() else { return };
+                        let Ok(job) = rx.recv() else { return };
+                        job
+                    };
+                    let result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&job)))
+                            .unwrap_or_else(|_| Err(panicked(&job)));
+                    if res_tx.send((job, result)).is_err() {
+                        return;
                     }
-                });
+                }
+            };
+            #[cfg(target_arch = "wasm32")]
+            let spawned = {
+                let name = format!("{name}-worker-{i}");
+                if web {
+                    wasm_thread::Builder::new().name(name).spawn(work).map(drop)
+                } else {
+                    thread::Builder::new().name(name).spawn(work).map(drop)
+                }
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let spawned = {
+                let _ = web;
+                thread::Builder::new()
+                    .name(format!("{name}-worker-{i}"))
+                    .spawn(work)
+                    .map(drop)
+            };
             match spawned {
-                Ok(_) => running += 1,
+                Ok(()) => running += 1,
                 // wasm32 can't spawn threads this way. Log instead of
                 // crashing at startup.
                 Err(e) => eprintln!("[{name}] could not spawn worker {i}: {e}"),
@@ -75,6 +121,11 @@ impl<J: Send + 'static, T: Send + 'static> WorkerPool<J, T> {
     /// Queues `job`. False once the workers are gone.
     pub fn submit(&self, job: J) -> bool {
         self.job_tx.send(job).is_ok()
+    }
+
+    /// A handle that queues jobs from elsewhere, as `submit` does.
+    pub fn sender(&self) -> Sender<J> {
+        self.job_tx.clone()
     }
 
     /// Finished jobs with their results, without blocking.

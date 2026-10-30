@@ -673,7 +673,7 @@ impl App {
         self.shown_straighten().to_source(u, v)
     }
 
-    fn shown_straighten(&self) -> crate::develop::Straighten {
+    pub(super) fn shown_straighten(&self) -> crate::develop::Straighten {
         let (w, h) = self.image_size();
         crate::develop::Straighten::new(self.current_adjustments().straighten, w, h)
     }

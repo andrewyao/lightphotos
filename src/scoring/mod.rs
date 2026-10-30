@@ -6,6 +6,9 @@ pub mod detect;
 pub mod facequality;
 pub mod judge;
 pub mod quality;
+// Built on macOS only for its tests, which need the `rustface` dev-dependency.
+#[cfg(any(not(target_os = "macos"), test))]
+pub mod seetaface;
 pub mod segmentation;
 pub mod sky;
 #[cfg(target_os = "macos")]

@@ -590,14 +590,27 @@ fn fill_from_rawler(meta: &mut ImageMetadata, raw: &rawler::decoders::RawMetadat
 /// `catch_unwind` guards against panics inside rawler.
 #[hotpath::measure]
 pub fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<DecodedImage> {
+    embedded_image_from_bytes(bytes, max_px, false)
+}
+
+/// The largest JPEG any RAW embeds, for finding faces, which does not care
+/// about the camera's tone and color. `full_image` first, then
+/// `preview_image`, for every format `rawler_full_image_from_bytes` skips.
+pub fn rawler_embedded_for_faces(bytes: &[u8], max_px: u32) -> Option<DecodedImage> {
+    embedded_image_from_bytes(bytes, max_px, true)
+}
+
+fn embedded_image_from_bytes(bytes: &[u8], max_px: u32, any_format: bool) -> Option<DecodedImage> {
     let run = std::panic::AssertUnwindSafe(|| -> Option<DecodedImage> {
         let source = rawler::rawsource::RawSource::new_from_slice(bytes);
         let params = rawler::decoders::RawDecodeParams::default();
         let decoder = rawler::get_decoder(&source).ok()?;
-        if !matches!(
-            decoder.format_hint(),
-            rawler::decoders::FormatHint::RAF | rawler::decoders::FormatHint::CR3
-        ) {
+        if !any_format
+            && !matches!(
+                decoder.format_hint(),
+                rawler::decoders::FormatHint::RAF | rawler::decoders::FormatHint::CR3
+            )
+        {
             return None;
         }
 
@@ -619,7 +632,11 @@ pub fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<Decoded
                 size, max_px,
             ))
         };
-        let dynamic = decoder.full_image(&source, &params).ok().flatten()?;
+        let mut dynamic = decoder.full_image(&source, &params).ok().flatten();
+        if dynamic.is_none() && any_format {
+            dynamic = decoder.preview_image(&source, &params).ok().flatten();
+        }
+        let dynamic = dynamic?;
 
         // Take orientation from the RAW metadata, as `decode_raw_nonmac`
         // does. The embedded image's own EXIF may lack it.
