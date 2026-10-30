@@ -2251,6 +2251,18 @@ mod tests {
         cat.set(&p, 5);
         flush(&mut cat);
 
+        // The writer keeps its folder lock until it idles, just after it
+        // reports the write done; a write by the other tool would park behind
+        // it and be dropped with its store. Wait the lock out first.
+        drop(
+            crate::sidecar::FolderLock::acquire(
+                &dir,
+                crate::sidecar::Writer::Mcp,
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap(),
+        );
+
         // Another tool rewrites the sidecar while the user is elsewhere.
         FolderStore::with_dir(dir.clone()).set(&p, 1);
 
