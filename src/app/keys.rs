@@ -1383,6 +1383,17 @@ mod tests {
     }
 
     #[test]
+    fn shift_digit_in_develop_rates_and_advances_without_touching_sliders() {
+        let (mut app, paths) = editor_app();
+        app.focus = Region::Develop;
+        let before = app.current_adjustments();
+        press(&mut app, ModifiersState::SHIFT, KeyCode::Digit3);
+        assert_eq!(app.rating_of(&paths[0]), 3);
+        assert_eq!(app.sel, Some(1), "advanced to the next photo");
+        assert_eq!(app.current_adjustments(), before, "no slider moved");
+    }
+
+    #[test]
     fn esc_leaves_full_screen_before_anything_behind_it() {
         let (mut app, _) = editor_app();
         app.develop_tab = DevelopTab::Masks;

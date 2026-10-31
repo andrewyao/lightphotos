@@ -668,7 +668,11 @@ impl App {
         let before = self.selected_path();
         self.set_rating(stars);
         if advance && one && self.selected_path() == before {
-            self.nav_arrow(1, 0, false);
+            // Not `nav_arrow`: with Develop focused, Right adjusts a slider.
+            match self.mode {
+                ViewMode::Loupe => self.step_loupe(true),
+                ViewMode::Grid => self.move_grid(1, 0),
+            }
         }
     }
 
