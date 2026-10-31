@@ -1015,23 +1015,50 @@ impl App {
         };
         #[cfg(target_arch = "wasm32")]
         self.supersede_web_pending_nav();
-        self.ensure_subdirs(&cur);
+        let expanding = !self.expanded.contains(&cur);
         #[cfg(target_arch = "wasm32")]
-        if !self.subdirs.contains_key(&cur) {
-            // The listing just started. The next press expands.
-            return;
+        {
+            self.ensure_subdirs(&cur);
+            if !self.subdirs.contains_key(&cur) {
+                // The listing just started. The next press expands.
+                return;
+            }
+            if expanding {
+                self.rescan_children(&cur);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if expanding {
+            self.rescan_children(&cur);
+        } else {
+            self.ensure_subdirs(&cur);
         }
         if self.subdirs(&cur).is_empty() {
             return;
         }
-        if self.expanded.contains(&cur) {
-            if let Some(first) = self.subdirs(&cur).first().cloned() {
-                self.nav_to_folder(first);
-            }
-        } else {
+        if expanding {
             self.expanded.insert(cur);
             self.request_redraw();
+        } else if let Some(first) = self.subdirs(&cur).first().cloned() {
+            self.nav_to_folder(first);
         }
+    }
+
+    /// Chevron click: open or close `path` in the tree, leaving the grid as
+    /// it is. Opening reads its subfolders afresh.
+    pub(super) fn toggle_folder(&mut self, path: PathBuf) {
+        if self.expanded.remove(&path) {
+            self.request_redraw();
+            return;
+        }
+        if self.is_missing_root(&path) {
+            return;
+        }
+        self.rescan_children(&path);
+        if !self.subdirs(&path).is_empty() {
+            self.expanded.insert(path);
+        }
+        self.request_redraw();
     }
 
     /// Left arrow in the tree: collapse the folder, or load its parent if
@@ -1059,8 +1086,8 @@ impl App {
         self.open_folder(sel);
     }
 
-    /// Folder-row click or Enter: toggle expansion and load the folder into
-    /// the grid.
+    /// Folder-name click or Enter: open the folder in the tree if it is closed
+    /// (reading its subfolders afresh) and load it into the grid.
     pub(super) fn open_folder(&mut self, path: PathBuf) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1073,18 +1100,18 @@ impl App {
                 }
                 self.missing_roots.remove(&path);
             }
-            self.ensure_subdirs(&path);
+            if self.expanded.contains(&path) {
+                self.ensure_subdirs(&path);
+            } else {
+                self.rescan_children(&path);
+            }
             let subdirs = self.subdirs(&path).to_vec();
             let pure_container =
                 !subdirs.is_empty() && Playlist::from_dir(&path).entries().is_empty();
-            if !subdirs.is_empty() {
-                if self.expanded.contains(&path) {
-                    if !pure_container {
-                        self.expanded.remove(&path);
-                    }
-                } else {
-                    self.expanded.insert(path.clone());
-                }
+            if subdirs.is_empty() {
+                self.expanded.remove(&path);
+            } else {
+                self.expanded.insert(path.clone());
             }
             // A folder with subfolders but no photos (a year folder) would show
             // an empty grid, so load its first child instead. It stays expanded.
@@ -1112,6 +1139,9 @@ impl App {
                 self.request_dir_listing(&path);
                 self.request_redraw();
                 return;
+            }
+            if !self.expanded.contains(&path) {
+                self.rescan_children(&path);
             }
             self.apply_web_open_folder(path);
         }

@@ -748,8 +748,12 @@ pub(crate) struct App {
     /// (`agent.rs`). Every folder change moves it except an agent's.
     folder_anchor: Option<agent::Anchor>,
     expanded: HashSet<PathBuf>,
-    /// Immediate subdirectories, listed once per folder on demand.
+    /// Immediate subdirectories, listed on demand and again whenever the
+    /// folder's parent is reopened.
     subdirs: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Folders whose cached listing predates their parent's last reopening.
+    /// `prime_visible_subdirs` lists them again as they scroll into the tree.
+    stale_subdirs: HashSet<PathBuf>,
 
     /// The region that receives arrow and Enter keys.
     focus: Region,
@@ -1064,6 +1068,7 @@ impl App {
             folder_anchor: None,
             expanded: HashSet::new(),
             subdirs: HashMap::new(),
+            stale_subdirs: HashSet::new(),
             focus: Region::Folders,
             main_focus: Region::Folders,
             focus_level: FocusLevel::Selected,
@@ -1223,6 +1228,64 @@ impl App {
             if !self.subdirs.contains_key(dir) {
                 self.request_dir_listing(dir);
             }
+        }
+    }
+
+    /// List `dir`'s subfolders again, replacing the cached listing. Async on
+    /// wasm32, where the old listing stays until the new one lands.
+    fn relist_subdirs(&mut self, dir: &Path) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.subdirs
+            .insert(dir.to_path_buf(), crate::navigation::list_subdirs(dir));
+        #[cfg(target_arch = "wasm32")]
+        self.refresh_dir_listing(dir);
+    }
+
+    /// A folder is being opened: read its subfolders afresh, and mark theirs
+    /// stale so each row's chevron is checked again as it shows.
+    pub(super) fn rescan_children(&mut self, dir: &Path) {
+        self.stale_subdirs.remove(dir);
+        self.relist_subdirs(dir);
+        let children = self.subdirs(dir).to_vec();
+        self.stale_subdirs.extend(children);
+    }
+
+    /// List the subfolders of every row the tree shows that has no fresh
+    /// listing, so each row knows whether it has a chevron. Lists at most
+    /// `PER_FRAME` folders a frame.
+    pub(crate) fn prime_visible_subdirs(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        const PER_FRAME: usize = 64;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut budget = PER_FRAME;
+        for dir in self.visible_tree() {
+            let fresh = self.subdirs.contains_key(&dir) && !self.stale_subdirs.contains(&dir);
+            if fresh || self.is_missing_root(&dir) {
+                continue;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if budget == 0 {
+                    self.request_redraw();
+                    break;
+                }
+                budget -= 1;
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Listings land through `poll_dir_listing`, which redraws and
+                // so primes the next few.
+                if self.prime_inflight_full() {
+                    break;
+                }
+                // A kept root without a grant has no handle. Listing it
+                // would ask the user for permission unprompted.
+                if !self.web_root_allowed(&dir) {
+                    continue;
+                }
+            }
+            self.stale_subdirs.remove(&dir);
+            self.relist_subdirs(&dir);
         }
     }
 
@@ -1650,9 +1713,13 @@ impl App {
                 ui::UiAction::ToggleSelection => self.toggle_selection(),
                 ui::UiAction::ToggleSelectionInvert => self.toggle_selection_invert(),
                 ui::UiAction::OpenFolder(p) => {
-                    // A click does what Enter does: focus, load, toggle expansion.
+                    // A click does what Enter does: focus, open, load.
                     self.set_focus(Region::Folders, FocusLevel::Entered);
                     self.open_folder(p);
+                }
+                ui::UiAction::ToggleFolder(p) => {
+                    self.set_focus(Region::Folders, FocusLevel::Entered);
+                    self.toggle_folder(p);
                 }
                 ui::UiAction::RemoveFolder(p) => self.remove_root(&p),
                 ui::UiAction::PickFolder => self.open_folder_picker(),

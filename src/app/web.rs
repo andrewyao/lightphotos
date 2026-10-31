@@ -28,6 +28,9 @@ const THUMBS_IN_FLIGHT_PER_THREAD: usize = 1;
 /// read failures are transient and can last longer than a few seconds.
 const MAX_READ_RETRIES: u8 = 10;
 
+/// Listings `prime_visible_subdirs` keeps in flight at once.
+const PRIME_INFLIGHT: usize = 8;
+
 /// Delay before retry `attempt` (1-based), drawn uniformly from `[0, cap]`
 /// where `cap` doubles from 500 ms up to 10 s ("full jitter"). Keys that fail
 /// together would retry together and collide again with a fixed delay. The
@@ -1476,6 +1479,35 @@ impl App {
                 || self.web.file_handles.contains_key(&path))
     }
 
+    /// Whether `prime_visible_subdirs` has all the listings it may keep in
+    /// flight.
+    pub(super) fn prime_inflight_full(&self) -> bool {
+        self.web.dirlist_inflight.len() >= PRIME_INFLIGHT
+    }
+
+    /// Lists `dir` again, keeping the cached listing until the new one
+    /// lands. Does nothing for a folder this browser holds no handle for.
+    pub(crate) fn refresh_dir_listing(&mut self, dir: &Path) {
+        let generation = self.web.nav_generation;
+        let Some(handle) = self.web.dir_handles.get(dir).cloned() else {
+            return;
+        };
+        if !self
+            .web
+            .dirlist_inflight
+            .insert((dir.to_path_buf(), generation))
+        {
+            return;
+        }
+        let base = dir.to_path_buf();
+        let tx = self.web.dirlist_tx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = web_fs::list_dir(&base, &handle).await;
+            let _ = tx.send((generation, base, result));
+        });
+        self.request_redraw();
+    }
+
     /// Starts listing `dir` unless it is cached in `subdirs` or already in
     /// flight. `poll_dir_listing` receives the result. A missing handle is
     /// treated as an empty folder.
@@ -1648,7 +1680,7 @@ impl App {
         }
     }
 
-    /// The wasm32 end of `open_folder`: toggles the folder's expansion, and if
+    /// The wasm32 end of `open_folder`: opens the folder in the tree, and if
     /// it has subfolders but no photos, opens its first subfolder instead.
     /// Expects `dir`'s listing to be in `subdirs`.
     pub(crate) fn apply_web_open_folder(&mut self, dir: PathBuf) {
@@ -1661,13 +1693,7 @@ impl App {
         let pure_container = !subdirs.is_empty() && !has_own_images;
 
         if !subdirs.is_empty() {
-            if self.expanded.contains(&dir) {
-                if !pure_container {
-                    self.expanded.remove(&dir);
-                }
-            } else {
-                self.expanded.insert(dir.clone());
-            }
+            self.expanded.insert(dir.clone());
         }
 
         let target = if pure_container {

@@ -229,6 +229,7 @@ impl App {
         self.web.catalogs.forget_after_load.clear();
         self.expanded.clear();
         self.subdirs.clear();
+        self.stale_subdirs.clear();
         self.missing_roots.clear();
         self.note_known_catalog();
         if self.catalog.loading() {

@@ -187,6 +187,12 @@ impl App {
         self.subdirs.get(dir).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
+    /// Whether `dir` has subfolders, so the tree draws a chevron. False until
+    /// its listing lands.
+    pub(crate) fn has_subdirs(&self, dir: &Path) -> bool {
+        self.subdirs.get(dir).is_some_and(|v| !v.is_empty())
+    }
+
     pub(crate) fn filter(&self) -> Option<(Cmp, u8)> {
         self.filter
     }

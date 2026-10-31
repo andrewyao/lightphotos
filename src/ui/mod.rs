@@ -173,8 +173,10 @@ pub enum UiAction {
     /// Subject-selection overlay. The mask is computed the first time it turns on.
     ToggleSelection,
     ToggleSelectionInvert,
-    /// Load this folder's images and toggle its expansion.
+    /// Load this folder's images, opening it in the tree if it is closed.
     OpenFolder(std::path::PathBuf),
+    /// Open or close this folder in the tree without loading it.
+    ToggleFolder(std::path::PathBuf),
     /// Drop this root from the Folders list. Its files stay as they are.
     RemoveFolder(std::path::PathBuf),
     /// Open the folder picker (`App::open_folder_picker`).
@@ -442,6 +444,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
 
     // Drawn first and on every screen, so the Open button never moves.
     app_header(ui, app, &mut out);
+    app.prime_visible_subdirs();
 
     // Everything below assumes a folder is open.
     if !app.has_playlist() {

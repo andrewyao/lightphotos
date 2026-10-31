@@ -84,7 +84,9 @@ fn folder_content_width(
             .x
     });
     let step = disclosure_w(ui.style());
-    let own_width = depth as f32 * step + step + ui.spacing().item_spacing.x + text_width;
+    let gap = ui.spacing().item_spacing.x;
+    let own_width =
+        depth as f32 * step + step + folder_glyph_w(ui.style()) + 2.0 * gap + text_width;
     if app.is_expanded(path) {
         app.subdirs(path)
             .iter()
@@ -197,40 +199,97 @@ fn no_matches(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     });
 }
 
-/// The disclosure triangle's width, which is also one level of folder indent.
+/// The chevron cell's width, which is also one level of folder indent.
 fn disclosure_w(style: &egui::Style) -> f32 {
     font_size::px(style, 14.0)
 }
 
-/// Paint the folder row's disclosure triangle. It is drawn, not text, because
-/// egui's built-in fonts have no ▼ glyph, and fonts that do have it place it
-/// off the folder name's baseline.
-fn disclosure_triangle(ui: &mut egui::Ui, expanded: bool) -> egui::Response {
+/// The folder icon's width.
+fn folder_glyph_w(style: &egui::Style) -> f32 {
+    font_size::px(style, 13.0)
+}
+
+/// Paint the open/close chevron of a folder that has subfolders. It is drawn,
+/// not text, because egui's built-in fonts lack the glyphs, and fonts that
+/// have them place them off the folder name's baseline.
+fn disclosure_chevron(ui: &mut egui::Ui, expanded: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(disclosure_w(ui.style()), ui.spacing().interact_size.y),
         egui::Sense::click(),
     );
     let c = rect.center();
-    let r = font_size::px(ui.style(), 4.0);
+    let r = font_size::px(ui.style(), 3.5);
     let points = if expanded {
         vec![
-            egui::pos2(c.x - r, c.y - r * 0.6),
-            egui::pos2(c.x + r, c.y - r * 0.6),
-            egui::pos2(c.x, c.y + r * 0.7),
+            egui::pos2(c.x - r, c.y - r * 0.5),
+            egui::pos2(c.x, c.y + r * 0.5),
+            egui::pos2(c.x + r, c.y - r * 0.5),
         ]
     } else {
         vec![
-            egui::pos2(c.x - r * 0.6, c.y - r),
-            egui::pos2(c.x - r * 0.6, c.y + r),
-            egui::pos2(c.x + r * 0.7, c.y),
+            egui::pos2(c.x - r * 0.5, c.y - r),
+            egui::pos2(c.x + r * 0.5, c.y),
+            egui::pos2(c.x - r * 0.5, c.y + r),
         ]
     };
-    ui.painter().add(egui::Shape::convex_polygon(
+    let color = if response.hovered() {
+        ui.visuals().text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    ui.painter().add(egui::Shape::line(
         points,
-        ui.visuals().text_color(),
-        egui::Stroke::NONE,
+        egui::Stroke::new(font_size::px(ui.style(), 1.3), color),
     ));
     response
+}
+
+/// Paint a small, quiet folder icon: a faint body with a thin outline and a
+/// tab. It doubles as part of the row's click target.
+fn folder_glyph(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(folder_glyph_w(ui.style()), ui.spacing().interact_size.y),
+        egui::Sense::click(),
+    );
+    let c = rect.center();
+    let w = folder_glyph_w(ui.style());
+    let h = font_size::px(ui.style(), 10.0);
+    let tab = font_size::px(ui.style(), 2.5);
+    let weak = ui.visuals().weak_text_color();
+    let left = c.x - w / 2.0;
+    let top = c.y - h / 2.0;
+    let painter = ui.painter();
+    painter.rect_filled(
+        egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(w * 0.42, tab + 1.0)),
+        1.0,
+        weak.gamma_multiply(0.5),
+    );
+    let body = egui::Rect::from_min_max(egui::pos2(left, top + tab), egui::pos2(left + w, top + h));
+    painter.rect_filled(body, 1.5, weak.gamma_multiply(0.18));
+    painter.rect_stroke(
+        body,
+        1.5,
+        egui::Stroke::new(1.0f32, weak.gamma_multiply(0.7)),
+        egui::StrokeKind::Inside,
+    );
+    response
+}
+
+/// A folder name. egui draws a button's border and padding only while it is
+/// selected or hovered, which would shift the text by the border's width. Here
+/// the idle frame is there but transparent, so the space is always reserved.
+fn folder_label<'a>(
+    ui: &mut egui::Ui,
+    selected: bool,
+    text: impl Into<egui::WidgetText> + 'a,
+) -> egui::Response {
+    ui.scope(|ui| {
+        let idle = &mut ui.visuals_mut().widgets.inactive;
+        idle.weak_bg_fill = egui::Color32::TRANSPARENT;
+        idle.bg_stroke.color = egui::Color32::TRANSPARENT;
+        ui.add(egui::Button::selectable(selected, text.into()).frame_when_inactive(true))
+    })
+    .inner
 }
 
 /// Why a missing root greys out: natively an unplugged drive, on the web
@@ -255,11 +314,8 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
         if depth == 0 && app.is_missing_root(path) {
             ui.add_space(disclosure_w(ui.style()));
-            let label = ui
-                .add(egui::Button::selectable(
-                    false,
-                    egui::RichText::new(name).weak(),
-                ))
+            folder_glyph(ui);
+            let label = folder_label(ui, false, egui::RichText::new(name).weak())
                 .on_hover_text(missing_tip(&path.display().to_string()));
             if label.clicked() {
                 // Checks again, in case the drive is back.
@@ -268,9 +324,20 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
             root_menu(path, &label, out);
             return;
         }
-        let triangle = disclosure_triangle(ui, app.is_expanded(path));
-        let label = ui.selectable_label(selected, name);
-        if triangle.clicked() || label.clicked() {
+        if app.has_subdirs(path) {
+            if disclosure_chevron(ui, app.is_expanded(path)).clicked() {
+                out.actions.push(UiAction::ToggleFolder(path.to_path_buf()));
+            }
+        } else {
+            // Keeps a leaf's icon and name in line with its siblings'.
+            ui.allocate_exact_size(
+                egui::vec2(disclosure_w(ui.style()), ui.spacing().interact_size.y),
+                egui::Sense::hover(),
+            );
+        }
+        let icon = folder_glyph(ui);
+        let label = folder_label(ui, selected, name);
+        if icon.clicked() || label.clicked() {
             out.actions.push(UiAction::OpenFolder(path.to_path_buf()));
         }
         if depth == 0 {

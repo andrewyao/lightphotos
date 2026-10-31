@@ -73,6 +73,7 @@ impl App {
         self.missing_roots.remove(root);
         self.expanded.retain(|p| !p.starts_with(root));
         self.subdirs.retain(|p, _| !p.starts_with(root));
+        self.stale_subdirs.retain(|p| !p.starts_with(root));
         let showing = self
             .playlist
             .as_ref()
@@ -1217,5 +1218,150 @@ mod tests {
         assert_eq!(cached, 1.0, "in the cache at once");
         assert_eq!(on_disk_early, 0.0, "parked while the lock waits");
         assert_eq!(on_disk, 1.0);
+    }
+
+    /// `root/{sub/deeper, leaf, a.jpg}`.
+    fn nested(tag: &str) -> PathBuf {
+        let dir = temp_folder(tag);
+        std::fs::create_dir_all(dir.join("sub/deeper")).unwrap();
+        std::fs::create_dir_all(dir.join("leaf")).unwrap();
+        std::fs::write(dir.join("a.jpg"), b"").unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_row_has_a_chevron_only_when_it_has_subfolders() {
+        let root = nested("chevron-leaf");
+        let mut app = App::new(None);
+        app.catalog.add_folder(&root);
+        app.prime_visible_subdirs();
+        assert!(app.has_subdirs(&root));
+        app.toggle_folder(root.clone());
+        app.prime_visible_subdirs();
+        let has = (
+            app.has_subdirs(&root.join("sub")),
+            app.has_subdirs(&root.join("leaf")),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(has, (true, false));
+    }
+
+    #[test]
+    fn reopening_a_folder_scans_its_subfolders_again() {
+        let root = nested("chevron-rescan");
+        let mut app = App::new(None);
+        app.catalog.add_folder(&root);
+        app.toggle_folder(root.clone());
+        app.prime_visible_subdirs();
+        app.toggle_folder(root.clone());
+        std::fs::create_dir_all(root.join("new")).unwrap();
+        std::fs::create_dir_all(root.join("leaf/grandchild")).unwrap();
+        app.toggle_folder(root.clone());
+        app.prime_visible_subdirs();
+        let names: Vec<_> = app
+            .subdirs(&root)
+            .iter()
+            .filter_map(|p| p.file_name()?.to_str())
+            .collect();
+        let found = (names.contains(&"new"), app.has_subdirs(&root.join("leaf")));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(found, (true, true));
+    }
+
+    #[test]
+    fn the_chevron_opens_and_closes_without_loading_the_folder() {
+        let root = nested("chevron-toggle");
+        let mut app = App::new(None);
+        app.open(root.clone());
+        app.toggle_folder(root.join("sub"));
+        let opened = app.is_expanded(&root.join("sub"));
+        app.toggle_folder(root.join("sub"));
+        let closed = !app.is_expanded(&root.join("sub"));
+        app.toggle_folder(root.join("leaf"));
+        let leaf_stays_closed = !app.is_expanded(&root.join("leaf"));
+        let still = (
+            app.folder_sel.clone(),
+            app.playlist.as_ref().map(|p| p.dir().to_path_buf()),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(opened && closed && leaf_stays_closed);
+        assert_eq!(still, (Some(root.clone()), Some(root)));
+    }
+
+    #[test]
+    fn a_folder_of_only_subfolders_can_be_closed() {
+        let root = temp_folder("chevron-container");
+        std::fs::create_dir_all(root.join("year/month")).unwrap();
+        std::fs::write(root.join("year/month/a.jpg"), b"").unwrap();
+        let year = root.join("year");
+        let mut app = App::new(None);
+        app.catalog.add_folder(&root);
+        app.open_folder(year.clone());
+        let open = app.is_expanded(&year);
+        app.toggle_folder(year.clone());
+        let closed = !app.is_expanded(&year);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(open && closed);
+    }
+
+    #[test]
+    fn clicking_the_name_of_an_open_folder_keeps_it_open() {
+        let root = nested("chevron-name");
+        let mut app = App::new(None);
+        app.open(root.clone());
+        app.open_folder(root.clone());
+        let open = app.is_expanded(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(open);
+    }
+
+    #[test]
+    fn rows_are_listed_a_batch_a_frame() {
+        let root = temp_folder("chevron-batch");
+        for i in 0..100 {
+            std::fs::create_dir_all(root.join(format!("d{i:03}"))).unwrap();
+        }
+        let mut app = App::new(None);
+        app.catalog.add_folder(&root);
+        app.toggle_folder(root.clone());
+        app.prime_visible_subdirs();
+        let after_one = app.subdirs.len();
+        app.prime_visible_subdirs();
+        let after_two = app.subdirs.len();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(after_one < 101, "one frame doesn't list all {after_one}");
+        assert_eq!(after_two, 101);
+    }
+
+    /// A real click on a row's chevron and on its name, through the whole UI.
+    #[test]
+    fn the_chevron_toggles_and_the_name_opens() {
+        use crate::app::test_support::{click, settled};
+        let root = nested("chevron-click");
+        let mut app = App::new(None);
+        app.open(root.clone());
+        let name = root.file_name().unwrap().to_string_lossy().into_owned();
+        let painted = settled(&mut app);
+        let at = painted.pos_of(&name);
+        let (on_name, _) = click(&mut app, at);
+        let chevron = egui::pos2(14.0, at.y);
+        let (on_chevron, _) = click(&mut app, chevron);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(on_name, vec![crate::ui::UiAction::OpenFolder(root.clone())]);
+        assert_eq!(on_chevron, vec![crate::ui::UiAction::ToggleFolder(root)]);
+    }
+
+    #[test]
+    fn selecting_a_folder_does_not_move_its_name() {
+        use crate::app::test_support::{click, settled};
+        let root = nested("chevron-shift");
+        let mut app = App::new(None);
+        app.open(root.clone());
+        let before = settled(&mut app).pos_of("leaf");
+        let (actions, _) = click(&mut app, before);
+        app.apply_ui_actions(actions);
+        let after = settled(&mut app).pos_of("leaf");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(before, after);
     }
 }
