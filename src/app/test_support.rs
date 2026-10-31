@@ -9,6 +9,18 @@ use crate::navigation::Playlist;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// File names of the photos the grid currently shows, in order.
+pub(crate) fn visible_names(app: &App) -> Vec<String> {
+    let Some(pl) = app.playlist.as_ref() else {
+        return Vec::new();
+    };
+    app.visible
+        .iter()
+        .filter_map(|&i| pl.entry(i)?.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .collect()
+}
+
 /// An empty folder under the system temp dir, new on every call.
 pub(crate) fn temp_folder(tag: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);

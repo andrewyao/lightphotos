@@ -204,6 +204,7 @@ impl App {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
+    use crate::app::test_support::visible_names;
     use crate::command::{self, Command};
     use crate::jobs::score::ScorePool;
     use crate::scoring::quality::{Basis, QualityScore};
@@ -459,21 +460,6 @@ mod tests {
             base: None,
             deductions: Vec::new(),
         }
-    }
-
-    fn visible_names(app: &App) -> Vec<String> {
-        let pl = app.playlist.as_ref().unwrap();
-        app.visible
-            .iter()
-            .map(|&i| {
-                pl.entry(i)
-                    .unwrap()
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect()
     }
 
     #[test]

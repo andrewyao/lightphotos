@@ -494,26 +494,7 @@ impl FacePool {
 mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
-    use crate::decode::image_encode::encode_jpeg;
-
-    // Per process, because two `cargo test` runs on one machine otherwise
-    // share these fixture names and one truncates a file while the other's
-    // Vision request is still reading it.
-    #[cfg(target_os = "macos")]
-    fn write_jpeg(name: &str, w: u32, h: u32, rgba: &[u8]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("lp-vision-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create fixture dir");
-        let path = dir.join(name);
-        encode_jpeg(
-            &path,
-            w,
-            h,
-            rgba,
-            crate::decode::image_encode::JpegQuality::Export,
-        )
-        .expect("encode fixture jpeg");
-        path
-    }
+    use crate::scoring::test_support::write_jpeg;
 
     /// Whether Vision can run a model on this machine. GitHub's macOS runners
     /// are VMs with no GPU or Neural Engine, and there a face request fails

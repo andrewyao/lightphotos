@@ -1247,9 +1247,9 @@ impl From<&Adjustments> for GpuAdjust {
             curve_on: if a.curve.is_linear() { 0.0 } else { 1.0 },
             base_on: if a.needs_base() { 1.0 } else { 0.0 },
             fine_on: if a.texture != 0.0 { 1.0 } else { 0.0 },
-            texture: a.texture.clamp(-100.0, 100.0),
-            clarity: a.clarity.clamp(-100.0, 100.0),
-            dehaze: a.dehaze.clamp(-100.0, 100.0),
+            texture: a.texture,
+            clarity: a.clarity,
+            dehaze: a.dehaze,
             color: ColorOps::new(&a.mixer, &a.gray_mix, a.is_monochrome()),
             grade: GradeOps::new(&a.grade),
             ..Self::default()
@@ -1840,29 +1840,38 @@ mod tests {
     }
 
     #[test]
-    fn edit_signature_differs_on_crop() {
-        let a = Adjustments::default();
-        let b = Adjustments {
-            crop: Some(crop(0.1, 0.1, 0.9, 0.9)),
-            ..Default::default()
-        };
-        assert_ne!(edit_signature(&a, 0), edit_signature(&b, 0));
-    }
-
-    #[test]
-    fn edit_signature_differs_on_tone() {
-        let a = Adjustments::default();
-        let b = Adjustments {
-            exposure: 0.5,
-            ..Default::default()
-        };
-        assert_ne!(edit_signature(&a, 0), edit_signature(&b, 0));
-    }
-
-    #[test]
-    fn edit_signature_differs_on_rotation() {
-        let a = Adjustments::default();
-        assert_ne!(edit_signature(&a, 0), edit_signature(&a, 1));
+    fn moving_any_one_edit_changes_the_signature() {
+        let base = edit_signature(&Adjustments::default(), 0);
+        let moved = [
+            (
+                "crop",
+                Adjustments {
+                    crop: Some(crop(0.1, 0.1, 0.9, 0.9)),
+                    ..Default::default()
+                },
+                0,
+            ),
+            (
+                "tone",
+                Adjustments {
+                    exposure: 0.5,
+                    ..Default::default()
+                },
+                0,
+            ),
+            (
+                "denoise",
+                Adjustments {
+                    denoise: 40.0,
+                    ..Default::default()
+                },
+                0,
+            ),
+            ("rotation", Adjustments::default(), 1),
+        ];
+        for (what, adj, rot) in &moved {
+            assert_ne!(edit_signature(adj, *rot), base, "{what}");
+        }
     }
 
     #[test]
@@ -1904,6 +1913,29 @@ mod tests {
         );
         let gpu = GpuAdjust::from(&nan);
         assert_eq!((gpu.exposure, gpu.contrast), (0.0, 0.0));
+    }
+
+    #[test]
+    fn presence_sliders_out_of_range_reach_the_gpu_as_the_slider_end() {
+        let with = |v| Adjustments {
+            texture: v,
+            clarity: v,
+            dehaze: v,
+            ..Adjustments::default()
+        };
+        for (bad, end) in [
+            (1e30_f32, 100.0_f32),
+            (f32::INFINITY, 100.0),
+            (f32::NEG_INFINITY, -100.0),
+            (f32::NAN, 0.0),
+        ] {
+            let gpu = GpuAdjust::from(&with(bad));
+            assert_eq!(
+                (gpu.texture, gpu.clarity, gpu.dehaze),
+                (end, end, end),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
@@ -2288,16 +2320,6 @@ mod tests {
         ];
         let out = denoise_linear_rgb_buffer(50.0, 2, 2, &buf);
         assert_eq!(out.len(), 4);
-    }
-
-    #[test]
-    fn edit_signature_changes_with_denoise() {
-        let a = Adjustments::default();
-        let b = Adjustments {
-            denoise: 40.0,
-            ..Default::default()
-        };
-        assert_ne!(edit_signature(&a, 0), edit_signature(&b, 0));
     }
 
     #[test]

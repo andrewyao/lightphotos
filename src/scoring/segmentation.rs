@@ -303,6 +303,7 @@ unsafe fn copy_f32_rows(base: *const f32, width: usize, height: usize, stride: u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scoring::test_support::write_jpeg;
 
     // 997 and 331 are deliberately unrelated: see the matching test in
     // `image_decode`. `resized` and `oriented` both rebuild a `Mask` through
@@ -342,26 +343,6 @@ mod tests {
             "the error should say which macOS the caller needs, got {missing:?}"
         );
     }
-    use crate::decode::image_encode::encode_jpeg;
-
-    // Per process, because two `cargo test` runs on one machine otherwise
-    // share these fixture names and one truncates a file while the other's
-    // Vision request is still reading it.
-    fn write_jpeg(name: &str, w: u32, h: u32, rgba: &[u8]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("lp-vision-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create fixture dir");
-        let path = dir.join(name);
-        encode_jpeg(
-            &path,
-            w,
-            h,
-            rgba,
-            crate::decode::image_encode::JpegQuality::Export,
-        )
-        .expect("encode fixture jpeg");
-        path
-    }
-
     #[test]
     fn coverage_reads_the_fraction_of_the_mask_that_is_filled() {
         let half = Mask::new_tracked(MaskFields {

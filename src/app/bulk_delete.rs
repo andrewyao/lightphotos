@@ -473,7 +473,7 @@ fn spawn_trash_worker(done_tx: Sender<DeleteResult>) -> Option<Sender<PathBuf>> 
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
-    use crate::app::test_support::{temp_folder, wait_for_folder_store_within};
+    use crate::app::test_support::{temp_folder, visible_names, wait_for_folder_store_within};
     use crate::navigation::Playlist;
     use std::time::{Duration, Instant};
 
@@ -992,20 +992,6 @@ mod tests {
             "p01 is alone"
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn visible_names(app: &App) -> Vec<String> {
-        let pl = app.playlist.as_ref().unwrap();
-        app.visible
-            .iter()
-            .map(|&i| {
-                pl.entries()[i]
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect()
     }
 
     fn stack_and_single() -> (App, PathBuf, Vec<PathBuf>) {

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 
-use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDirectoryOptions,
@@ -17,6 +17,7 @@ use web_sys::{
 use crate::persist::folder_store::group_file::{self, GROUPS_DIR};
 use crate::persist::folder_store::SidecarLoad;
 use crate::sidecar::{ImageRecord, SIDECAR_DIR, SIDECAR_EXT};
+use crate::web::web_fs::{is_not_found, js_error_string};
 
 /// The `.lightphotos` directory under `root`, created if `create` is set.
 /// Returns `Ok(None)` when it is missing and `create` is false.
@@ -418,21 +419,4 @@ pub(crate) async fn remove_file(
     filename: &OsStr,
 ) -> Result<(), String> {
     remove_name(dir, &filename.to_string_lossy()).await
-}
-
-/// True when a thrown JS value is a `NotFoundError` `DOMException`, the
-/// web equivalent of `io::ErrorKind::NotFound`.
-pub(crate) fn is_not_found(e: &JsValue) -> bool {
-    js_sys::Reflect::get(e, &"name".into())
-        .ok()
-        .and_then(|v| v.as_string())
-        .as_deref()
-        == Some("NotFoundError")
-}
-
-pub(crate) fn js_error_string(e: &JsValue) -> String {
-    js_sys::Reflect::get(e, &"message".into())
-        .ok()
-        .and_then(|v| v.as_string())
-        .unwrap_or_else(|| format!("{e:?}"))
 }

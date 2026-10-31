@@ -4,22 +4,22 @@ This document explains **when** each piece of the codebase runs, in the order
 a photo actually moves through it, across the three platform targets: macOS,
 Linux/Windows ("non-mac"), and wasm32 (the browser build). It complements
 `CLAUDE.md` and [`docs/SYSTEM_DIAGRAM.md`](SYSTEM_DIAGRAM.md)
-(architecture diagrams) — this file is about
+(architecture diagrams). This file is about
 *sequencing*, not module boundaries.
 
 There are three pipelines a photo passes through, each triggered by a
 different user action:
 
-1. **Opening a photo** — decoding it into the Loupe.
-2. **Browsing a folder** — decoding thumbnails for the Grid/filmstrip.
-3. **Exporting a photo** — baking edits into a JPEG on disk.
+1. **Opening a photo**: decoding it into the Loupe.
+2. **Browsing a folder**: decoding thumbnails for the Grid/filmstrip.
+3. **Exporting a photo**: baking edits into a JPEG on disk.
 
 [Runtime rules](#runtime-rules) states how work is scheduled, how edits
 reach the disk, what an agent may do, and what memory each cache may use.
 
 All three fork into per-platform decode/encode code but converge back onto
 shared, platform-independent code (the tone pipeline, the GPU renderer, the
-pixel-ops math) — that convergence is what guarantees the three platforms
+pixel-ops math). That convergence is what guarantees the three platforms
 *look* the same even though they decode differently.
 
 ## Two independent platform axes, not three parallel copies
@@ -28,12 +28,12 @@ Before the pipelines: the "three platforms" aren't three separate module
 trees. Two independent `cfg` axes combine into three realized cases
 (macOS+wasm32 never occurs):
 
-- **`cfg(target_os = "macos")`** — gates everything built on Apple's
+- **`cfg(target_os = "macos")`**: gates everything built on Apple's
   ImageIO/CoreGraphics/CoreImage (`decode/image_decode/mod.rs`,
   `decode/image_decode/raw_filter.rs`, `decode/image_encode.rs`, `jobs/thumbnail.rs`,
   `decode/coregraphics.rs`). The `not(macos)` arm of each is Linux/Windows *and*
   wasm32's fallback code.
-- **`cfg(target_arch = "wasm32")`** — gates the browser-only plumbing
+- **`cfg(target_arch = "wasm32")`**: gates the browser-only plumbing
   (`web/*.rs`) and the parts of `jobs/loader.rs`/`export/mod.rs` that can't use real OS
   threads there.
 
@@ -51,7 +51,7 @@ What that means in practice:
 
 ---
 
-## Pipeline 1 — Opening a photo (the Loupe)
+## Pipeline 1: Opening a photo (the Loupe)
 
 Triggered by: double-clicking a photo, arrow-key navigation, or opening a
 file/folder from the command line or Finder.
@@ -110,7 +110,7 @@ flowchart TD
 - Showing the cheap pass first and upgrading in place is what makes opening
   a RAW file feel instant instead of frozen.
 - A JPEG has no embedded preview, so its Speed pass already decodes at the
-  target size — the upgrade pass is skipped entirely, at no extra cost.
+  target size, so the upgrade pass is skipped entirely at no extra cost.
 
 **Why rawler's RAW develops stop at `LinearF16`:**
 - `decode_raw_nonmac` (Linux, Windows, and wasm32 export) and wasm32's
@@ -167,7 +167,7 @@ flowchart TD
 
 ---
 
-## Pipeline 2 — Browsing a folder (Grid / filmstrip thumbnails)
+## Pipeline 2: Browsing a folder (Grid / filmstrip thumbnails)
 
 Triggered by: opening a folder, or scrolling the Grid/filmstrip so a new
 range of thumbnails becomes the "working set."
@@ -233,7 +233,7 @@ thumbnail:**
 
 ---
 
-## Pipeline 3 — Exporting a photo
+## Pipeline 3: Exporting a photo
 
 Triggered by: File → Export, for one photo or a batch.
 

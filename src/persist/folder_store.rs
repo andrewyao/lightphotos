@@ -1233,47 +1233,32 @@ mod tests {
 
     #[test]
     fn adjustments_persist_across_reload() {
-        let dir = temp_folder("folder-store-test");
-        let p = dir.join("photo.jpg");
+        let cases = [
+            Adjustments {
+                exposure: 1.5,
+                contrast: 25.0,
+                ..Default::default()
+            },
+            Adjustments {
+                denoise: 40.0,
+                ..Default::default()
+            },
+        ];
+        for adj in &cases {
+            let dir = temp_folder("folder-store-test");
+            let p = dir.join("photo.jpg");
 
-        let adj = Adjustments {
-            exposure: 1.5,
-            contrast: 25.0,
-            ..Default::default()
-        };
+            {
+                let mut cat = FolderStore::with_dir(dir.clone());
+                cat.set_adjustments(&p, adj);
+                assert_eq!(&cat.adjustments(&p), adj);
+            }
 
-        {
-            let mut cat = FolderStore::with_dir(dir.clone());
-            cat.set_adjustments(&p, &adj);
-            assert_eq!(cat.adjustments(&p), adj);
+            let reloaded = FolderStore::with_dir(dir.clone());
+            assert_eq!(&reloaded.adjustments(&p), adj);
+
+            std::fs::remove_dir_all(&dir).unwrap();
         }
-
-        let reloaded = FolderStore::with_dir(dir.clone());
-        assert_eq!(reloaded.adjustments(&p), adj);
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn denoise_persists_across_reload() {
-        let dir = temp_folder("folder-store-test");
-        let p = dir.join("photo.jpg");
-
-        let adj = Adjustments {
-            denoise: 40.0,
-            ..Default::default()
-        };
-
-        {
-            let mut cat = FolderStore::with_dir(dir.clone());
-            cat.set_adjustments(&p, &adj);
-            assert_eq!(cat.adjustments(&p), adj);
-        }
-
-        let reloaded = FolderStore::with_dir(dir.clone());
-        assert_eq!(reloaded.adjustments(&p), adj);
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

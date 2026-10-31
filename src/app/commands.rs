@@ -668,7 +668,7 @@ const ZOOM_STEP: f32 = 1.2;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::test_support::folder_app;
+    use crate::app::test_support::{folder_app, visible_names};
     use crate::command::{CropParams, DevelopParams, FlagParams, LabelParams, RateParams, Stars};
     use crate::develop::{Crop, SliderId, Straighten};
 
@@ -1363,17 +1363,6 @@ mod tests {
         let adj = app.folder_store.adjustments(&paths[0]);
         assert_eq!(adj.exposure, 0.0);
         assert!(adj.crop.is_some());
-    }
-
-    fn visible_names(app: &App) -> Vec<String> {
-        let Some(pl) = app.playlist.as_ref() else {
-            return Vec::new();
-        };
-        app.visible
-            .iter()
-            .filter_map(|&i| pl.entry(i)?.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .collect()
     }
 
     #[test]

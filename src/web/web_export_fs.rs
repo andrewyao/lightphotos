@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDirectoryOptions,
@@ -16,6 +16,7 @@ use web_sys::{
 };
 
 use crate::export::EXPORTS_DIR;
+use crate::web::web_fs::{is_not_found, js_error_string};
 
 /// Built fresh for each export batch, so `file_handles` is a snapshot of
 /// `App::web_file_handles` at that moment.
@@ -140,19 +141,4 @@ impl WebFs {
             .ok_or_else(|| format!("no file handle for {}", src.display()))?;
         crate::web::web_fs::read_array_buffer(handle).await
     }
-}
-
-fn is_not_found(e: &JsValue) -> bool {
-    js_sys::Reflect::get(e, &"name".into())
-        .ok()
-        .and_then(|v| v.as_string())
-        .as_deref()
-        == Some("NotFoundError")
-}
-
-fn js_error_string(e: &JsValue) -> String {
-    js_sys::Reflect::get(e, &"message".into())
-        .ok()
-        .and_then(|v| v.as_string())
-        .unwrap_or_else(|| format!("{e:?}"))
 }

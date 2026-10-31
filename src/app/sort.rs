@@ -201,6 +201,7 @@ impl App {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
+    use crate::app::test_support::visible_names;
     use crate::develop::Adjustments;
     use crate::navigation::Playlist;
     use std::path::PathBuf;
@@ -213,17 +214,6 @@ mod tests {
         app.folder_store.open_dir(&dir);
         app.recompute_visible();
         (app, dir, paths)
-    }
-
-    fn visible_names(app: &App) -> Vec<String> {
-        let Some(pl) = app.playlist.as_ref() else {
-            return Vec::new();
-        };
-        app.visible
-            .iter()
-            .filter_map(|&i| pl.entry(i)?.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .collect()
     }
 
     fn edit(app: &mut App, path: &std::path::Path, exposure: f32) {

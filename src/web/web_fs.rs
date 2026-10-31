@@ -506,6 +506,16 @@ pub(crate) fn js_error_string(e: &JsValue) -> String {
         .unwrap_or_else(|| format!("{e:?}"))
 }
 
+/// True when a thrown JS value is a `NotFoundError` `DOMException`, the
+/// web equivalent of `io::ErrorKind::NotFound`.
+pub(crate) fn is_not_found(e: &JsValue) -> bool {
+    js_sys::Reflect::get(e, &"name".into())
+        .ok()
+        .and_then(|v| v.as_string())
+        .as_deref()
+        == Some("NotFoundError")
+}
+
 /// The URL directory the app's own wasm was served from, with no trailing
 /// slash. The site serves the app under `/app/`, so the origin alone is
 /// wrong. It comes from the `<link rel="modulepreload">` trunk emits, and
