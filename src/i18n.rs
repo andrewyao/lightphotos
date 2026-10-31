@@ -134,13 +134,38 @@ pub fn t() -> &'static Strings {
 /// `prefs` key holding the saved language code.
 const LANGUAGE_KEY: &str = "language";
 
-/// Pick the startup language: the saved choice, else the OS language, else
-/// English.
+/// Pick the startup language: a `?lang=` in the page's URL (the browser build,
+/// opened from the site), else the saved choice, else the OS or browser
+/// language, else English. The URL's language is not saved; only a pick in
+/// Settings is.
 pub fn init() {
-    let lang = saved_lang()
+    let lang = lang_from_query(&location_search())
+        .or_else(saved_lang)
         .or_else(|| system_tags().iter().find_map(|t| Lang::from_tag(t)))
         .unwrap_or(Lang::En);
     set_lang(lang);
+}
+
+/// The language a query string such as `?lang=de&x=1` asks for. A language we
+/// don't have is no request, so startup falls through to the next source.
+fn lang_from_query(search: &str) -> Option<Lang> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("lang="))
+        .and_then(Lang::from_tag)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn location_search() -> String {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn location_search() -> String {
+    String::new()
 }
 
 fn saved_lang() -> Option<Lang> {
@@ -1179,6 +1204,26 @@ mod tests {
     #[test]
     fn the_old_chinese_code_still_loads() {
         assert_eq!(Lang::from_tag("zh"), Some(Lang::ZhHans));
+    }
+
+    #[test]
+    fn the_url_names_the_language() {
+        for (search, want) in [
+            ("?lang=de", Some(Lang::De)),
+            ("?lang=zh-TW", Some(Lang::ZhHant)),
+            ("?lang=zh-CN", Some(Lang::ZhHans)),
+            ("?lang=en", Some(Lang::En)),
+            ("?a=1&lang=ja&b=2", Some(Lang::Ja)),
+            ("lang=fr", Some(Lang::Fr)),
+            ("?lang=es", None),
+            ("?lang=", None),
+            ("?language=de", None),
+            ("?xlang=de", None),
+            ("?", None),
+            ("", None),
+        ] {
+            assert_eq!(lang_from_query(search), want, "{search:?}");
+        }
     }
 
     #[test]
