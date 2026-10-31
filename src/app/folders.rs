@@ -275,7 +275,8 @@ mod tests {
     /// as a get_state probe holds it, doesn't make the folder read-only.
     #[test]
     fn a_probe_at_the_moment_of_open_does_not_make_it_read_only() {
-        use crate::app::test_support::load_folder;
+        use crate::app::test_support::wait_for_folder_store;
+        use crate::navigation::Playlist;
         use crate::sidecar::{FolderLock, Writer};
         let (dir, _) = one_photo("lock-probe");
         let probe = FolderLock::try_acquire(&dir, Writer::Mcp).unwrap();
@@ -283,15 +284,16 @@ mod tests {
             .join(crate::sidecar::SIDECAR_DIR)
             .join(crate::sidecar::WHO_FILE);
         std::fs::remove_file(&who).unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(30));
-            drop(probe);
-        });
         let mut app = App::new(None);
-        load_folder(&mut app, &dir);
-        let _ = release.join();
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        let opening = app.folder_store.opening();
+        // Let go right after the first try, not on a timer: a runner busy
+        // enough to delay a timer past the brief wait would open it read-only.
+        drop(probe);
+        wait_for_folder_store(&mut app);
         let read_only = app.folder_store.read_only();
         let _ = std::fs::remove_dir_all(&dir);
+        assert!(opening, "the first try found the lock busy");
         assert_eq!(read_only, None);
     }
 
