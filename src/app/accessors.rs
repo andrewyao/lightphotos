@@ -197,7 +197,7 @@ impl App {
         self.filter
     }
 
-    pub(crate) fn flag_filter(&self) -> crate::navigation::FlagFilter {
+    pub(crate) fn flag_filter(&self) -> crate::navigation::FlagSet {
         self.flag_filter
     }
 

@@ -1821,6 +1821,7 @@ mod tests {
     #[test]
     fn p_x_and_u_flag_and_backquote_toggles_pick() {
         let (mut app, paths) = folder_app(3);
+        app.set_flag_filter(crate::navigation::FlagSet::ALL);
         press(&mut app, ModifiersState::empty(), KeyCode::KeyP);
         assert_eq!(app.flag_of(&paths[0]), Some(Flag::Pick));
         press(&mut app, ModifiersState::empty(), KeyCode::KeyX);

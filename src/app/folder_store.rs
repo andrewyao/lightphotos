@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::develop::copy::{self, CopyItem, CopyItems};
 use crate::develop::Adjustments;
-use crate::navigation::{Cmp, FlagFilter};
+use crate::navigation::{Cmp, FlagSet};
 use crate::persist::folder_store::{GroupWriteRefused, Patch};
 use crate::persist::groups::{Group, GroupWrite};
 use crate::sidecar::Flag;
@@ -500,7 +500,7 @@ impl App {
     }
 
     pub(super) fn after_flag_change(&mut self) {
-        if self.flag_filter != FlagFilter::All {
+        if self.flag_filter.hides_any() {
             self.refilter_after_folder_store_change();
             self.resync_loupe_selection();
         }
@@ -1162,7 +1162,7 @@ impl App {
 
     /// Sets the grid's flag filter. Does nothing in the Loupe, as
     /// `set_filter` does not.
-    pub(super) fn set_flag_filter(&mut self, filter: FlagFilter) {
+    pub(super) fn set_flag_filter(&mut self, filter: FlagSet) {
         if self.mode == ViewMode::Loupe {
             return;
         }
@@ -1523,6 +1523,7 @@ mod tests {
     #[test]
     fn flags_apply_to_one_photo_or_the_selection_and_report_mixed_coverage() {
         let (mut app, dir, paths) = crate::app::test_support::folder_app("flag-sel", 3);
+        app.set_flag_filter(FlagSet::ALL);
         app.selected = (0..3).collect();
         app.sel = Some(0);
         app.apply_ui_actions(vec![ui::UiAction::SetFlag(Some(Flag::Pick))]);
@@ -1568,29 +1569,30 @@ mod tests {
     }
 
     #[test]
-    fn the_grid_keeps_rejects_in_view_by_default_and_the_flag_filter_narrows_the_star_filter() {
+    fn the_grid_hides_rejects_by_default_and_the_flag_filter_narrows_the_star_filter() {
         let (mut app, dir, paths) = crate::app::test_support::folder_app("flag-filter", 4);
         app.folder_store.set_flag(&paths[0], Some(Flag::Pick));
         app.folder_store.set_flag(&paths[1], Some(Flag::Pick));
         app.set_rating_of(paths[1].clone(), 3);
+        app.recompute_visible();
+        assert_eq!(app.flag_filter(), FlagSet::NOT_REJECTED);
+        assert_eq!(app.visible_len(), 4);
 
         app.select_single(2);
         app.apply_ui_actions(vec![ui::UiAction::SetFlag(Some(Flag::Reject))]);
-        assert_eq!(app.flag_filter(), FlagFilter::All);
-        assert_eq!(
-            app.visible_len(),
-            4,
-            "a reject stays, dimmed, as in Lightroom"
-        );
+        assert_eq!(app.visible_len(), 3, "a reject leaves the default view");
 
         let shown = |app: &mut App, f| {
             app.apply_ui_actions(vec![ui::UiAction::SetFlagFilter(f)]);
             app.visible_len()
         };
-        assert_eq!(shown(&mut app, FlagFilter::All), 4);
-        assert_eq!(shown(&mut app, FlagFilter::Rejected), 1);
-        assert_eq!(shown(&mut app, FlagFilter::Unflagged), 1);
-        assert_eq!(shown(&mut app, FlagFilter::Picked), 2);
+        assert_eq!(shown(&mut app, FlagSet::ALL), 4);
+        assert_eq!(shown(&mut app, FlagSet::default()), 4, "none lit shows all");
+        assert_eq!(shown(&mut app, FlagSet::only(Some(Flag::Reject))), 1);
+        assert_eq!(shown(&mut app, FlagSet::only(None)), 1);
+        let both = FlagSet::only(None).toggled(Some(Flag::Reject));
+        assert_eq!(shown(&mut app, both), 2, "lit flags add up");
+        assert_eq!(shown(&mut app, FlagSet::only(Some(Flag::Pick))), 2);
         app.set_filter(Some((Cmp::Gte, 3)));
         assert_eq!(app.visible_len(), 1, "both filters apply");
         let _ = std::fs::remove_dir_all(&dir);

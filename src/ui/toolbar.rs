@@ -124,7 +124,7 @@ pub(crate) enum ToolbarControl {
     FilterCmp(Cmp),
     Star(u8),
     Unrated,
-    Flag(FlagFilter),
+    Flag(Option<Flag>),
     Label(ColorLabel),
     EyesClosed,
     Sort,
@@ -142,9 +142,9 @@ impl ToolbarControl {
         Self::Star(3),
         Self::Star(4),
         Self::Star(5),
-        Self::Flag(FlagFilter::Unflagged),
-        Self::Flag(FlagFilter::Picked),
-        Self::Flag(FlagFilter::Rejected),
+        Self::Flag(None),
+        Self::Flag(Some(Flag::Pick)),
+        Self::Flag(Some(Flag::Reject)),
         Self::Label(ColorLabel::Red),
         Self::Label(ColorLabel::Yellow),
         Self::Label(ColorLabel::Green),
@@ -181,15 +181,11 @@ impl ToolbarControl {
     }
 
     /// Controls that open a group in the row get a separator before them.
+    /// The unrated icon, the comparators and the stars are one group.
     fn starts_group(self) -> bool {
         matches!(
             self,
-            Self::FilterCmp(Cmp::Gte)
-                | Self::Star(1)
-                | Self::Flag(FlagFilter::Unflagged)
-                | Self::Label(ColorLabel::Red)
-                | Self::EyesClosed
-                | Self::Sort
+            Self::Flag(None) | Self::Label(ColorLabel::Red) | Self::EyesClosed | Self::Sort
         )
     }
 
@@ -206,9 +202,8 @@ impl ToolbarControl {
                 let unrated = matches!(app.filter(), Some((Cmp::Eq, 0)));
                 UiAction::SetFilter(if unrated { None } else { Some((Cmp::Eq, 0)) })
             }
-            // Like a star, clicking the shown flag again shows all.
-            Self::Flag(f) if f == app.flag_filter() => UiAction::SetFlagFilter(FlagFilter::All),
-            Self::Flag(f) => UiAction::SetFlagFilter(f),
+            // Each flag toggles on its own; a photo with any lit flag shows.
+            Self::Flag(f) => UiAction::SetFlagFilter(app.flag_filter().toggled(f)),
             // Each dot toggles on its own; a photo with any lit label shows.
             Self::Label(label) => {
                 let mut labels = app.label_filter().to_vec();
@@ -235,8 +230,7 @@ impl ToolbarControl {
         match self {
             // The comparator applies to the next star click. It stays
             // highlighted even when no filter is set.
-            Self::FilterCmp(cmp) => ui
-                .selectable_label(app.filter_cmp() == cmp, cmp_glyph(cmp))
+            Self::FilterCmp(cmp) => super::flat_toggle(ui, app.filter_cmp() == cmp, cmp_glyph(cmp))
                 .on_hover_text(match cmp {
                     Cmp::Gte => t.at_least_n_stars,
                     Cmp::Eq => t.exactly_n_stars,
@@ -266,23 +260,11 @@ impl ToolbarControl {
                     .on_hover_text((t.show_rated)(cmp_glyph(app.filter_cmp()), n))
             }
             Self::Flag(f) => {
-                if f == FlagFilter::Unflagged {
+                if f.is_none() {
                     ui.label(t.flag_filter_label);
                 }
-                let state = match f {
-                    FlagFilter::Picked => Some(Flag::Pick),
-                    FlagFilter::Rejected => Some(Flag::Reject),
-                    _ => None,
-                };
-                let on = if app.flag_filter() == f {
-                    FlagCoverage::All
-                } else {
-                    FlagCoverage::None
-                };
-                let colors = theme::colors(ui.ctx());
-                let side = font_size::px(ui.style(), 20.0);
-                super::flag_button(ui, state, on, side, (colors.value, colors.label))
-                    .on_hover_text((t.show_flagged)(crate::app::flag_name(state)))
+                flag_toggle(ui, f, app.flag_filter().contains(f))
+                    .on_hover_text((t.show_flagged)(crate::app::flag_name(f)))
             }
             Self::Label(label) => {
                 if label == ColorLabel::Red {
@@ -295,11 +277,7 @@ impl ToolbarControl {
                 let on = matches!(app.filter(), Some((Cmp::Eq, 0)));
                 unrated_button(ui, on).on_hover_text(t.unrated_tip)
             }
-            Self::EyesClosed => ui
-                .add(egui::Button::selectable(
-                    app.eyes_filter_on(),
-                    t.eyes_closed,
-                ))
+            Self::EyesClosed => super::flat_toggle(ui, app.eyes_filter_on(), t.eyes_closed)
                 .on_hover_text(t.eyes_closed_tip),
             Self::Sort => {
                 ui.label(t.sort_by);
@@ -346,7 +324,7 @@ impl ToolbarControl {
                 } else {
                     ("\u{2191}", t.sort_ascending_tip)
                 };
-                ui.selectable_label(false, glyph).on_hover_text(tip)
+                super::flat_toggle(ui, false, glyph).on_hover_text(tip)
             }
         }
     }
@@ -372,6 +350,38 @@ fn sort_choices(app: &App) -> Vec<GridSort> {
         _ => !(cfg!(target_arch = "wasm32") && sort.reads_files()),
     })
     .collect()
+}
+
+/// A flag filter toggle: the flag's icon on a button-sized plate that fills
+/// with the selection color while the filter shows that flag, as a lit
+/// comparator does.
+fn flag_toggle(ui: &mut egui::Ui, flag: Option<Flag>, on: bool) -> egui::Response {
+    let side = font_size::px(ui.style(), 20.0);
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(side * 1.4, side * 1.2), egui::Sense::click());
+    let colors = theme::colors(ui.ctx());
+    let radius = ui.visuals().widgets.inactive.corner_radius;
+    if on {
+        ui.painter().rect_filled(rect, radius, colors.selection_bg);
+    } else if resp.hovered() {
+        let hovered = ui.visuals().widgets.hovered.weak_bg_fill;
+        ui.painter().rect_filled(rect, radius, hovered);
+    }
+    let coverage = if on {
+        FlagCoverage::All
+    } else {
+        FlagCoverage::None
+    };
+    let mark = egui::Rect::from_center_size(rect.center(), egui::vec2(side, side));
+    super::paint_flag_mark(
+        ui,
+        mark,
+        flag,
+        coverage,
+        (colors.value, colors.label),
+        resp.hovered(),
+    );
+    resp
 }
 
 /// A color label filter toggle: a dot of the label's color, ringed while
@@ -444,7 +454,6 @@ pub(super) fn flag_filter_menu(
     let t = t();
     ui.label(t.flag_filter_label);
     let name = |f| match f {
-        FlagFilter::All => t.all,
         FlagFilter::Picked => t.flag_picked,
         FlagFilter::Unflagged => t.flag_unflagged,
         FlagFilter::Rejected => t.flag_rejected,
@@ -1002,6 +1011,59 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Each control's keyboard cursor rect, with the pointer resting at
+    /// `hover` throughout.
+    fn control_rects(hover: Option<egui::Pos2>) -> Vec<egui::Rect> {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, theme::Theme::Dark);
+        let mut app = App::new(None);
+        let frame = |app: &App| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 400.0),
+                )),
+                events: hover.map(egui::Event::PointerMoved).into_iter().collect(),
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                grid_toolbar(ui, app, &mut FrameOutput::default());
+            })
+        };
+        // Hover reads last frame's response, so let the pointer settle.
+        for _ in 0..3 {
+            frame(&app);
+        }
+
+        let mut rects = Vec::new();
+        for idx in 0..App::TOOLBAR_CONTROLS {
+            app.focus_toolbar_control(idx);
+            frame(&app);
+            rects.extend(frame(&app).shapes.into_iter().filter_map(
+                |clipped| match clipped.shape {
+                    egui::Shape::Rect(shape)
+                        if shape.stroke.color == theme::palette(theme::Theme::Dark).cursor =>
+                    {
+                        Some(shape.rect)
+                    }
+                    _ => None,
+                },
+            ));
+        }
+        rects
+    }
+
+    #[test]
+    fn hovering_a_button_does_not_move_the_toolbar() {
+        let rest = control_rects(None);
+        assert_eq!(rest.len(), App::TOOLBAR_CONTROLS);
+        // The Lte comparator isn't selected, and the sort direction never is.
+        for idx in [3, App::TOOLBAR_CONTROLS - 1] {
+            let hovered = control_rects(Some(rest[idx].center()));
+            assert_eq!(hovered, rest, "hovering control {idx} moved the row");
+        }
     }
 
     #[test]

@@ -189,6 +189,8 @@ fn no_matches(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         ui.add_space(8.0);
         if ui.button(t.show_all_photos).clicked() {
             out.actions.push(UiAction::SetFilter(None));
+            out.actions
+                .push(UiAction::SetFlagFilter(crate::navigation::FlagSet::ALL));
             if !app.label_filter().is_empty() {
                 out.actions.push(UiAction::SetLabelFilter(Vec::new()));
             }
@@ -275,23 +277,6 @@ fn folder_glyph(ui: &mut egui::Ui) -> egui::Response {
     response
 }
 
-/// A folder name. egui draws a button's border and padding only while it is
-/// selected or hovered, which would shift the text by the border's width. Here
-/// the idle frame is there but transparent, so the space is always reserved.
-fn folder_label<'a>(
-    ui: &mut egui::Ui,
-    selected: bool,
-    text: impl Into<egui::WidgetText> + 'a,
-) -> egui::Response {
-    ui.scope(|ui| {
-        let idle = &mut ui.visuals_mut().widgets.inactive;
-        idle.weak_bg_fill = egui::Color32::TRANSPARENT;
-        idle.bg_stroke.color = egui::Color32::TRANSPARENT;
-        ui.add(egui::Button::selectable(selected, text.into()).frame_when_inactive(true))
-    })
-    .inner
-}
-
 /// Why a missing root greys out: natively an unplugged drive, on the web
 /// a folder this browser no longer keeps access to.
 fn missing_tip(folder: &str) -> String {
@@ -315,7 +300,7 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
         if depth == 0 && app.is_missing_root(path) {
             ui.add_space(disclosure_w(ui.style()));
             folder_glyph(ui);
-            let label = folder_label(ui, false, egui::RichText::new(name).weak())
+            let label = super::flat_toggle(ui, false, egui::RichText::new(name).weak())
                 .on_hover_text(missing_tip(&path.display().to_string()));
             if label.clicked() {
                 // Checks again, in case the drive is back.
@@ -336,7 +321,7 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
             );
         }
         let icon = folder_glyph(ui);
-        let label = folder_label(ui, selected, name);
+        let label = super::flat_toggle(ui, selected, name);
         if icon.clicked() || label.clicked() {
             out.actions.push(UiAction::OpenFolder(path.to_path_buf()));
         }

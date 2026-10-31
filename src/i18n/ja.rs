@@ -146,7 +146,6 @@ pub static JA: Strings = Strings {
     ],
 
     rating_filter: "レーティング：",
-    all: "すべて",
     at_least_n_stars: "N スター以上",
     exactly_n_stars: "N スター",
     at_most_n_stars: "N スター以下",

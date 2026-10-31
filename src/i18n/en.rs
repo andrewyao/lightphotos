@@ -146,7 +146,6 @@ pub static EN: Strings = Strings {
     ],
 
     rating_filter: "Rating:",
-    all: "All",
     at_least_n_stars: "At least N stars",
     exactly_n_stars: "Exactly N stars",
     at_most_n_stars: "At most N stars",

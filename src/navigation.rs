@@ -33,13 +33,10 @@ impl Cmp {
     }
 }
 
-/// Which photos a flag filter shows. The grid offers every choice but
-/// `NotRejected` and starts on `All`, as Lightroom does, dimming rejects rather than
-/// hiding them; the Compare pane offers [`FlagFilter::COMPARE`] and starts
-/// by hiding rejects.
+/// Which photos the Compare pane's flag filter shows. The pane offers
+/// [`FlagFilter::COMPARE`] and starts by hiding rejects.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FlagFilter {
-    All,
     Picked,
     Unflagged,
     Rejected,
@@ -58,11 +55,80 @@ impl FlagFilter {
 
     pub fn matches(self, flag: Option<Flag>) -> bool {
         match self {
-            FlagFilter::All => true,
             FlagFilter::Picked => flag == Some(Flag::Pick),
             FlagFilter::Unflagged => flag.is_none(),
             FlagFilter::Rejected => flag == Some(Flag::Reject),
             FlagFilter::NotRejected => flag != Some(Flag::Reject),
+        }
+    }
+}
+
+/// The flags the Grid's flag filter shows, each lit or not, as the toolbar's
+/// three icons are. A photo shows when its flag is lit; with none lit every
+/// photo shows, as with no label lit. The Grid starts on [`Self::NOT_REJECTED`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct FlagSet {
+    unflagged: bool,
+    picked: bool,
+    rejected: bool,
+}
+
+impl FlagSet {
+    pub const NOT_REJECTED: Self = Self {
+        unflagged: true,
+        picked: true,
+        rejected: false,
+    };
+    pub const ALL: Self = Self {
+        unflagged: true,
+        picked: true,
+        rejected: true,
+    };
+
+    /// Just `flag` lit (`None` is unflagged).
+    pub fn only(flag: Option<Flag>) -> Self {
+        Self::default().toggled(flag)
+    }
+
+    /// Whether `flag`'s icon is lit.
+    pub fn contains(self, flag: Option<Flag>) -> bool {
+        match flag {
+            None => self.unflagged,
+            Some(Flag::Pick) => self.picked,
+            Some(Flag::Reject) => self.rejected,
+        }
+    }
+
+    /// This set with `flag` lit if it was off, or off if it was lit.
+    pub fn toggled(self, flag: Option<Flag>) -> Self {
+        let mut set = self;
+        let lit = !self.contains(flag);
+        match flag {
+            None => set.unflagged = lit,
+            Some(Flag::Pick) => set.picked = lit,
+            Some(Flag::Reject) => set.rejected = lit,
+        }
+        set
+    }
+
+    /// Whether some photo is hidden: a flag is lit and another is not.
+    pub fn hides_any(self) -> bool {
+        let lit = [self.unflagged, self.picked, self.rejected];
+        lit.contains(&true) && lit.contains(&false)
+    }
+
+    pub fn matches(self, flag: Option<Flag>) -> bool {
+        !self.hides_any() || self.contains(flag)
+    }
+}
+
+impl Default for FlagSet {
+    /// Nothing lit.
+    fn default() -> Self {
+        Self {
+            unflagged: false,
+            picked: false,
+            rejected: false,
         }
     }
 }
@@ -695,10 +761,29 @@ mod tests {
             [Some(Flag::Pick), Some(Flag::Reject), None].map(|flag| f.matches(flag))
         };
         assert_eq!(shown(NotRejected), [true, false, true]);
-        assert_eq!(shown(All), [true, true, true]);
         assert_eq!(shown(Picked), [true, false, false]);
         assert_eq!(shown(Rejected), [false, true, false]);
         assert_eq!(shown(Unflagged), [false, false, true]);
+    }
+
+    #[test]
+    fn the_grids_flag_set_shows_every_lit_flag_and_everything_when_none_is() {
+        let shown =
+            |s: FlagSet| [Some(Flag::Pick), Some(Flag::Reject), None].map(|flag| s.matches(flag));
+        assert_eq!(shown(FlagSet::NOT_REJECTED), [true, false, true]);
+        assert_eq!(shown(FlagSet::ALL), [true, true, true]);
+        assert_eq!(shown(FlagSet::default()), [true, true, true]);
+        assert_eq!(
+            shown(FlagSet::only(Some(Flag::Reject))),
+            [false, true, false]
+        );
+
+        let lit = FlagSet::NOT_REJECTED.toggled(Some(Flag::Reject));
+        assert_eq!(lit, FlagSet::ALL);
+        let picked = FlagSet::NOT_REJECTED.toggled(None);
+        assert_eq!(picked, FlagSet::only(Some(Flag::Pick)));
+        assert_eq!(shown(picked), [true, false, false]);
+        assert!(!picked.toggled(Some(Flag::Pick)).hides_any());
     }
 
     #[test]

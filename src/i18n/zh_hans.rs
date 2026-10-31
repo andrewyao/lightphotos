@@ -146,7 +146,6 @@ pub static ZH_HANS: Strings = Strings {
     ],
 
     rating_filter: "评分：",
-    all: "全部",
     at_least_n_stars: "至少 N 星",
     exactly_n_stars: "正好 N 星",
     at_most_n_stars: "至多 N 星",

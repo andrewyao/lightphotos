@@ -1768,7 +1768,7 @@ mod tests {
         assert_eq!(shown(&app), vec![paths[3].clone()]);
         assert_eq!(
             app.flag_filter(),
-            FlagFilter::All,
+            crate::navigation::FlagSet::NOT_REJECTED,
             "the grid keeps its own filter"
         );
         let _ = std::fs::remove_dir_all(&dir);

@@ -159,7 +159,7 @@ pub enum UiAction {
     /// Flag the selected photo (`None` clears).
     SetFlag(Option<crate::sidecar::Flag>),
     /// The grid's flag filter.
-    SetFlagFilter(crate::navigation::FlagFilter),
+    SetFlagFilter(crate::navigation::FlagSet),
     /// The grid's color label filter. Empty shows all.
     SetLabelFilter(Vec<crate::sidecar::ColorLabel>),
     /// The Compare pane's flag filter.
@@ -907,6 +907,24 @@ fn flag_color(
         Some(Flag::Reject) => colors.danger,
         None => neutral,
     }
+}
+
+/// A selectable button that doesn't shift its neighbors. egui draws a
+/// button's border and padding only while it is selected or hovered, which
+/// would move the row by the border's width. Here the idle frame is there but
+/// transparent, so the space is always reserved.
+fn flat_toggle<'a>(
+    ui: &mut egui::Ui,
+    selected: bool,
+    text: impl Into<egui::WidgetText> + 'a,
+) -> egui::Response {
+    ui.scope(|ui| {
+        let idle = &mut ui.visuals_mut().widgets.inactive;
+        idle.weak_bg_fill = egui::Color32::TRANSPARENT;
+        idle.bg_stroke.color = egui::Color32::TRANSPARENT;
+        ui.add(egui::Button::selectable(selected, text.into()).frame_when_inactive(true))
+    })
+    .inner
 }
 
 /// A clickable flag-state icon `side` wide: solid when the whole selection

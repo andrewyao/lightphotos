@@ -146,7 +146,6 @@ pub static KO: Strings = Strings {
     ],
 
     rating_filter: "별점:",
-    all: "전체",
     at_least_n_stars: "별 N개 이상",
     exactly_n_stars: "별 N개",
     at_most_n_stars: "별 N개 이하",

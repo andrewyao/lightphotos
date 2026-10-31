@@ -561,10 +561,10 @@ impl App {
         }
         if let Some(flag) = p.flag {
             self.set_flag_filter(match flag {
-                FlagShown::All => FlagFilter::All,
-                FlagShown::Picked => FlagFilter::Picked,
-                FlagShown::Unflagged => FlagFilter::Unflagged,
-                FlagShown::Rejected => FlagFilter::Rejected,
+                FlagShown::All => FlagSet::ALL,
+                FlagShown::Picked => FlagSet::only(Some(Flag::Pick)),
+                FlagShown::Unflagged => FlagSet::only(None),
+                FlagShown::Rejected => FlagSet::only(Some(Flag::Reject)),
             });
         }
         if let Some(labels) = p.labels {
@@ -905,6 +905,7 @@ mod tests {
     #[test]
     fn flag_and_label_act_like_their_keys() {
         let (mut app, _, paths) = folder_app("cmd-flag", 2);
+        app.set_flag_filter(crate::navigation::FlagSet::ALL);
         app.select_single(0);
         run(
             &mut app,

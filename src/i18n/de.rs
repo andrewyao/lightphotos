@@ -147,7 +147,6 @@ pub static DE: Strings = Strings {
 
 
     rating_filter: "Bewertung:",
-    all: "Alle",
     at_least_n_stars: "Mindestens N Sterne",
     exactly_n_stars: "Genau N Sterne",
     at_most_n_stars: "Höchstens N Sterne",

@@ -380,7 +380,7 @@ pub fn set(ctx: &egui::Context, theme: Theme) {
     }
 }
 
-fn apply(ctx: &egui::Context, theme: Theme) {
+pub(super) fn apply(ctx: &egui::Context, theme: Theme) {
     let p = palette(theme);
     let (base_theme, mut v) = if p.dark_base {
         (egui::Theme::Dark, egui::Visuals::dark())

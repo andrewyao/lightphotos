@@ -20,7 +20,7 @@ use crate::decode::image_decode;
 use crate::develop::{Adjustments, Crop, Mask, TouchUp, MIN_CROP};
 use crate::export::Exporter;
 use crate::jobs::loader::Loader;
-use crate::navigation::{Cmp, FlagFilter, Playlist};
+use crate::navigation::{Cmp, FlagSet, Playlist};
 use crate::persist::folder_store::FolderStore;
 use crate::renderer::{EguiPaint, Renderer};
 use crate::ui;
@@ -547,7 +547,7 @@ pub(crate) struct App {
     /// Active star filter. `None` shows all.
     filter: Option<(Cmp, u8)>,
     /// The grid's flag filter, applied with the star filter.
-    flag_filter: FlagFilter,
+    flag_filter: FlagSet,
     /// The grid's color label filter: a photo with any of these labels
     /// shows. Empty shows all.
     label_filter: Vec<crate::sidecar::ColorLabel>,
@@ -966,7 +966,7 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             unsaved_edit_kind: "adjustment",
             filter: None,
-            flag_filter: FlagFilter::All,
+            flag_filter: FlagSet::NOT_REJECTED,
             label_filter: Vec::new(),
             expanded_stacks: Default::default(),
             filter_cmp: Cmp::Gte,

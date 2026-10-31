@@ -382,7 +382,6 @@ pub struct Strings {
 
     // Toolbar.
     pub rating_filter: &'static str,
-    pub all: &'static str,
     pub at_least_n_stars: &'static str,
     pub exactly_n_stars: &'static str,
     pub at_most_n_stars: &'static str,
