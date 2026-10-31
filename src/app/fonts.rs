@@ -1,9 +1,9 @@
 //! The UI font stack. Each platform adds what it can read: macOS leads with
 //! its own UI font, Windows and Linux add a system Chinese font behind egui's
 //! built-ins, and the browser fetches the full Noto Sans SC once a name needs
-//! it. Everywhere but macOS, a small subset of Noto Sans SC covering the UI's
-//! own Chinese text comes last, so the UI never draws boxes when no Chinese
-//! font is installed.
+//! it. Everywhere but macOS, small subsets of Noto Sans SC (Han and kana) and
+//! Noto Sans KR (Hangul) covering the UI's own Chinese, Japanese and Korean
+//! text come last, so the UI never draws boxes when no such font is installed.
 
 use std::sync::Arc;
 
@@ -35,14 +35,21 @@ fn build(full_cjk: Option<Vec<u8>>) -> FontDefinitions {
             index: 0,
         });
     }
-    // Built by `scripts/subset-cjk-font.sh` from the CJK text in `i18n.rs`.
-    // macOS always has Hiragino, so it skips the copy.
+    // Built by `scripts/subset-cjk-font.sh` from the CJK text in `i18n/`.
+    // macOS always has Hiragino and Apple SD Gothic Neo, so it skips the copies.
     #[cfg(not(target_os = "macos"))]
-    trailing.push(Face {
-        name: "noto-sans-sc-ui-subset",
-        bytes: include_bytes!("../../assets/fonts/NotoSansSC-ui-subset.otf").to_vec(),
-        index: 0,
-    });
+    trailing.extend([
+        Face {
+            name: "noto-sans-sc-ui-subset",
+            bytes: include_bytes!("../../assets/fonts/NotoSansSC-ui-subset.otf").to_vec(),
+            index: 0,
+        },
+        Face {
+            name: "noto-sans-kr-ui-subset",
+            bytes: include_bytes!("../../assets/fonts/NotoSansKR-ui-subset.otf").to_vec(),
+            index: 0,
+        },
+    ]);
     let leading = install(&mut definitions, leading);
     let trailing = install(&mut definitions, trailing);
 
@@ -194,8 +201,9 @@ fn draws_chinese(face: &Face) -> bool {
         .is_ok_and(|font| font.charmap().map('中').is_some())
 }
 
-/// Whether `c` is Chinese text or punctuation that Noto Sans SC covers. Same
-/// ranges as `i18n::tests::is_cjk` and `scripts/subset-cjk-font.sh`.
+/// Whether `c` is Chinese text or punctuation that Noto Sans SC covers (Han,
+/// kana, CJK punctuation, full-width forms). Same ranges as
+/// `i18n::tests::is_han_or_kana` and `scripts/subset-cjk-font.sh`.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn is_cjk(c: char) -> bool {
     matches!(c as u32, 0x2E80..=0x9FFF | 0xFF00..=0xFFEF)

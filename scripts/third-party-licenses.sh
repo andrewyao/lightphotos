@@ -46,9 +46,10 @@ generate() {
 Bundled assets that are not crates
 ################################################################################
 
-Noto Sans SC font. The app embeds a subset of it for its interface
-(assets/fonts/NotoSansSC-ui-subset.otf), and the web build serves the full
-font. Licensed under the SIL Open Font License 1.1:
+Noto Sans SC and Noto Sans KR fonts. The app embeds subsets of them for its
+interface (assets/fonts/NotoSansSC-ui-subset.otf and
+assets/fonts/NotoSansKR-ui-subset.otf), and the web build serves the full
+Noto Sans SC. Both are licensed under the SIL Open Font License 1.1:
 
 EOF
   cat assets/fonts/NotoSansSC-OFL.txt

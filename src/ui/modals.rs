@@ -404,11 +404,10 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
             });
             form.row(ui, t.settings_language, |ui| {
                 // Each language is named in itself, so a reader of any of
-                // them can find their own. A list, not a bar, because more
-                // languages are coming.
+                // them can find their own.
                 let lang = crate::i18n::lang();
-                for (choice, name) in [(Lang::En, t.lang_english), (Lang::Zh, t.lang_chinese)] {
-                    if ui.radio(lang == choice, name).clicked() && lang != choice {
+                for choice in Lang::ALL {
+                    if ui.radio(lang == choice, choice.name()).clicked() && lang != choice {
                         out.actions.push(UiAction::SetLanguage(choice));
                     }
                 }

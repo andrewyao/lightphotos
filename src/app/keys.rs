@@ -697,11 +697,12 @@ mod tests {
         let (actions, painted) = click(&mut app, painted.pos_of(t().theme_light));
         assert_eq!(actions, vec![UiAction::SetTheme(Theme::Light)]);
 
-        let (other, name) = match crate::i18n::lang() {
-            Lang::En => (Lang::Zh, t().lang_chinese),
-            Lang::Zh => (Lang::En, t().lang_english),
+        let other = if crate::i18n::lang() == Lang::En {
+            Lang::ZhHans
+        } else {
+            Lang::En
         };
-        let (actions, painted) = click(&mut app, painted.pos_of(name));
+        let (actions, painted) = click(&mut app, painted.pos_of(other.name()));
         assert_eq!(actions, vec![UiAction::SetLanguage(other)]);
 
         assert!(
