@@ -246,32 +246,54 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.show_help() {
         return;
     }
-    // A reference sheet of two columns, wider than a form.
-    let resp = form::dialog(ui.ctx(), "help_overlay", 460.0, |ui| {
+    let sections: Vec<_> = t().help.iter().filter(|s| !s.rows.is_empty()).collect();
+    // Each section's height in rows, counting its heading as two.
+    let heights: Vec<usize> = sections.iter().map(|s| s.rows.len() + 2).collect();
+    let total: usize = heights.iter().sum();
+    // Keep the reading order and cut where the left column is closest to half.
+    let split = (0..=sections.len())
+        .min_by_key(|&n| {
+            let left: usize = heights.iter().take(n).sum();
+            (2 * left).abs_diff(total)
+        })
+        .unwrap_or(0);
+    // Two columns of sections, so the dialog is wider than a form but never
+    // wider than the window.
+    let style = ui.ctx().global_style();
+    let window = ui.ctx().content_rect().width() / font_size::px(&style, 1.0);
+    let width = 1100.0_f32.min(window - 40.0);
+    let resp = form::dialog(ui.ctx(), "help_overlay", width, |ui| {
         form::title(ui, t().shortcuts_title);
         egui::ScrollArea::vertical()
-            .max_height(ui.ctx().content_rect().height() * 0.7)
+            .max_height(ui.ctx().content_rect().height() * 0.8)
             .show(ui, |ui| {
-                let sections = t().help.iter().filter(|s| !s.rows.is_empty());
-                for (i, section) in sections.enumerate() {
-                    if i > 0 {
-                        ui.add_space(10.0);
-                    }
-                    ui.label(egui::RichText::new(section.title).small().weak());
-                    ui.separator();
-                    egui::Grid::new(("help_grid", i))
-                        .num_columns(2)
-                        .min_col_width(150.0)
-                        .spacing([18.0, 6.0])
-                        .striped(true)
-                        .show(ui, |ui| {
-                            for (key, desc) in section.rows {
-                                ui.label(egui::RichText::new(crate::i18n::keys(key)).strong());
-                                ui.label(*desc);
-                                ui.end_row();
+                let (left, right) = sections.split_at(split);
+                ui.columns(2, |columns| {
+                    let halves = [(0, left), (split, right)];
+                    for (ui, (first, half)) in columns.iter_mut().zip(halves) {
+                        for (i, section) in half.iter().enumerate() {
+                            if i > 0 {
+                                ui.add_space(10.0);
                             }
-                        });
-                }
+                            ui.label(egui::RichText::new(section.title).small().weak());
+                            ui.separator();
+                            egui::Grid::new(("help_grid", first + i))
+                                .num_columns(2)
+                                .min_col_width(140.0)
+                                .spacing([14.0, 6.0])
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    for (key, desc) in section.rows {
+                                        ui.label(
+                                            egui::RichText::new(crate::i18n::keys(key)).strong(),
+                                        );
+                                        ui.add(egui::Label::new(*desc).wrap());
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+                    }
+                });
             });
         if form::footer(ui, &[Button::new(t().close, Role::Primary)]).is_some() {
             out.actions.push(UiAction::ToggleHelp);
