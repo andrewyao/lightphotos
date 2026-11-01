@@ -24,10 +24,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14        # Apple Silicon
+          - os: macos-15        # Apple Silicon
             target: aarch64-apple-darwin
             name: lightphotos-macos-arm64
-          - os: macos-14        # cross-builds Intel; GitHub's Intel runners are being retired
+          - os: macos-15        # cross-builds Intel; GitHub's Intel runners are being retired
             target: x86_64-apple-darwin
             name: lightphotos-macos-x86_64
           - os: ubuntu-latest

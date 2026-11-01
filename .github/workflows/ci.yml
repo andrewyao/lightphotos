@@ -35,7 +35,7 @@ jobs:
   # assertion, and treat the drift as a finding about the model.
   test:
     name: test and lint (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
