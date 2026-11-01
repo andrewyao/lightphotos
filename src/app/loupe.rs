@@ -39,11 +39,32 @@ impl App {
         }
     }
 
-    /// Screen pixels per source pixel at which the whole image fits the loupe
-    /// area. `zoom_rel` is relative to this, so swapping the preview for the
-    /// full decode doesn't make the image jump.
+    /// What Fit shows, as (left, top, right, bottom) in display UV: the
+    /// photo's crop, or the whole frame while the crop is being edited.
+    fn current_fit_frame(&self) -> [f32; 4] {
+        if self.cropping() {
+            return WHOLE_FRAME;
+        }
+        self.shown
+            .path()
+            .and_then(|p| self.edits.get(p))
+            .and_then(|adj| adj.crop)
+            .and_then(Crop::sanitized)
+            .map_or(WHOLE_FRAME, |c| {
+                super::fullscreen::shown_crop(c, self.rot_matrix())
+            })
+    }
+
+    /// The size, in source pixels, of what Fit shows.
+    fn fit_size(&self) -> (f32, f32) {
+        frame_size(self.display_size(), self.current_fit_frame())
+    }
+
+    /// Screen pixels per source pixel at which the crop, or the whole image
+    /// if it has none, fits the loupe area. `zoom_rel` is relative to this, so
+    /// swapping the preview for the full decode doesn't make the image jump.
     pub(super) fn fit_scale(&self) -> f32 {
-        fit_scale_of(self.display_size(), self.loupe_area())
+        fit_scale_of(self.fit_size(), self.loupe_area())
     }
 
     /// The current zoom in screen pixels per source pixel.
@@ -51,10 +72,12 @@ impl App {
         self.zoom_rel * self.fit_scale()
     }
 
-    /// Scale the image up or down so it just fits the loupe area, centered.
+    /// Scale the image up or down so its crop just fits the loupe area,
+    /// centered.
     pub(super) fn fit_to_window(&mut self) {
         self.zoom_rel = 1.0;
         self.fitted = true;
+        self.fit_frame = self.current_fit_frame();
         self.center();
         self.push_transform();
     }
@@ -65,7 +88,37 @@ impl App {
         const MARGIN: f32 = 0.9;
         self.zoom_rel = MARGIN;
         self.fitted = true;
+        self.fit_frame = self.current_fit_frame();
         self.center();
+        self.push_transform();
+    }
+
+    /// Keep the view right after the photo's crop changed under it. A fitted
+    /// view re-fits; a zoomed one keeps its zoom in screen pixels per source
+    /// pixel.
+    pub(super) fn follow_fit_frame(&mut self) {
+        let frame = self.current_fit_frame();
+        if frame == self.fit_frame {
+            return;
+        }
+        if self.fitted {
+            if self.cropping() {
+                self.fit_for_crop();
+            } else {
+                self.fit_to_window();
+            }
+            return;
+        }
+        let old_fs = fit_scale_of(
+            frame_size(self.display_size(), self.fit_frame),
+            self.loupe_area(),
+        );
+        let keep = self.zoom_rel * old_fs;
+        self.fit_frame = frame;
+        let fs = self.fit_scale();
+        if fs > 0.0 {
+            self.zoom_rel = keep / fs;
+        }
         self.push_transform();
     }
 
@@ -203,6 +256,7 @@ impl App {
                 self.fit_to_window();
             }
         } else {
+            self.fit_frame = self.current_fit_frame();
             let fs = self.fit_scale();
             if fs > 0.0 {
                 self.zoom_rel = old_zoom / fs;
@@ -212,17 +266,27 @@ impl App {
         }
     }
 
+    /// Pan so what Fit shows sits in the middle of the loupe area.
     fn center(&mut self) {
-        let (iw, ih) = self.display_size();
         let (ww, wh) = self.loupe_area();
         let z = self.zoom();
-        self.pan = ((ww - iw * z) / 2.0, (wh - ih * z) / 2.0);
+        self.pan = (self.centered_pan(0, ww, z), self.centered_pan(1, wh, z));
+    }
+
+    /// The pan on one axis (0 for x, 1 for y) that centers what Fit shows in
+    /// `extent` screen pixels at zoom `z`.
+    fn centered_pan(&self, axis: usize, extent: f32, z: f32) -> f32 {
+        let (w, h) = self.display_size();
+        let size = [w, h][axis];
+        let frame = self.current_fit_frame();
+        let (lo, hi) = (frame[axis], frame[axis + 2]);
+        (extent - (lo + hi) * size * z) / 2.0
     }
 
     /// Whether the image is larger than the loupe area on either axis, so a
     /// plain drag has something to pan.
     pub(crate) fn image_overflows(&self) -> bool {
-        let (iw, ih) = self.display_size();
+        let (iw, ih) = self.fit_size();
         let (ww, wh) = self.loupe_area();
         let z = self.zoom();
         iw * z > ww + 0.5 || ih * z > wh + 0.5
@@ -244,13 +308,13 @@ impl App {
         }
 
         // Center any axis that fits entirely in the viewport.
-        let (iw, ih) = self.display_size();
+        let (iw, ih) = self.fit_size();
         let (ww, wh) = self.loupe_area();
         if iw * new_zoom <= ww {
-            self.pan.0 = (ww - iw * new_zoom) / 2.0;
+            self.pan.0 = self.centered_pan(0, ww, new_zoom);
         }
         if ih * new_zoom <= wh {
-            self.pan.1 = (wh - ih * new_zoom) / 2.0;
+            self.pan.1 = self.centered_pan(1, wh, new_zoom);
         }
 
         // Zooming all the way out lands on the fit, which a resize keeps.
@@ -726,6 +790,11 @@ fn loupe_xform(
     (scale, offset, rot)
 }
 
+/// The size of `frame` (left, top, right, bottom in UV) of an image `size`.
+fn frame_size((w, h): (f32, f32), [l, t, r, b]: [f32; 4]) -> (f32, f32) {
+    ((r - l) * w, (b - t) * h)
+}
+
 fn fit_scale_of(image_size: (f32, f32), area: (f32, f32)) -> f32 {
     let (iw, ih) = image_size;
     let (ww, wh) = area;
@@ -1144,6 +1213,140 @@ mod tests {
     fn zooming_out_stops_at_the_fit() {
         assert_eq!(bounded_zoom(0.5, 0.1, 0.3, 64.0), 0.3);
         assert_eq!(bounded_zoom(0.3, 0.5, 0.3, 64.0), 0.3);
+    }
+
+    /// Where the crop's corners land on a loupe area of `win` pixels, as
+    /// (left, top, right, bottom).
+    fn crop_on_screen(app: &App, win: (f32, f32), crop: Crop) -> [f32; 4] {
+        let central = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(win.0, win.1));
+        let a = app.loupe_tex_to_screen(central, crop.left, crop.top);
+        let b = app.loupe_tex_to_screen(central, crop.right, crop.bottom);
+        [a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y)]
+    }
+
+    const QUARTER: Crop = Crop {
+        left: 0.5,
+        top: 0.0,
+        right: 1.0,
+        bottom: 0.5,
+    };
+
+    /// Unlike `QUARTER`, a shape a quarter turn changes the size of.
+    const STRIP: Crop = Crop {
+        left: 0.0,
+        top: 0.0,
+        right: 0.25,
+        bottom: 1.0,
+    };
+
+    #[test]
+    fn fit_shows_the_crop_not_the_whole_photo() {
+        let win = (1200.0, 800.0);
+        let (mut app, paths) = fitted_app("fit_crop", win);
+        assert!((app.zoom() - 0.2).abs() < 1e-6);
+        let adj = Adjustments {
+            crop: Some(QUARTER),
+            ..Adjustments::default()
+        };
+        app.edits.insert(paths[1].clone(), adj);
+        app.fit_to_window();
+        // 3000x2000 of the 6000x4000 photo fills 1200x800.
+        assert!((app.zoom() - 0.4).abs() < 1e-6, "zoom {}", app.zoom());
+        let [l, t, r, b] = crop_on_screen(&app, win, QUARTER);
+        for (got, want) in [(l, 0.0), (t, 0.0), (r, 1200.0), (b, 800.0)] {
+            assert!((got - want).abs() < 0.5, "{got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn fit_shows_a_crop_of_a_turned_photo() {
+        let win = (1200.0, 800.0);
+        let (mut app, paths) = fitted_app("fit_crop_turned", win);
+        app.rotations.insert(paths[1].clone(), 1);
+        let adj = Adjustments {
+            crop: Some(QUARTER),
+            ..Adjustments::default()
+        };
+        app.edits.insert(paths[1].clone(), adj);
+        app.fit_to_window();
+        let [l, t, r, b] = crop_on_screen(&app, win, QUARTER);
+        // Turned, the crop is 2000x3000 and the window's height limits it.
+        assert!((app.zoom() - 800.0 / 3000.0).abs() < 1e-6);
+        assert!((t - 0.0).abs() < 0.5 && (b - 800.0).abs() < 0.5, "{t} {b}");
+        assert!(((l + r) / 2.0 - 600.0).abs() < 0.5, "{l} {r}");
+    }
+
+    #[test]
+    fn changing_the_crop_under_a_fitted_view_refits_it() {
+        let win = (1200.0, 800.0);
+        let (mut app, _) = fitted_app("fit_crop_follow", win);
+        let adj = Adjustments {
+            crop: Some(QUARTER),
+            ..Adjustments::default()
+        };
+        app.apply_adjustments(adj);
+        assert!(app.fitted);
+        assert!((app.zoom() - 0.4).abs() < 1e-6, "zoom {}", app.zoom());
+        app.apply_adjustments(Adjustments::default());
+        assert!((app.zoom() - 0.2).abs() < 1e-6, "zoom {}", app.zoom());
+    }
+
+    #[test]
+    fn turning_a_zoomed_view_keeps_its_zoom_through_the_next_edit() {
+        let (mut app, paths) = fitted_app("fit_crop_turn_zoomed", (1200.0, 800.0));
+        app.edits.insert(
+            paths[1].clone(),
+            Adjustments {
+                crop: Some(STRIP),
+                ..Adjustments::default()
+            },
+        );
+        app.fit_to_window();
+        app.set_zoom(0.8);
+        app.rotate(true);
+        let before = app.zoom();
+        let edit = Adjustments {
+            exposure: 0.5,
+            crop: Some(STRIP),
+            ..Adjustments::default()
+        };
+        app.apply_adjustments(edit);
+        assert!(
+            (app.zoom() - before).abs() < 1e-6,
+            "{} vs {before}",
+            app.zoom()
+        );
+    }
+
+    #[test]
+    fn changing_the_crop_under_a_zoomed_view_keeps_its_zoom() {
+        let (mut app, _) = fitted_app("fit_crop_zoomed", (1200.0, 800.0));
+        app.set_zoom(0.5);
+        let before = app.zoom();
+        assert!(!app.fitted);
+        let adj = Adjustments {
+            crop: Some(QUARTER),
+            ..Adjustments::default()
+        };
+        app.apply_adjustments(adj);
+        assert!((app.zoom() - before).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_hostile_crop_falls_back_to_the_whole_photo() {
+        let (mut app, paths) = fitted_app("fit_crop_nan", (1200.0, 800.0));
+        let adj = Adjustments {
+            crop: Some(Crop {
+                left: f32::NAN,
+                top: 0.0,
+                right: 1.0,
+                bottom: 1.0,
+            }),
+            ..Adjustments::default()
+        };
+        app.edits.insert(paths[1].clone(), adj);
+        app.fit_to_window();
+        assert!((app.zoom() - 0.2).abs() < 1e-6);
     }
 
     /// The control and the backend must appear on the same platforms, so this

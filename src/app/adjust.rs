@@ -533,6 +533,7 @@ impl App {
             r.set_touchups(&gpu_touchups);
             r.set_masks(&masks);
         }
+        self.follow_fit_frame();
         self.request_redraw();
     }
 

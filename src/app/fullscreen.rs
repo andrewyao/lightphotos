@@ -228,7 +228,7 @@ fn ease_in_out(t: f32) -> f32 {
 
 /// `crop`, which is in texture UV, as the photo shows after `rot`, the
 /// display-to-texture rotation `loupe_transform` uses.
-fn shown_crop(crop: Crop, rot: [f32; 4]) -> [f32; 4] {
+pub(super) fn shown_crop(crop: Crop, rot: [f32; 4]) -> [f32; 4] {
     shown_rect([crop.left, crop.top, crop.right, crop.bottom], rot)
 }
 

@@ -101,6 +101,9 @@ enum CropGrab {
     },
 }
 
+/// The whole photo as a `fit_frame`.
+const WHOLE_FRAME: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
 /// Crop-mode state, present only while crop mode is active. `rect` is in
 /// normalized texture space and saves to `Adjustments.crop` as each edit
 /// lands.
@@ -660,6 +663,9 @@ pub(crate) struct App {
     pub(crate) panel_monitor: Option<winit::monitor::MonitorHandle>,
     /// True while the view is auto-fit, so a resize re-fits.
     pub(crate) fitted: bool,
+    /// The part of the photo (left, top, right, bottom, in display UV) that
+    /// `zoom_rel` was last measured against: the crop, or the whole frame.
+    fit_frame: [f32; 4],
     /// Per-image rotation, in 90° clockwise steps (0..=3).
     rotations: HashMap<PathBuf, u8>,
     /// The viewport rect (physical px) the loupe drew into last frame.
@@ -1028,6 +1034,7 @@ impl App {
             panel_scale: 1.0,
             panel_monitor: None,
             fitted: false,
+            fit_frame: WHOLE_FRAME,
             rotations: HashMap::new(),
             loupe_viewport: None,
             group_compare: group_compare::GroupCompare::new(),
