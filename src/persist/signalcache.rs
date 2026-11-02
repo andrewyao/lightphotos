@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -153,7 +154,9 @@ struct CacheFile {
 /// writer thread is for.
 pub struct SignalCache {
     dir: Option<PathBuf>,
-    entries: HashMap<OsString, PhotoSignals>,
+    /// Shared with the writer thread while it serializes a snapshot; a
+    /// change meanwhile copies the map once ([`Arc::make_mut`]).
+    entries: Arc<HashMap<OsString, PhotoSignals>>,
     dirty: bool,
     #[cfg(not(target_arch = "wasm32"))]
     writer: Option<writer::Writer>,
@@ -170,7 +173,7 @@ impl SignalCache {
     pub fn empty() -> SignalCache {
         SignalCache {
             dir: None,
-            entries: HashMap::new(),
+            entries: Arc::default(),
             dirty: false,
             #[cfg(not(target_arch = "wasm32"))]
             writer: None,
@@ -201,7 +204,7 @@ impl SignalCache {
         #[cfg(not(target_arch = "wasm32"))]
         {
             cache.writer = Some(writer::Writer::new());
-            cache.entries = read_file(dir);
+            cache.entries = Arc::new(read_file(dir));
         }
         cache
     }
@@ -225,8 +228,10 @@ impl SignalCache {
     /// and an entry for different bytes replaces the old one outright.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn absorb(&mut self, newer: SignalCache) {
-        for (name, n) in &newer.entries {
-            let entry = self.entries.entry(name.clone()).or_default();
+        for (name, n) in newer.entries.iter() {
+            let entry = Arc::make_mut(&mut self.entries)
+                .entry(name.clone())
+                .or_default();
             if entry.key != n.key {
                 *entry = *n;
             } else {
@@ -258,7 +263,9 @@ impl SignalCache {
         let (Some(name), Some(key)) = (path.file_name(), current_key(path)) else {
             return;
         };
-        let entry = self.entries.entry(name.to_os_string()).or_default();
+        let entry = Arc::make_mut(&mut self.entries)
+            .entry(name.to_os_string())
+            .or_default();
         if entry.key != key {
             *entry = PhotoSignals {
                 key,
@@ -287,56 +294,25 @@ impl SignalCache {
         let Some(name) = path.file_name() else {
             return;
         };
-        if self.entries.remove(name).is_some() {
+        if self.entries.contains_key(name) {
+            Arc::make_mut(&mut self.entries).remove(name);
             self.dirty = true;
         }
     }
 
-    /// Drop entries whose photo is gone, so the file does not grow forever.
-    /// Called before a write, where the directory listing is already warm.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn sweep_orphans(&mut self) {
-        let Some(dir) = &self.dir else {
-            return;
-        };
-        let Ok(listing) = std::fs::read_dir(dir) else {
-            return;
-        };
-        let live: std::collections::HashSet<OsString> =
-            listing.flatten().map(|e| e.file_name()).collect();
-        let before = self.entries.len();
-        self.entries
-            .retain(|name, s| live.contains(name) && !s.is_empty());
-        if self.entries.len() != before {
-            self.dirty = true;
-        }
-    }
-
+    /// Hand the writer thread the entries to save. It drops those whose
+    /// photo is gone and does the serializing, so the frame pays for neither
+    /// a folder listing nor the JSON.
     #[cfg(not(target_arch = "wasm32"))]
     #[hotpath::measure]
     fn queue_write(&mut self) {
-        if self.writer.is_none() || self.read_only {
+        if self.read_only {
             return;
         }
-        self.sweep_orphans();
         let (Some(dir), Some(writer)) = (&self.dir, &self.writer) else {
             return;
         };
-        // A photo name is stored as a `String`, so a non-UTF-8 filename simply
-        // never caches. Recomputing is always correct, and the alternative is
-        // an encoding in the file format that only a few filenames would use.
-        let named: HashMap<String, PhotoSignals> = self
-            .entries
-            .iter()
-            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), *v)))
-            .collect();
-        let Ok(bytes) = serde_json::to_vec(&CacheFile { entries: named }) else {
-            return;
-        };
-        writer.submit(
-            dir.join(crate::sidecar::SIDECAR_DIR).join(CACHE_FILE),
-            bytes,
-        );
+        writer.submit(dir.clone(), Arc::clone(&self.entries));
         self.dirty = false;
         self.last_write = std::time::Instant::now();
     }
@@ -382,21 +358,27 @@ fn read_file(dir: &Path) -> HashMap<OsString, PhotoSignals> {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod writer {
-    use std::path::PathBuf;
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
     use std::sync::mpsc::{channel, Sender};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
-    /// Serializing is cheap and the whole map is small, so each job carries a
-    /// full snapshot and a later one simply supersedes an earlier one.
+    use super::{CacheFile, PhotoSignals, CACHE_FILE};
+
+    type Entries = Arc<HashMap<OsString, PhotoSignals>>;
+
+    /// Each job carries a full snapshot of one folder's entries and a later
+    /// one simply supersedes an earlier one.
     pub(super) struct Writer {
-        tx: Option<Sender<(PathBuf, Vec<u8>)>>,
+        tx: Option<Sender<(PathBuf, Entries)>>,
         outstanding: Arc<(Mutex<usize>, Condvar)>,
     }
 
     impl Writer {
         pub(super) fn new() -> Writer {
-            let (tx, rx) = channel::<(PathBuf, Vec<u8>)>();
+            let (tx, rx) = channel::<(PathBuf, Entries)>();
             let outstanding = Arc::new((Mutex::new(0usize), Condvar::new()));
             let theirs = Arc::clone(&outstanding);
             // A target that cannot spawn simply never persists, the same
@@ -404,8 +386,8 @@ mod writer {
             let spawned = std::thread::Builder::new()
                 .name("signalcache-writer".to_string())
                 .spawn(move || {
-                    while let Ok((path, bytes)) = rx.recv() {
-                        write_atomically(&path, &bytes);
+                    while let Ok((dir, entries)) = rx.recv() {
+                        write_snapshot(&dir, &entries);
                         let (lock, cv) = &*theirs;
                         if let Ok(mut n) = lock.lock() {
                             *n = n.saturating_sub(1);
@@ -419,7 +401,7 @@ mod writer {
             }
         }
 
-        pub(super) fn submit(&self, path: PathBuf, bytes: Vec<u8>) {
+        pub(super) fn submit(&self, dir: PathBuf, entries: Entries) {
             let Some(tx) = &self.tx else {
                 return;
             };
@@ -427,7 +409,7 @@ mod writer {
             if let Ok(mut n) = lock.lock() {
                 *n += 1;
             }
-            let _ = tx.send((path, bytes));
+            let _ = tx.send((dir, entries));
         }
 
         pub(super) fn wait_idle(&self, timeout: Duration) {
@@ -445,6 +427,29 @@ mod writer {
             // does not wait on a parked writer at quit.
             self.tx = None;
         }
+    }
+
+    /// Save `entries` as `dir`'s cache file, leaving out those whose photo
+    /// is gone so the file does not grow forever, and those with no signal.
+    fn write_snapshot(dir: &Path, entries: &HashMap<OsString, PhotoSignals>) {
+        let live: Option<std::collections::HashSet<OsString>> = std::fs::read_dir(dir)
+            .ok()
+            .map(|listing| listing.flatten().map(|e| e.file_name()).collect());
+        // A photo name is stored as a `String`, so a non-UTF-8 filename simply
+        // never caches. Recomputing is always correct, and the alternative is
+        // an encoding in the file format that only a few filenames would use.
+        let named: HashMap<String, PhotoSignals> = entries
+            .iter()
+            .filter(|(name, s)| !s.is_empty() && live.as_ref().is_none_or(|l| l.contains(*name)))
+            .filter_map(|(name, s)| Some((name.to_str()?.to_string(), *s)))
+            .collect();
+        let Ok(bytes) = serde_json::to_vec(&CacheFile { entries: named }) else {
+            return;
+        };
+        write_atomically(
+            &dir.join(crate::sidecar::SIDECAR_DIR).join(CACHE_FILE),
+            &bytes,
+        );
     }
 
     /// Temp file then rename, so a crash mid-write leaves the previous cache
@@ -644,6 +649,44 @@ mod tests {
             !reopened.entries.contains_key(gone.file_name().unwrap()),
             "the deleted photo's entry is swept"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The periodic save runs from the frame loop. It must hand a big
+    /// folder's entries to the writer, not list the folder and serialize them
+    /// there, and the file it writes still holds only the live photos.
+    #[test]
+    fn the_periodic_save_leaves_the_listing_and_serializing_to_the_writer() {
+        let dir = unique_dir("frame-cost");
+        let photo = write_photo(&dir, "a.jpg", b"pixels");
+
+        let mut cache = SignalCache::load(&dir);
+        let others = (0..300_000).map(|i| {
+            let signals = PhotoSignals {
+                key: 1,
+                capture: Some(CaptureTime::Unreadable),
+                ..PhotoSignals::default()
+            };
+            (OsString::from(format!("photo{i:06}.jpg")), signals)
+        });
+        cache.entries = Arc::new(others.collect());
+        cache.record(&photo, faces(1));
+        cache.last_write = std::time::Instant::now() - Duration::from_secs(60);
+
+        let started = std::time::Instant::now();
+        cache.flush_if_due();
+        let on_the_frame = started.elapsed();
+        assert!(!cache.dirty, "the save was queued");
+        assert!(
+            on_the_frame < Duration::from_millis(50),
+            "queueing the save took {on_the_frame:?} on the frame"
+        );
+
+        cache.flush_blocking(Duration::from_secs(60));
+        let reopened = SignalCache::load(&dir);
+        assert_eq!(reopened.entries.len(), 1, "only the live photo is saved");
+        assert!(reopened.get(&photo).is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
