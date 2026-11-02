@@ -6,11 +6,7 @@ use super::*;
 
 pub static FR: Strings = Strings {
     settings: "Réglages",
-    settings_tip: if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
-        "Thème, langue, courbe de tons RAW et Ajustement auto (Cmd+,)"
-    } else if SHOW_AUTOTONE_CENTERING {
-        "Thème, langue et Ajustement auto (Cmd+,)"
-    } else if RAW_SETTING {
+    settings_tip: if RAW_SETTING {
         "Thème, langue et courbe de tons RAW (Cmd+,)"
     } else {
         "Thème et langue (Cmd+,)"
@@ -18,14 +14,9 @@ pub static FR: Strings = Strings {
     settings_title: "Réglages",
     settings_theme: "Thème",
     settings_language: "Langue",
-    settings_auto_tone: "Ajustement auto",
     settings_raw: "Fichiers RAW",
     apple_tone_curve: "Courbe de tons Apple",
     apple_tone_curve_hint: "Activée, les fichiers RAW ont le même rendu que dans Photos et Preview. Désactivée, LightPhotos applique sa propre courbe, comme dans le navigateur.",
-    autotone_center_range: "Centrer la plage",
-    autotone_center_range_tip: "Place le milieu de la plage de l'histogramme à 50 %. La forme de la photo reste en place.",
-    autotone_center_median: "Centrer le pixel médian",
-    autotone_center_median_tip: "Place à 50 % le pixel plus clair que la moitié de la photo. Une photo surtout sombre devient plus claire.",
     form_general: "Général",
     theme_dark: "Sombre",
     theme_medium: "Moyen",
@@ -303,11 +294,7 @@ pub static FR: Strings = Strings {
                 ("?", "Afficher ou masquer cette aide"),
                 (
                     "Cmd+,",
-                    if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
-                        "Réglages : thème, langue, courbe de tons RAW et Ajustement auto"
-                    } else if SHOW_AUTOTONE_CENTERING {
-                        "Réglages : thème, langue et Ajustement auto"
-                    } else if RAW_SETTING {
+                    if RAW_SETTING {
                         "Réglages : thème, langue et courbe de tons RAW"
                     } else {
                         "Réglages : thème et langue"

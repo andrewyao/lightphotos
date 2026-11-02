@@ -6,11 +6,7 @@ use super::*;
 
 pub static JA: Strings = Strings {
     settings: "設定",
-    settings_tip: if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
-        "テーマ、言語、RAWトーンカーブ、自動補正 (Cmd+,)"
-    } else if SHOW_AUTOTONE_CENTERING {
-        "テーマ、言語、自動補正 (Cmd+,)"
-    } else if RAW_SETTING {
+    settings_tip: if RAW_SETTING {
         "テーマ、言語、RAWトーンカーブ (Cmd+,)"
     } else {
         "テーマと言語 (Cmd+,)"
@@ -18,14 +14,9 @@ pub static JA: Strings = Strings {
     settings_title: "設定",
     settings_theme: "テーマ",
     settings_language: "言語",
-    settings_auto_tone: "自動補正",
     settings_raw: "RAWファイル",
     apple_tone_curve: "Appleトーンカーブ",
     apple_tone_curve_hint: "オンにすると、RAWファイルが「写真」や「プレビュー」と同じ見た目になります。オフにすると、ブラウザ版と同様に、LightPhotos独自のカーブが適用されます。",
-    autotone_center_range: "範囲の中央に配置",
-    autotone_center_range_tip: "ヒストグラムの範囲の中央を 50% に置きます。写真の形はそのまま保たれます。",
-    autotone_center_median: "中央のピクセルを中央に配置",
-    autotone_center_median_tip: "写真の半分がそれより暗くなるピクセルを 50% に置きます。ほとんどがシャドウの写真は明るくなります。",
     form_general: "一般",
     theme_dark: "ダーク",
     theme_medium: "ミディアム",
@@ -291,11 +282,7 @@ pub static JA: Strings = Strings {
                 ("?", "このヘルプを表示または非表示"),
                 (
                     "Cmd+,",
-                    if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
-                        "設定：テーマ、言語、RAWトーンカーブ、自動補正"
-                    } else if SHOW_AUTOTONE_CENTERING {
-                        "設定：テーマ、言語、自動補正"
-                    } else if RAW_SETTING {
+                    if RAW_SETTING {
                         "設定：テーマ、言語、RAWトーンカーブ"
                     } else {
                         "設定：テーマと言語"

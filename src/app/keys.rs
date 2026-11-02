@@ -705,12 +705,6 @@ mod tests {
         let (actions, painted) = click(&mut app, painted.pos_of(other.name()));
         assert_eq!(actions, vec![UiAction::SetLanguage(other)]);
 
-        assert!(
-            !painted.has(t().settings_auto_tone),
-            "Auto Tone's centering stays hidden: {:?}",
-            painted.texts()
-        );
-
         let (actions, _) = click(&mut app, painted.pos_of(t().close));
         assert_eq!(actions, vec![UiAction::CloseSettings]);
     }

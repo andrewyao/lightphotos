@@ -6,11 +6,7 @@ use super::*;
 
 pub static ZH_HANT: Strings = Strings {
     settings: "設定",
-    settings_tip: if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
-        "主題、語言、RAW 色調曲線和自動調整 (Cmd+,)"
-    } else if SHOW_AUTOTONE_CENTERING {
-        "主題、語言和自動調整 (Cmd+,)"
-    } else if RAW_SETTING {
+    settings_tip: if RAW_SETTING {
         "主題、語言和 RAW 色調曲線 (Cmd+,)"
     } else {
         "主題和語言 (Cmd+,)"
@@ -18,14 +14,9 @@ pub static ZH_HANT: Strings = Strings {
     settings_title: "設定",
     settings_theme: "主題",
     settings_language: "語言",
-    settings_auto_tone: "自動調整",
     settings_raw: "RAW 檔案",
     apple_tone_curve: "Apple 色調曲線",
     apple_tone_curve_hint: "開啟時，RAW 檔案與「Photos」和「Preview」中的樣子一樣。關閉時，LightPhotos 使用自己的曲線，與瀏覽器版一樣。",
-    autotone_center_range: "置中整個範圍",
-    autotone_center_range_tip: "把直方圖範圍的中點放在 50%。照片的形狀維持不變。",
-    autotone_center_median: "置中中間像素",
-    autotone_center_median_tip: "把有一半照片比它暗的那個像素放在 50%。以陰影為主的照片會變得更亮。",
     form_general: "一般",
     theme_dark: "深色",
     theme_medium: "中灰",
@@ -287,11 +278,7 @@ pub static ZH_HANT: Strings = Strings {
                 ("?", "顯示或隱藏此說明"),
                 (
                     "Cmd+,",
-                    if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
-                        "設定：主題、語言、RAW 色調曲線和自動調整"
-                    } else if SHOW_AUTOTONE_CENTERING {
-                        "設定：主題、語言和自動調整"
-                    } else if RAW_SETTING {
+                    if RAW_SETTING {
                         "設定：主題、語言和 RAW 色調曲線"
                     } else {
                         "設定：主題和語言"

@@ -2,7 +2,6 @@ use super::*;
 
 use super::form::{self, Button, Form, Role};
 use crate::app::App;
-use crate::autotone::Centering;
 
 /// Confirms a pending bulk action, titled and buttoned with the action itself.
 /// Cancel, Esc, or a backdrop click dismisses it.
@@ -407,9 +406,6 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         if raw_setting {
             labels.push(t.settings_raw);
         }
-        if crate::app::SHOW_AUTOTONE_CENTERING {
-            labels.push(t.settings_auto_tone);
-        }
         let form = Form::new(ui, &labels);
         form.section(ui, t.form_general, |ui| {
             form.button_row(ui, t.settings_theme, |ui| {
@@ -435,40 +431,16 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
                 }
             });
         });
-        if raw_setting || crate::app::SHOW_AUTOTONE_CENTERING {
-            form.section(ui, t.develop, |ui| {
-                #[cfg(target_os = "macos")]
-                form.row(ui, t.settings_raw, |ui| {
-                    let mut on = app.apple_tone_curve();
-                    if ui.checkbox(&mut on, t.apple_tone_curve).changed() {
-                        out.actions.push(UiAction::SetAppleToneCurve(on));
-                    }
-                    form::hint(ui, t.apple_tone_curve_hint);
-                });
-                if !crate::app::SHOW_AUTOTONE_CENTERING {
-                    return;
+        #[cfg(target_os = "macos")]
+        form.section(ui, t.develop, |ui| {
+            form.row(ui, t.settings_raw, |ui| {
+                let mut on = app.apple_tone_curve();
+                if ui.checkbox(&mut on, t.apple_tone_curve).changed() {
+                    out.actions.push(UiAction::SetAppleToneCurve(on));
                 }
-                form.button_row(ui, t.settings_auto_tone, |ui| {
-                    let centerings = [
-                        (
-                            Centering::Range,
-                            t.autotone_center_range,
-                            Some(t.autotone_center_range_tip),
-                        ),
-                        (
-                            Centering::Median,
-                            t.autotone_center_median,
-                            Some(t.autotone_center_median_tip),
-                        ),
-                    ];
-                    let current = app.autotone_centering();
-                    let picked = form::segmented(ui, &centerings, current);
-                    if let Some(choice) = picked.filter(|&c| c != current) {
-                        out.actions.push(UiAction::SetAutoToneCentering(choice));
-                    }
-                });
+                form::hint(ui, t.apple_tone_curve_hint);
             });
-        }
+        });
         if form::footer(ui, &[Button::new(t.close, Role::Primary)]).is_some() {
             out.actions.push(UiAction::CloseSettings);
         }

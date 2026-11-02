@@ -6,11 +6,7 @@ use super::*;
 
 pub static DE: Strings = Strings {
     settings: "Einstellungen",
-    settings_tip: if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
-        "Design, Sprache, RAW-Tonwertkurve und Auto-Anpassung (Cmd+,)"
-    } else if SHOW_AUTOTONE_CENTERING {
-        "Design, Sprache und Auto-Anpassung (Cmd+,)"
-    } else if RAW_SETTING {
+    settings_tip: if RAW_SETTING {
         "Design, Sprache und RAW-Tonwertkurve (Cmd+,)"
     } else {
         "Design und Sprache (Cmd+,)"
@@ -18,14 +14,9 @@ pub static DE: Strings = Strings {
     settings_title: "Einstellungen",
     settings_theme: "Design",
     settings_language: "Sprache",
-    settings_auto_tone: "Auto-Anpassung",
     settings_raw: "RAW-Dateien",
     apple_tone_curve: "Apple-Tonwertkurve",
     apple_tone_curve_hint: "Eingeschaltet sehen RAW-Dateien so aus wie in Fotos und Preview. Ausgeschaltet verwendet LightPhotos eine eigene Kurve, wie im Browser.",
-    autotone_center_range: "Bereich zentrieren",
-    autotone_center_range_tip: "Die Mitte des Histogrammbereichs auf 50% legen. Die Form des Fotos bleibt erhalten.",
-    autotone_center_median: "Mittleres Pixel zentrieren",
-    autotone_center_median_tip: "Das Pixel, das heller ist als die dunklere Hälfte des Fotos, auf 50% legen. Ein überwiegend dunkles Foto wird heller.",
     form_general: "Allgemein",
     theme_dark: "Dunkel",
     theme_medium: "Mittel",
@@ -292,11 +283,7 @@ pub static DE: Strings = Strings {
                 ("?", "Diese Hilfe zeigen oder ausblenden"),
                 (
                     "Cmd+,",
-                    if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
-                        "Einstellungen: Design, Sprache, RAW-Tonwertkurve und Auto-Anpassung"
-                    } else if SHOW_AUTOTONE_CENTERING {
-                        "Einstellungen: Design, Sprache und Auto-Anpassung"
-                    } else if RAW_SETTING {
+                    if RAW_SETTING {
                         "Einstellungen: Design, Sprache und RAW-Tonwertkurve"
                     } else {
                         "Einstellungen: Design und Sprache"

@@ -37,10 +37,6 @@ pub(crate) const GRID_CELL_PT: f32 = 192.0;
 /// photo set has checked `CLOSED_EYE_RATIO`.
 pub(crate) const SHOW_EYES_FILTER: bool = false;
 
-/// Whether Settings shows Auto Tone's centering choice. Hidden for now, and
-/// a choice saved while it showed is ignored, since nothing could undo it.
-pub(crate) const SHOW_AUTOTONE_CENTERING: bool = false;
-
 /// `prefs` key for the macOS RAW tone curve setting, "on" or "off".
 #[cfg(target_os = "macos")]
 const APPLE_TONE_CURVE_PREF: &str = "apple_tone_curve";
@@ -633,7 +629,7 @@ pub(crate) struct App {
     /// Group Bursts' photos while their capture times are read.
     burst_scan: Option<Vec<PathBuf>>,
 
-    /// The running Auto Tone batch and the centering it analyses with.
+    /// The running Auto Tone batch.
     autotone: autotone::AutoTone,
 
     /// Face analysis of grouped photos, and the eyes-closed filter it feeds.
@@ -1014,11 +1010,7 @@ impl App {
             working_thumbs: None,
             sort_meta: HashMap::new(),
             burst_scan: None,
-            // A test must never read the developer's own settings.
-            #[cfg(test)]
-            autotone: autotone::AutoTone::new(Default::default()),
-            #[cfg(not(test))]
-            autotone: autotone::AutoTone::new(crate::autotone::Centering::load()),
+            autotone: autotone::AutoTone::new(),
             faces: faces::Faces::new(),
             selection_on: false,
             selection_invert: false,
@@ -1769,11 +1761,6 @@ impl App {
                 }
                 ui::UiAction::SetTheme(theme) => {
                     ui::theme::set(&self.egui_ctx, theme);
-                    self.request_redraw();
-                }
-                ui::UiAction::SetAutoToneCentering(centering) => {
-                    self.autotone.set_centering(centering);
-                    centering.save();
                     self.request_redraw();
                 }
                 #[cfg(target_os = "macos")]

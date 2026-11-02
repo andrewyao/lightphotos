@@ -6,8 +6,6 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use crate::app::SHOW_AUTOTONE_CENTERING;
-
 /// Whether Settings has the RAW tone curve choice, which only macOS's
 /// CoreImage decode offers.
 const RAW_SETTING: bool = cfg!(target_os = "macos");
@@ -267,7 +265,6 @@ pub struct Strings {
     pub settings_title: &'static str,
     pub settings_theme: &'static str,
     pub settings_language: &'static str,
-    pub settings_auto_tone: &'static str,
     pub settings_raw: &'static str,
     #[cfg_attr(
         not(target_os = "macos"),
@@ -279,10 +276,6 @@ pub struct Strings {
         allow(dead_code, reason = "a macOS-only setting")
     )]
     pub apple_tone_curve_hint: &'static str,
-    pub autotone_center_range: &'static str,
-    pub autotone_center_range_tip: &'static str,
-    pub autotone_center_median: &'static str,
-    pub autotone_center_median_tip: &'static str,
     pub form_general: &'static str,
     pub theme_dark: &'static str,
     pub theme_medium: &'static str,
@@ -512,6 +505,10 @@ pub struct Strings {
     pub bulk_delete: &'static str,
 
     // Develop panel.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only the macOS Settings section uses it")
+    )]
     pub develop: &'static str,
     pub tab_sliders: &'static str,
     pub tab_crop: &'static str,

@@ -73,12 +73,10 @@ pub(super) struct AutoTone {
     /// them back and stops the batch. Cleared on a folder change, which
     /// clears the history; a batch that outlives one lands without undo.
     undoable: bool,
-    /// How a normal photo is centered, from Settings.
-    centering: autotone::Centering,
 }
 
 impl AutoTone {
-    pub(super) fn new(centering: autotone::Centering) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             pending: HashSet::new(),
             queue: VecDeque::new(),
@@ -87,16 +85,7 @@ impl AutoTone {
             deferred: None,
             done: 0,
             undoable: false,
-            centering,
         }
-    }
-
-    pub(super) fn centering(&self) -> autotone::Centering {
-        self.centering
-    }
-
-    pub(super) fn set_centering(&mut self, centering: autotone::Centering) {
-        self.centering = centering;
     }
 
     /// Whether a batch has photos left to tone.
@@ -197,7 +186,7 @@ impl App {
             );
             return;
         };
-        let auto = autotone::analyze(sample, format, self.autotone.centering);
+        let auto = autotone::analyze(sample, format);
         let merged = autotone::merge(&self.current_adjustments(), &auto);
         self.apply_adjustments_kind(merged, "auto_tone");
         self.set_status(
@@ -305,7 +294,7 @@ impl App {
                 .sample()
                 .filter(|_| self.shown.path() == Some(path.as_path()));
             if let Some((sample, format)) = shown_sample {
-                let auto = autotone::analyze(sample, format, self.autotone.centering);
+                let auto = autotone::analyze(sample, format);
                 self.tone_one(&path, &auto);
                 continue;
             }
@@ -388,7 +377,7 @@ impl App {
                 dropped.insert(path);
                 continue;
             }
-            let auto = autotone::analyze(&grid, img.pixel_format, self.autotone.centering);
+            let auto = autotone::analyze(&grid, img.pixel_format);
             toned.push((path, auto));
             spent = Instant::now() >= deadline;
         }

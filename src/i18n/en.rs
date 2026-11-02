@@ -6,11 +6,7 @@ use super::*;
 
 pub static EN: Strings = Strings {
     settings: "Settings",
-    settings_tip: if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
-        "Theme, language, RAW tone curve and Auto Adjust (Cmd+,)"
-    } else if SHOW_AUTOTONE_CENTERING {
-        "Theme, language and Auto Adjust (Cmd+,)"
-    } else if RAW_SETTING {
+    settings_tip: if RAW_SETTING {
         "Theme, language and RAW tone curve (Cmd+,)"
     } else {
         "Theme and language (Cmd+,)"
@@ -18,14 +14,9 @@ pub static EN: Strings = Strings {
     settings_title: "Settings",
     settings_theme: "Theme",
     settings_language: "Language",
-    settings_auto_tone: "Auto Adjust",
     settings_raw: "RAW Files",
     apple_tone_curve: "Apple tone curve",
     apple_tone_curve_hint: "On, RAW files look as they do in Photos and Preview. Off, LightPhotos applies its own curve, as in the browser.",
-    autotone_center_range: "Center the range",
-    autotone_center_range_tip: "Put the middle of the histogram's range at 50%. Keeps the photo's shape where it is.",
-    autotone_center_median: "Center the middle pixel",
-    autotone_center_median_tip: "Put the pixel half the photo is darker than at 50%. A photo that is mostly shadow comes out brighter.",
     form_general: "General",
     theme_dark: "Dark",
     theme_medium: "Medium",
@@ -291,11 +282,7 @@ pub static EN: Strings = Strings {
                 ("?", "Show or hide this help"),
                 (
                     "Cmd+,",
-                    if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
-                        "Settings: theme, language, RAW tone curve and Auto Adjust"
-                    } else if SHOW_AUTOTONE_CENTERING {
-                        "Settings: theme, language and Auto Adjust"
-                    } else if RAW_SETTING {
+                    if RAW_SETTING {
                         "Settings: theme, language and RAW tone curve"
                     } else {
                         "Settings: theme and language"

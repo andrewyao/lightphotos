@@ -242,10 +242,6 @@ impl App {
         false
     }
 
-    pub(crate) fn autotone_centering(&self) -> crate::autotone::Centering {
-        self.autotone.centering()
-    }
-
     #[cfg(target_os = "macos")]
     pub(crate) fn apple_tone_curve(&self) -> bool {
         crate::decode::image_decode::apple_tone_curve()

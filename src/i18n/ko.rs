@@ -6,11 +6,7 @@ use super::*;
 
 pub static KO: Strings = Strings {
     settings: "설정",
-    settings_tip: if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
-        "테마, 언어, RAW 톤 곡선, 자동 조정 (Cmd+,)"
-    } else if SHOW_AUTOTONE_CENTERING {
-        "테마, 언어, 자동 조정 (Cmd+,)"
-    } else if RAW_SETTING {
+    settings_tip: if RAW_SETTING {
         "테마, 언어, RAW 톤 곡선 (Cmd+,)"
     } else {
         "테마, 언어 (Cmd+,)"
@@ -18,14 +14,9 @@ pub static KO: Strings = Strings {
     settings_title: "설정",
     settings_theme: "테마",
     settings_language: "언어",
-    settings_auto_tone: "자동 조정",
     settings_raw: "RAW 파일",
     apple_tone_curve: "Apple 톤 곡선",
     apple_tone_curve_hint: "켜면 RAW 파일이 Photos와 Preview에서처럼 보여요. 끄면 LightPhotos가 자체 곡선을 적용하며, 브라우저에서도 같아요.",
-    autotone_center_range: "범위 중앙 맞추기",
-    autotone_center_range_tip: "히스토그램 범위의 중간을 50%에 맞춰요. 사진의 분포 모양은 그대로 유지해요.",
-    autotone_center_median: "중간 픽셀 맞추기",
-    autotone_center_median_tip: "사진의 절반이 그보다 어두운 픽셀을 50%에 맞춰요. 대부분 그림자인 사진은 더 밝아져요.",
     form_general: "일반",
     theme_dark: "어두움",
     theme_medium: "중간",
@@ -288,11 +279,7 @@ pub static KO: Strings = Strings {
                 ("?", "이 도움말 표시 또는 숨기기"),
                 (
                     "Cmd+,",
-                    if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
-                        "설정: 테마, 언어, RAW 톤 곡선, 자동 조정"
-                    } else if SHOW_AUTOTONE_CENTERING {
-                        "설정: 테마, 언어, 자동 조정"
-                    } else if RAW_SETTING {
+                    if RAW_SETTING {
                         "설정: 테마, 언어, RAW 톤 곡선"
                     } else {
                         "설정: 테마, 언어"
