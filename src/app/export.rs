@@ -1,6 +1,4 @@
 use super::*;
-#[cfg(not(target_arch = "wasm32"))]
-use std::collections::HashSet;
 use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::Receiver;
@@ -721,11 +719,10 @@ impl App {
                 }
                 // Pick destinations one at a time so `taken` keeps same-stem
                 // sources apart.
-                let mut taken: HashSet<PathBuf> = HashSet::new();
+                let mut taken = paths::TakenNames::default();
                 for (seq, src) in paths.into_iter().enumerate() {
                     let stem = settings.naming.stem(&src, seq + 1, total);
-                    let dest = paths::export_target(&stem, ext, &dir, &taken);
-                    taken.insert(dest.clone());
+                    let dest = paths::export_target(&stem, ext, &dir, &mut taken);
                     exporter.submit(job(src, ExportDest::Folder(dest)));
                 }
             }

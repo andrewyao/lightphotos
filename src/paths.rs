@@ -43,24 +43,44 @@ pub fn export_name(
     }
 }
 
-/// The first free `<stem>.<ext>`, `<stem>-1.<ext>`, ... path in `dest_dir`.
-/// Skips files on disk and paths in `taken` (handed out earlier in this
-/// batch, not yet written), so same-stem sources like `photo.raw` and
-/// `photo.jpg` don't collide.
+/// The names [`export_target`] has handed out in one batch, which are not
+/// on disk yet.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn export_target(stem: &str, ext: &str, dest_dir: &Path, taken: &HashSet<PathBuf>) -> PathBuf {
-    let free = |candidate: &Path| !candidate.exists() && !taken.contains(candidate);
-    let base = dest_dir.join(format!("{stem}.{ext}"));
-    if free(&base) {
+#[derive(Default)]
+pub struct TakenNames {
+    /// Lowercased, since macOS and Windows treat `IMG_1.jpg` and `img_1.jpg`
+    /// as one file.
+    names: HashSet<String>,
+    /// For each lowercased `<stem>.<ext>`, the `-n` to try next: everything
+    /// below it is known to be taken, so a batch of same-named photos
+    /// doesn't probe `-1`, `-2`, ... again for each one.
+    next: std::collections::HashMap<String, u32>,
+}
+
+/// The first free `<stem>.<ext>`, `<stem>-1.<ext>`, ... path in `dest_dir`,
+/// which it then adds to `taken`. Skips files on disk and names in `taken`
+/// (handed out earlier in this batch, not yet written), so same-stem sources
+/// like `photo.raw` and `photo.jpg` don't collide.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn export_target(stem: &str, ext: &str, dest_dir: &Path, taken: &mut TakenNames) -> PathBuf {
+    let base_name = format!("{stem}.{ext}");
+    let base_key = base_name.to_lowercase();
+    let base = dest_dir.join(&base_name);
+    if !taken.names.contains(&base_key) && !base.exists() {
+        taken.names.insert(base_key);
         return base;
     }
-    let mut n = 1u32;
+    let mut n = taken.next.get(&base_key).copied().unwrap_or(1);
     loop {
-        let candidate = dest_dir.join(format!("{stem}-{n}.{ext}"));
-        if free(&candidate) {
+        let name = format!("{stem}-{n}.{ext}");
+        let key = name.to_lowercase();
+        let candidate = dest_dir.join(&name);
+        if !taken.names.contains(&key) && !candidate.exists() {
+            taken.names.insert(key);
+            taken.next.insert(base_key, n.saturating_add(1));
             return candidate;
         }
-        n += 1;
+        n = n.saturating_add(1);
     }
 }
 
@@ -462,28 +482,67 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("iv-paths-test-{}", std::process::id()));
         let out = dir.join("Exports");
         std::fs::create_dir_all(&out).unwrap();
-        let none = HashSet::new();
 
         assert_eq!(
-            export_target("photo", "jpg", &out, &none),
+            export_target("photo", "jpg", &out, &mut TakenNames::default()),
             out.join("photo.jpg")
         );
 
         std::fs::write(out.join("photo.jpg"), b"x").unwrap();
         assert_eq!(
-            export_target("photo", "jpg", &out, &none),
+            export_target("photo", "jpg", &out, &mut TakenNames::default()),
             out.join("photo-1.jpg")
         );
 
         // `taken` reserves names that aren't on disk yet.
-        let mut taken = HashSet::new();
-        let first = export_target("photo", "jpg", &out, &taken);
-        taken.insert(first.clone());
-        let second = export_target("photo", "jpg", &out, &taken);
+        let mut taken = TakenNames::default();
+        let first = export_target("photo", "jpg", &out, &mut taken);
+        let second = export_target("photo", "jpg", &out, &mut taken);
         assert_eq!(first, out.join("photo-1.jpg"));
         assert_eq!(second, out.join("photo-2.jpg"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `IMG_0001.CR3` and `img_0001.jpg` in one batch are one file name on
+    /// macOS and Windows, so the second must not take the first's.
+    #[test]
+    fn export_target_treats_names_that_differ_only_in_case_as_taken() {
+        let out = std::env::temp_dir().join(format!("iv-paths-case-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        let mut taken = TakenNames::default();
+
+        let first = export_target("IMG_0001", "jpg", &out, &mut taken);
+        let second = export_target("img_0001", "jpg", &out, &mut taken);
+        assert_eq!(first, out.join("IMG_0001.jpg"));
+        assert_eq!(second, out.join("img_0001-1.jpg"));
+
+        std::fs::remove_dir_all(&out).ok();
+    }
+
+    /// A template with no `{name}` gives every photo the same stem. Picking
+    /// each destination must not probe every suffix below it again.
+    #[test]
+    fn export_target_picks_a_batch_of_one_stem_in_linear_time() {
+        let out = std::env::temp_dir().join(format!("iv-paths-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        let mut taken = TakenNames::default();
+
+        let started = std::time::Instant::now();
+        let picked: Vec<PathBuf> = (0..3000)
+            .map(|_| export_target("Vacation", "jpg", &out, &mut taken))
+            .collect();
+        let elapsed = started.elapsed();
+
+        assert_eq!(picked[0], out.join("Vacation.jpg"));
+        assert_eq!(picked[2999], out.join("Vacation-2999.jpg"));
+        // Probing every lower suffix each time is about 4.5 million stats.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "3000 destinations took {elapsed:?}"
+        );
+
+        std::fs::remove_dir_all(&out).ok();
     }
 
     #[test]
