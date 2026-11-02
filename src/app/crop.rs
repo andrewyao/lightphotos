@@ -99,7 +99,9 @@ fn reshaped(r: Crop, w_over_h: f32, w: f32, h: f32) -> Crop {
     let (bw, bh) = ((area * w_over_h).sqrt(), (area / w_over_h).sqrt());
     let fit = (w / bw).min(h / bh).min(1.0);
     let span = |lo: f32, hi: f32, len: f32| {
-        let start = ((lo + hi - len) / 2.0).clamp(0.0, 1.0 - len);
+        // `fit` can land `len` a hair over 1.0, and `clamp` panics when its
+        // max is below its min.
+        let start = ((lo + hi - len) / 2.0).min(1.0 - len).max(0.0);
         (start, start + len)
     };
     let (left, right) = span(r.left, r.right, bw * fit / w);
@@ -631,6 +633,31 @@ impl App {
 mod tests {
     use super::*;
     use crate::develop::Vignette;
+
+    #[test]
+    fn reshaping_the_uncropped_frame_never_panics_and_stays_inside_it() {
+        let whole = Crop {
+            left: 0.0,
+            top: 0.0,
+            right: 1.0,
+            bottom: 1.0,
+        };
+        // 6000x4000 at 9:16 rounds `len` to 1.0000001 in f32.
+        let sizes = [(6000.0, 4000.0), (4000.0, 6000.0), (500.0, 1133.0)];
+        let ratios = [9.0 / 16.0, 16.0 / 9.0, 4.0 / 3.0, 3.0 / 4.0, 1.0];
+        for (w, h) in sizes {
+            for ratio in ratios {
+                let c = reshaped(whole, ratio, w, h);
+                assert!(
+                    c.left >= 0.0
+                        && c.top >= 0.0
+                        && c.right <= 1.0 + 1e-5
+                        && c.bottom <= 1.0 + 1e-5,
+                    "{w}x{h} at {ratio}: {c:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn leaving_crop_mode_restores_the_cropped_view() {
