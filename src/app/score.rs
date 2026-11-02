@@ -178,21 +178,6 @@ impl App {
             .map(|(s, stale)| (s.score.clone(), stale))
     }
 
-    /// The lowest and highest stored score across the selection, and
-    /// whether any of them went stale. `None` while none is scored.
-    pub(crate) fn selection_score_span(&self) -> Option<(u8, u8, bool)> {
-        if !self.scoring_available() {
-            return None;
-        }
-        self.selected_path_refs()
-            .filter_map(|p| self.folder_store.score(p))
-            .map(|(s, stale)| (s.score.value, stale))
-            .fold(None, |span, (v, stale)| match span {
-                None => Some((v, v, stale)),
-                Some((lo, hi, any)) => Some((v.min(lo), v.max(hi), any || stale)),
-            })
-    }
-
     /// Whether the Grid may sort by Quality: only where scoring is, and not
     /// while a run is going, since each new score would reorder the Grid.
     pub(crate) fn quality_sort_available(&self) -> bool {
@@ -481,7 +466,7 @@ mod tests {
         assert_eq!(app.sort_order().key, GridSort::Name);
         assert!(app.score_at(0).is_none());
         assert!(app.shown_score().is_none());
-        assert!(app.selection_score_span().is_none());
+        assert!(app.selection_summary(true).score_span.is_none());
     }
 
     #[test]

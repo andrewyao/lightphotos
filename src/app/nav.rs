@@ -1957,6 +1957,39 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The selection bar reads the ratings, flags and scores in one walk of
+    /// the selection, and it agrees with each reader on its own.
+    #[test]
+    fn one_summary_of_the_selection_has_its_stars_and_flags() {
+        use crate::app::FlagCoverage;
+        use crate::sidecar::Flag;
+        let (mut app, dir, paths) = folder_app("nav-summary", 4);
+        app.set_rating_of(paths[1].clone(), 3);
+        app.set_rating_of(paths[2].clone(), 1);
+        app.folder_store.set_flag(&paths[1], Some(Flag::Pick));
+        app.folder_store.set_flag(&paths[2], Some(Flag::Pick));
+        app.select_single(0);
+        app.select_range(2);
+
+        let summary = app.selection_summary(true);
+        assert_eq!(summary.rating_span, (0, 3));
+        assert_eq!(summary.flag_coverage(None), FlagCoverage::Some);
+        assert_eq!(summary.flag_coverage(Some(Flag::Pick)), FlagCoverage::Some);
+        assert_eq!(
+            summary.flag_coverage(Some(Flag::Reject)),
+            FlagCoverage::None
+        );
+        assert_eq!(summary.score_span, None);
+
+        app.select_single(1);
+        app.select_range(2);
+        let summary = app.selection_summary(false);
+        assert_eq!(summary.rating_span, (1, 3));
+        assert_eq!(summary.flag_coverage(Some(Flag::Pick)), FlagCoverage::All);
+        assert_eq!(summary.flag_coverage(None), FlagCoverage::None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Filmstrip cells share one height and take their width from the photo,
     /// so a landscape cell is wider than a portrait one.
     #[test]

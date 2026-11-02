@@ -635,7 +635,9 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         (t.selected_n_photos)(n)
     });
 
-    let (lo, hi) = app.selection_rating_span();
+    // One walk of the selection for the stars, the flags and the score.
+    let marks = app.selection_summary(n > 1);
+    let (lo, hi) = marks.rating_span;
     let star_w = font_size::px(ui.style(), 20.0);
     let star_font = egui::FontId::proportional(font_size::px(ui.style(), 18.0));
     super::editable(ui, app, |ui| {
@@ -668,7 +670,7 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     super::editable(ui, app, |ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for flag in FLAG_STATES {
-            let coverage = app.selection_flag_coverage(flag);
+            let coverage = marks.flag_coverage(flag);
             let resp = super::flag_button(ui, flag, coverage, flag_w, (colors.value, colors.label))
                 .on_hover_text((t.set_flag_tip)(crate::app::flag_name(flag)));
             // Marking photos with the state they all have already does nothing.
@@ -698,7 +700,7 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             )
             .on_hover_text(super::grid::score_tip(&score, stale));
         }
-    } else if let Some((lo, hi, stale)) = app.selection_score_span() {
+    } else if let Some((lo, hi, stale)) = marks.score_span {
         ui.label(t.score_label);
         let range = if lo == hi {
             lo.to_string()

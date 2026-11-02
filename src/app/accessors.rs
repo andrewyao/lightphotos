@@ -434,16 +434,32 @@ impl App {
     /// How much of the selection is in flag state `flag` (`None` being
     /// Unflagged): all of it, some, or none. Nothing selected counts as none.
     pub(crate) fn selection_flag_coverage(&self, flag: Option<Flag>) -> FlagCoverage {
-        let (mut total, mut n) = (0, 0);
+        self.selection_summary(false).flag_coverage(flag)
+    }
+
+    /// The selection's ratings, flags and, with `with_score`, scores, read
+    /// in one pass. Each is a hashed lookup per selected photo, so a
+    /// 20 000-photo selection pays for it once per frame, not once per
+    /// reader.
+    pub(crate) fn selection_summary(&self, with_score: bool) -> SelectionSummary {
+        let scored = with_score && self.scoring_available();
+        let mut summary = SelectionSummary::default();
+        let mut rating: Option<(u8, u8)> = None;
         for p in self.selected_path_refs() {
-            total += 1;
-            n += usize::from(self.flag_of(p) == flag);
+            let r = self.rating_of(p);
+            rating = Some(rating.map_or((r, r), |(lo, hi)| (lo.min(r), hi.max(r))));
+            summary.total += 1;
+            summary.flagged[SelectionSummary::slot(self.flag_of(p))] += 1;
+            if let Some((stored, stale)) = scored.then(|| self.folder_store.score(p)).flatten() {
+                let v = stored.score.value;
+                summary.score_span = Some(match summary.score_span {
+                    None => (v, v, stale),
+                    Some((lo, hi, any)) => (v.min(lo), v.max(hi), any || stale),
+                });
+            }
         }
-        match n {
-            0 => FlagCoverage::None,
-            n if n == total => FlagCoverage::All,
-            _ => FlagCoverage::Some,
-        }
+        summary.rating_span = rating.unwrap_or((0, 0));
+        summary
     }
 
     pub(crate) fn selected_label(&self) -> Option<crate::sidecar::ColorLabel> {
@@ -461,13 +477,7 @@ impl App {
     /// The lowest and highest rating across the selection, `(0, 0)` when
     /// nothing is selected.
     pub(crate) fn selection_rating_span(&self) -> (u8, u8) {
-        let ratings = self.selected_path_refs().map(|p| self.rating_of(p));
-        ratings
-            .fold(None, |span, r| match span {
-                None => Some((r, r)),
-                Some((lo, hi)) => Some((r.min(lo), r.max(hi))),
-            })
-            .unwrap_or((0, 0))
+        self.selection_summary(false).rating_span
     }
 
     /// The thumbnail texture and its size for the visible cell at `pos`, if
@@ -566,6 +576,39 @@ mod tests {
             assert_eq!(preview_target_px(longest as f32), 2048, "at {longest}");
         }
         assert_eq!(preview_target_px(2049.0), 2560);
+    }
+}
+
+/// What [`App::selection_summary`] read off the selection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SelectionSummary {
+    /// The lowest and highest rating, `(0, 0)` when nothing is selected.
+    pub(crate) rating_span: (u8, u8),
+    /// The lowest and highest stored score and whether any went stale.
+    /// `None` while none is scored, or when asked not to read scores.
+    pub(crate) score_span: Option<(u8, u8, bool)>,
+    total: usize,
+    /// Photos Unflagged, Picked and Rejected.
+    flagged: [usize; 3],
+}
+
+impl SelectionSummary {
+    fn slot(flag: Option<Flag>) -> usize {
+        match flag {
+            None => 0,
+            Some(Flag::Pick) => 1,
+            Some(Flag::Reject) => 2,
+        }
+    }
+
+    /// How much of the selection is in flag state `flag`. Nothing selected
+    /// counts as none.
+    pub(crate) fn flag_coverage(&self, flag: Option<Flag>) -> FlagCoverage {
+        match self.flagged[Self::slot(flag)] {
+            0 => FlagCoverage::None,
+            n if n == self.total => FlagCoverage::All,
+            _ => FlagCoverage::Some,
+        }
     }
 }
 
