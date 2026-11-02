@@ -25,17 +25,30 @@ use crate::decode::image_decode::{
 /// padded to whole tiles, so the cap here is 500 million of them (1 GB of
 /// u16), checked before rawler runs. A long side alone is fine: a 40,000 px
 /// panorama decodes.
+///
+/// Only DNG exposes its raw IFD through rawler's `Decoder::ifd`, so every
+/// other TIFF-based format (ARW, NEF, CR2, ORF, PEF, SRW, RW2) is checked
+/// against the largest image IFD found by walking its TIFF structure.
+/// Containers that aren't TIFF (CR3, RAF) have no size tags to read here and
+/// pass unchecked.
 pub fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<(), String> {
-    let Some(RawIfdSize {
+    if let Some(size) = raw_ifd_size(source) {
+        return check_ifd_size(&size);
+    }
+    tiff_ifd_sizes(source)
+        .iter()
+        .filter(|size| size.width > 0 && size.height > 0)
+        .try_for_each(check_ifd_size)
+}
+
+fn check_ifd_size(size: &RawIfdSize) -> Result<(), String> {
+    let RawIfdSize {
         width,
         height,
         cpp,
         row,
         rows,
-    }) = raw_ifd_size(source)
-    else {
-        return Ok(());
-    };
+    } = *size;
     let row = row.saturating_mul(cpp);
     if width == 0 || height == 0 || row.saturating_mul(rows) > 500_000_000 {
         return Err(format!(
@@ -46,6 +59,7 @@ pub fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<
 }
 
 /// The raw image's size as its TIFF tags give it, before rawler decodes.
+#[derive(Clone, Copy)]
 struct RawIfdSize {
     width: usize,
     height: usize,
@@ -59,14 +73,54 @@ struct RawIfdSize {
 /// tags that are missing.
 fn raw_ifd_size(source: &rawler::rawsource::RawSource) -> Option<RawIfdSize> {
     use rawler::decoders::WellKnownIFD;
-    use rawler::tags::TiffCommonTag;
 
     let ifd = rawler::get_decoder(source)
         .ok()?
         .ifd(WellKnownIFD::Raw)
         .ok()
         .flatten()?;
-    let tag = |t| ifd.get_entry(t).map(|e| e.value.force_usize(0));
+    ifd_size(&ifd)
+}
+
+/// More chained IFDs than any camera file has; a loop in `next IFD` stops here.
+const MAX_TIFF_CHAIN: usize = 16;
+/// SubIFDs of SubIFDs deeper than this are ignored.
+const MAX_SUB_IFD_DEPTH: usize = 4;
+
+/// Every IFD in `source`'s TIFF structure that carries image size tags, for
+/// formats that don't expose their raw IFD. Empty when `source` isn't TIFF.
+fn tiff_ifd_sizes(source: &rawler::rawsource::RawSource) -> Vec<RawIfdSize> {
+    use rawler::formats::tiff::reader::TiffReader;
+    use rawler::formats::tiff::GenericTiffReader;
+
+    let Ok(tiff) = GenericTiffReader::new_with_buffer(source.buf(), 0, 0, Some(MAX_TIFF_CHAIN))
+    else {
+        return Vec::new();
+    };
+    let mut sizes = Vec::new();
+    for ifd in tiff.chains() {
+        collect_ifd_sizes(ifd, 0, &mut sizes);
+    }
+    sizes
+}
+
+fn collect_ifd_sizes(ifd: &rawler::formats::tiff::IFD, depth: usize, out: &mut Vec<RawIfdSize>) {
+    out.extend(ifd_size(ifd));
+    if depth >= MAX_SUB_IFD_DEPTH {
+        return;
+    }
+    for sub in ifd.sub_ifds().values().flatten() {
+        collect_ifd_sizes(sub, depth + 1, out);
+    }
+}
+
+fn ifd_size(ifd: &rawler::formats::tiff::IFD) -> Option<RawIfdSize> {
+    use rawler::tags::TiffCommonTag;
+
+    let tag = |t| {
+        ifd.get_entry(t)
+            .and_then(|e| e.value.get_usize(0).ok().flatten())
+    };
     let (width, height) = (
         tag(TiffCommonTag::ImageWidth)?,
         tag(TiffCommonTag::ImageLength)?,
@@ -661,11 +715,69 @@ fn embedded_image_from_bytes(bytes: &[u8], max_px: u32, any_format: bool) -> Opt
 
 #[cfg(test)]
 mod tests {
-    use super::{fuji_dynamic_range_gain, linear_rgb, padded_to_tiles};
+    use super::{check_rawler_size_limit, fuji_dynamic_range_gain, linear_rgb, padded_to_tiles};
     use rawler::imgop::develop::Intermediate;
     use rawler::pixarray::{Color2D, PixF32};
 
     use super::{develop_raw_image_to_linear_f16, RawIntent};
+
+    /// A little-endian TIFF whose chain is `ifds`, each a list of
+    /// `(tag, LONG value)` entries in tag order, the first at offset 8.
+    fn tiff(ifds: &[&[(u16, u32)]]) -> Vec<u8> {
+        let mut out = vec![b'I', b'I', 42, 0, 8, 0, 0, 0];
+        for (i, entries) in ifds.iter().enumerate() {
+            out.extend((entries.len() as u16).to_le_bytes());
+            for &(tag, value) in *entries {
+                out.extend(tag.to_le_bytes());
+                out.extend(4u16.to_le_bytes());
+                out.extend(1u32.to_le_bytes());
+                out.extend(value.to_le_bytes());
+            }
+            let next = if i + 1 < ifds.len() {
+                out.len() as u32 + 4
+            } else {
+                0
+            };
+            out.extend(next.to_le_bytes());
+        }
+        out
+    }
+
+    fn size_check(bytes: &[u8]) -> Result<(), String> {
+        check_rawler_size_limit(&rawler::rawsource::RawSource::new_from_slice(bytes))
+    }
+
+    #[test]
+    fn a_tiff_raw_claiming_a_huge_image_is_refused_before_rawler_allocates() {
+        const WIDTH: u16 = 0x100;
+        const LENGTH: u16 = 0x101;
+        let huge = tiff(&[&[(WIDTH, 60_000), (LENGTH, 60_000)]]);
+        assert!(size_check(&huge).is_err());
+        let normal = tiff(&[&[(WIDTH, 6_000), (LENGTH, 4_000)]]);
+        assert!(size_check(&normal).is_ok());
+    }
+
+    #[test]
+    fn a_huge_sub_ifd_is_refused_even_when_the_first_ifd_is_a_thumbnail() {
+        const WIDTH: u16 = 0x100;
+        const LENGTH: u16 = 0x101;
+        const SUB_IFDS: u16 = 0x14A;
+        // The root IFD holds three entries, so it ends at 8 + 2 + 36 + 4 and
+        // the second IFD starts at 50.
+        let mut bytes = tiff(&[
+            &[(WIDTH, 160), (LENGTH, 120), (SUB_IFDS, 50)],
+            &[(WIDTH, 60_000), (LENGTH, 60_000)],
+        ]);
+        // Only the SubIFDs entry reaches it: cut the root's next-IFD link.
+        bytes[46..50].fill(0);
+        assert!(size_check(&bytes).is_err());
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_tiff_pass_the_size_check_untouched() {
+        assert!(size_check(&[]).is_ok());
+        assert!(size_check(b"FUJIFILMCCD-RAW 0201").is_ok());
+    }
 
     /// A display develop, which may bin.
     fn develop(
