@@ -275,11 +275,15 @@ impl App {
             self.request_redraw();
             return;
         }
-        self.autotone.pending.clear();
-        self.autotone.queue.clear();
-        self.autotone.window.clear();
-        self.autotone.base.clear();
-        self.autotone.done = 0;
+        // An append leaves a running batch alone, as `enqueue_auto_tone`
+        // does: it skips what is pending and adds the rest.
+        if matches!(mode, DeferredAutoToneMode::Replace) {
+            self.autotone.pending.clear();
+            self.autotone.queue.clear();
+            self.autotone.window.clear();
+            self.autotone.base.clear();
+            self.autotone.done = 0;
+        }
         self.enqueue_auto_tone(paths);
     }
 
@@ -1001,6 +1005,35 @@ mod tests {
         assert!(!app.edits.contains_key(&a));
         assert!(!app.edits.contains_key(&b));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cmd+U on a second selection while a batch runs adds to it. The first
+    /// batch's photos that have not been toned yet must still get their turn.
+    #[test]
+    fn auto_tone_on_a_second_selection_keeps_the_running_batch() {
+        let names: Vec<String> = (0..6).map(|i| format!("p{i}.jpg")).collect();
+        let (dir, photos) = folder_of("autotone-append", &names);
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir);
+        app.mode = ViewMode::Grid;
+        app.loader = Some(crate::jobs::loader::Loader::new(
+            16384,
+            crate::jobs::cache_limits::CacheLimits::PLATFORM,
+        ));
+
+        app.auto_tone_batch(photos[..3].to_vec(), DeferredAutoToneMode::Append);
+        app.auto_tone_batch(photos[2..].to_vec(), DeferredAutoToneMode::Append);
+        assert_eq!(
+            app.autotone_total(),
+            photos.len(),
+            "the first three and the new three, the overlap once"
+        );
+        assert!(photos.iter().all(|p| app.autotone.pending.contains(p)));
+
+        // A fresh selection through the menu still starts over.
+        app.auto_tone_batch(photos[4..].to_vec(), DeferredAutoToneMode::Replace);
+        assert_eq!(app.autotone_total(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
