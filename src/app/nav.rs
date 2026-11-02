@@ -1440,6 +1440,26 @@ pub(in crate::app) mod tests {
         dir
     }
 
+    /// Opening one photo under a filter that hides it (before its sidecar
+    /// has even loaded) keeps that photo in the Loupe, not the first cell.
+    #[test]
+    fn opening_a_photo_a_filter_hides_stays_on_that_photo() {
+        let (dir, paths) = crate::app::test_support::folder_of(
+            "open-hidden",
+            &["a.jpg".into(), "b.jpg".into(), "c.jpg".into()],
+        );
+        let mut app = App::new(None);
+        app.filter = Some((Cmp::Gte, 3));
+        app.open(paths[1].clone());
+        assert_eq!(app.selected_path().as_deref(), Some(paths[1].as_path()));
+
+        // The sidecars land and the filter is applied again.
+        app.recompute_visible();
+        app.resync_loupe_selection();
+        assert_eq!(app.selected_path().as_deref(), Some(paths[1].as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_group_collapses_to_its_representative() {
         let (mut app, dir, _) = folder_app("nav-collapse", 6);

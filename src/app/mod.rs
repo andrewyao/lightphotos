@@ -1178,11 +1178,12 @@ impl App {
             self.recompute_visible();
             self.sel = match self.place_of(start_index) {
                 nav::Place::Cell(p) => Some(p),
-                nav::Place::Hidden(_) => {
+                // Behind a collapsed stack, or out under a filter whose
+                // sidecars haven't loaded: still the photo opened.
+                nav::Place::Hidden(_) | nav::Place::Gone => {
                     self.want = start;
                     None
                 }
-                nav::Place::Gone => Some(0),
             };
             self.collapse_selection();
             self.mode = ViewMode::Loupe;
