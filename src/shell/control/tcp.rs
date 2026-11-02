@@ -51,6 +51,9 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a new connection has to sign in, so connections that never do
 /// can't hold every slot.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a reply may wait for its client to take it in, so a client that
+/// sends lines and never reads can't hold every slot.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The longest line before the sign-in. A `hello` or an `auth` is a few
 /// hundred bytes, so nothing larger is parsed for a stranger.
 const MAX_SIGN_IN_LINE: usize = 4 << 10;
@@ -85,8 +88,7 @@ pub(crate) fn start(port: u16, proxy: EventLoopProxy<UserEvent>) -> Result<(), S
     let port = listen(
         port,
         token.clone(),
-        IDLE_TIMEOUT,
-        SIGN_IN_TIMEOUT,
+        (IDLE_TIMEOUT, SIGN_IN_TIMEOUT, WRITE_TIMEOUT),
         move |request, reply| proxy.send_event(UserEvent::Control(request, reply)).is_ok(),
     )?;
     eprintln!("{}", listening_line(port, &token, generated));
@@ -194,14 +196,14 @@ impl Session {
 }
 
 /// Binds 127.0.0.1:`port` and serves each connection on a thread of its
-/// own, closing one that sends nothing for `idle`. Returns the bound port.
+/// own, closing one that sends nothing for `idle`, does not sign in within
+/// `sign_in`, or leaves a reply unread for `write`. Returns the bound port.
 /// `app` hands a request to the main thread and returns false once the app
 /// is gone.
 fn listen<A>(
     port: u16,
     token: String,
-    idle: Duration,
-    sign_in: Duration,
+    (idle, sign_in, write): (Duration, Duration, Duration),
     app: A,
 ) -> Result<u16, String>
 where
@@ -217,7 +219,9 @@ where
         .spawn(move || {
             for stream in listener.incoming() {
                 match stream {
-                    Ok(stream) => accept(stream, &token, &open, (idle, sign_in), app.clone()),
+                    Ok(stream) => {
+                        accept(stream, &token, &open, (idle, sign_in, write), app.clone())
+                    }
                     // Out of file descriptors, say. Don't spin on it.
                     Err(_) => std::thread::sleep(Duration::from_millis(50)),
                 }
@@ -231,11 +235,15 @@ fn accept<A>(
     mut stream: TcpStream,
     token: &Arc<str>,
     open: &Arc<AtomicUsize>,
-    (idle, sign_in): (Duration, Duration),
+    (idle, sign_in, write): (Duration, Duration, Duration),
     app: A,
 ) where
     A: Fn(Request, Reply) -> bool + Send + 'static,
 {
+    // A peer that sends lines and never reads the replies would otherwise
+    // fill the socket's buffers and leave this thread blocked in a write,
+    // out of reach of the read timeouts, holding its slot for good.
+    let _ = stream.set_write_timeout(Some(write));
     let Some(slot) = Slot::take(open) else {
         let refused = ChannelError::TooManyConnections {
             limit: MAX_CONNECTIONS,
@@ -828,7 +836,13 @@ mod tests {
     #[test]
     fn a_connection_that_does_not_sign_in_soon_is_closed() {
         let sign_in = Duration::from_millis(200);
-        let port = listen(0, TOKEN.into(), IDLE_TIMEOUT, sign_in, fake_app).unwrap();
+        let port = listen(
+            0,
+            TOKEN.into(),
+            (IDLE_TIMEOUT, sign_in, WRITE_TIMEOUT),
+            fake_app,
+        )
+        .unwrap();
         let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(8)))
@@ -929,10 +943,41 @@ mod tests {
         }
     }
 
+    /// Peers that send bad lines and never read the replies fill the socket
+    /// buffers. They must not keep the connection slots.
+    #[test]
+    fn peers_that_never_read_their_replies_do_not_pin_the_slots() {
+        // Far longer than the test, so only the write timeout can free them.
+        let sign_in = Duration::from_secs(60);
+        let write = Duration::from_millis(300);
+        let port = listen(0, TOKEN.into(), (IDLE_TIMEOUT, sign_in, write), fake_app).unwrap();
+        let flooders: Vec<TcpStream> = (0..MAX_CONNECTIONS)
+            .map(|_| {
+                let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+                let mut writer = stream.try_clone().unwrap();
+                std::thread::spawn(move || {
+                    let junk = "{}\n".repeat(1000);
+                    while writer.write_all(junk.as_bytes()).is_ok() {}
+                });
+                stream
+            })
+            .collect();
+        // Not before they have filled the buffers and the server is stuck.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_a_slot_frees(port);
+        drop(flooders);
+    }
+
     #[test]
     fn idle_connections_get_one_error_line_and_free_their_slots() {
         let idle = Duration::from_millis(100);
-        let port = listen(0, TOKEN.into(), idle, SIGN_IN_TIMEOUT, fake_app).unwrap();
+        let port = listen(
+            0,
+            TOKEN.into(),
+            (idle, SIGN_IN_TIMEOUT, WRITE_TIMEOUT),
+            fake_app,
+        )
+        .unwrap();
         let connect = || TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
         let held: Vec<TcpStream> = (0..MAX_CONNECTIONS).map(|_| connect()).collect();
         for mut stream in held {
@@ -953,7 +998,13 @@ mod tests {
 
     #[test]
     fn over_loopback_a_screenshot_decodes_and_extra_connections_are_refused() {
-        let port = listen(0, TOKEN.into(), IDLE_TIMEOUT, SIGN_IN_TIMEOUT, fake_app).unwrap();
+        let port = listen(
+            0,
+            TOKEN.into(),
+            (IDLE_TIMEOUT, SIGN_IN_TIMEOUT, WRITE_TIMEOUT),
+            fake_app,
+        )
+        .unwrap();
         let connect = || TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
 
         let mut first = connect();
