@@ -418,7 +418,21 @@ pub fn sidecar_path(photo: &Path) -> Option<PathBuf> {
 /// refused without reading it whole.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_sidecar_file(sidecar: &Path) -> Result<ImageRecord, String> {
-    read_open_sidecar(std::fs::File::open(sidecar).map_err(|e| e.to_string())?)
+    read_open_sidecar(open_regular(sidecar).map_err(|e| e.to_string())?)
+}
+
+/// Opens `sidecar` for reading, but only a regular file: opening a FIFO
+/// blocks until something writes to it, and a stuck read would hold up the
+/// only thread that saves sidecars.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_regular(sidecar: &Path) -> std::io::Result<std::fs::File> {
+    if !std::fs::metadata(sidecar)?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidFilename,
+            "not a regular file",
+        ));
+    }
+    std::fs::File::open(sidecar)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -441,7 +455,7 @@ fn read_open_sidecar(file: std::fs::File) -> Result<ImageRecord, String> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_record(photo: &Path) -> Result<ImageRecord, String> {
     let sidecar = sidecar_path(photo).ok_or("cannot determine sidecar path")?;
-    match std::fs::File::open(&sidecar) {
+    match open_regular(&sidecar) {
         Ok(file) => read_open_sidecar(file),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ImageRecord::default()),
         Err(e) => Err(format!("{}: {e}", sidecar.display())),
@@ -476,7 +490,7 @@ pub fn read_record_checked(photo: &Path) -> Result<ImageRecord, ReadError> {
         why: "cannot determine sidecar path".into(),
         lasting: true,
     })?;
-    let file = match std::fs::File::open(&sidecar) {
+    let file = match open_regular(&sidecar) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ImageRecord::default()),
         Err(e) => return Err(io_error(&sidecar, &e)),
@@ -1002,6 +1016,34 @@ mod file_tests {
         write_record(&photo, &rec).unwrap();
         assert!(dir.join(SIDECAR_DIR).join("IMG_1.ARW.xmp").is_file());
         assert_eq!(read_record(&photo).unwrap(), rec);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A named pipe where a sidecar should be is an error to act on at once,
+    /// not a read that waits for a writer that never comes.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_sidecar_path_fails_the_read_instead_of_blocking() {
+        let dir = temp_folder("fifo");
+        let photo = dir.join("IMG_1.jpg");
+        let sidecar = sidecar_path(&photo).unwrap();
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&sidecar)
+            .status()
+            .unwrap()
+            .success());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send((read_record_checked(&photo), read_record(&photo)));
+        });
+        let (checked, plain) = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the read returned");
+        assert!(matches!(checked, Err(ReadError::Io { lasting: true, .. })));
+        assert!(plain.is_err());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
