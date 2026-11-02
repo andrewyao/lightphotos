@@ -735,6 +735,9 @@ pub(crate) struct App {
     pub(crate) catalog: crate::persist::catalog::Catalog,
     /// The folder store's `marks_revision` the catalog's copy last took.
     marks_synced: u64,
+    /// When `sync_marks` last projected the folder's marks, for the frame
+    /// loop's debounce.
+    marks_synced_at: Option<Instant>,
     /// Catalogs opened before, newest first, for the Folders heading.
     #[cfg(not(target_arch = "wasm32"))]
     recent_catalogs: Vec<crate::persist::catalog::CatalogRef>,
@@ -1066,6 +1069,7 @@ impl App {
             control: control::Pending::default(),
             catalog: launch.catalog,
             marks_synced: 0,
+            marks_synced_at: None,
             #[cfg(not(target_arch = "wasm32"))]
             recent_catalogs,
             legacy_folders,
@@ -1301,6 +1305,9 @@ impl App {
     /// background. `poll_folder_store_load` copies them in when they land, so first
     /// paint never waits on the sidecars.
     fn seed_mirrors(&mut self, playlist: &Playlist) {
+        // The folder store moves to this playlist's folder below, and the
+        // frame loop's debounce may still hold the last folder's marks.
+        self.sync_marks();
         self.finish_folder_jobs();
         if self.playlist.as_ref().map(Playlist::dir) != Some(playlist.dir()) {
             self.forget_folder_decodes();

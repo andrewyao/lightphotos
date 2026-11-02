@@ -114,6 +114,7 @@ impl App {
 
     /// Back to the landing page with no folder showing.
     pub(super) fn close_folder(&mut self) {
+        self.sync_marks();
         self.teardown_loupe_state();
         self.finish_folder_jobs();
         self.forget_folder_decodes();

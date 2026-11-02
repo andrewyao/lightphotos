@@ -22,6 +22,10 @@ const RECENT_PREF: &str = "catalogs-recent";
 #[cfg(not(target_arch = "wasm32"))]
 const RECENT_MAX: usize = 10;
 
+/// How long the frame loop leaves a change to a folder's marks before it
+/// updates the catalog's copy.
+const MARKS_SYNC_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// What launch opened, and why it is not the catalog asked for, if so.
 pub(super) struct Launch {
     pub(super) catalog: Catalog,
@@ -205,9 +209,10 @@ impl App {
     }
 
     /// Bring the catalog's copy of the open folder's marks up to date with
-    /// the folder store. Once per frame, and before the folder store or
-    /// the catalog is replaced. Idempotent: an unchanged revision, or a
-    /// folder still loading, does nothing.
+    /// the folder store. Before the folder store or the catalog is
+    /// replaced; the frame loop goes through [`Self::sync_marks_if_due`].
+    /// Idempotent: an unchanged revision, or a folder still loading, does
+    /// nothing.
     pub(crate) fn sync_marks(&mut self) {
         let revision = self.folder_store.marks_revision();
         if revision == self.marks_synced {
@@ -219,6 +224,25 @@ impl App {
         let dir = dir.to_path_buf();
         self.catalog.record_marks(&dir, &marks);
         self.marks_synced = revision;
+        self.marks_synced_at = Some(Instant::now());
+    }
+
+    /// [`sync_marks`](Self::sync_marks) at most once per [`MARKS_SYNC_EVERY`].
+    /// It rebuilds and serializes every marked photo of the folder, which a
+    /// keystroke per rating must not pay for on a big folder. Returns whether
+    /// a sync is still waiting, so the frame loop comes back for it.
+    pub(crate) fn sync_marks_if_due(&mut self) -> bool {
+        if self.folder_store.marks_revision() == self.marks_synced {
+            return false;
+        }
+        if self
+            .marks_synced_at
+            .is_some_and(|at| at.elapsed() < MARKS_SYNC_EVERY)
+        {
+            return true;
+        }
+        self.sync_marks();
+        false
     }
 }
 
@@ -744,6 +768,53 @@ mod tests {
             ),
         ]);
         assert_eq!(app.catalog.load_shard(&photos), Some(want));
+    }
+
+    /// Rebuilding and serializing a folder's marks on every rating would
+    /// stall a big folder's keystrokes, so the frame loop takes them a
+    /// second apart. Leaving the folder takes whatever is waiting.
+    #[test]
+    fn the_frame_loop_updates_the_marks_copy_once_a_second_and_leaving_takes_the_rest() {
+        let (mut app, photos) = disk_app("marks-debounce");
+        load_folder(&mut app, &photos);
+        let (a, b) = (photos.join("a.jpg"), photos.join("b.jpg"));
+        let rated = |a: u8, b: u8| {
+            let rate = |stars| PhotoMarks {
+                rating: Some(stars),
+                ..Default::default()
+            };
+            let mut want = DirMarks::new();
+            for (name, stars) in [("a.jpg", a), ("b.jpg", b)] {
+                if stars > 0 {
+                    want.insert(name.to_string(), rate(stars));
+                }
+            }
+            Some(want)
+        };
+        let settle = |app: &mut App| {
+            app.catalog.flush_blocking(Duration::from_secs(10));
+            app.catalog.load_shard(&photos)
+        };
+
+        app.folder_store.set(&a, 4);
+        assert!(!app.sync_marks_if_due(), "the first change goes through");
+        assert_eq!(settle(&mut app), rated(4, 0));
+
+        app.folder_store.set(&b, 2);
+        assert!(
+            app.sync_marks_if_due(),
+            "the next waits, and asks to be polled"
+        );
+        assert_eq!(settle(&mut app), rated(4, 0), "not written yet");
+
+        app.marks_synced_at = Some(Instant::now() - Duration::from_secs(2));
+        assert!(!app.sync_marks_if_due());
+        assert_eq!(settle(&mut app), rated(4, 2));
+
+        app.folder_store.set(&a, 5);
+        assert!(app.sync_marks_if_due());
+        app.close_folder();
+        assert_eq!(settle(&mut app), rated(5, 2), "closing the folder takes it");
     }
 
     #[test]

@@ -487,7 +487,7 @@ impl App {
         // Outside the loader block below, because a queued sidecar write has
         // no loader to wait on and can outlive the folder it came from.
         self.pump_folder_store();
-        self.sync_marks();
+        let marks_waiting = self.sync_marks_if_due();
         self.catalog.pump();
         self.keep_status_alive();
         self.signals.flush_if_due();
@@ -627,6 +627,7 @@ impl App {
             } else if self.export_running()
                 || self.folder_store.backlog() > 0
                 || self.catalog.backlog() > 0
+                || marks_waiting
                 || immich_connecting
                 || vision_pending
                 || scoring
