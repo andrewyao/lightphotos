@@ -329,10 +329,12 @@ impl App {
             let tx = self.web.export_tx.clone();
             match result {
                 Ok(jpeg) => {
-                    let file_handles = self.web.file_handles.clone();
                     let dest = dest_dir.join(&filename);
                     wasm_bindgen_futures::spawn_local(async move {
-                        let result = crate::web::web_export_fs::WebFs::new(folder, file_handles)
+                        // Only reading a source looks a file handle up; a write
+                        // needs none, so the listing is not copied per photo.
+                        let no_sources = std::collections::HashMap::new();
+                        let result = crate::web::web_export_fs::WebFs::new(folder, no_sources)
                             .write_atomic(&dest, &jpeg)
                             .await
                             .map(|()| crate::export::ExportLanding::File(dest.clone()));
