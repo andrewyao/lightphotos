@@ -111,6 +111,81 @@ pub struct ImageRecord {
     /// sort. `None` while the photo has no edits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edited: Option<u64>,
+    /// Top-level fields this build doesn't know, from a later one. Filled by
+    /// [`parse_record`] rather than serde (a flattened map would buffer the
+    /// whole record, which `RawValue` in the masks can't read back), and
+    /// written back where they stood so this build's save doesn't drop them.
+    #[serde(
+        flatten,
+        skip_deserializing,
+        skip_serializing_if = "UnknownFields::is_empty"
+    )]
+    pub unknown: UnknownFields,
+}
+
+/// The fields of a record that this build doesn't read, kept as the JSON
+/// they came as.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct UnknownFields(std::collections::BTreeMap<String, Box<RawValue>>);
+
+impl UnknownFields {
+    /// The fields `ImageRecord` reads. A test keeps this honest.
+    const KNOWN: [&'static str; 10] = [
+        "rating",
+        "flag",
+        "label",
+        "adjustments",
+        "touchups",
+        "masks",
+        "detections",
+        "rotation",
+        "score",
+        "edited",
+    ];
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The fields of the record `bytes` holds that `ImageRecord` doesn't read.
+    fn of(bytes: &[u8]) -> Self {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = UnknownFields;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a sidecar record")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<UnknownFields, A::Error> {
+                let mut unknown = UnknownFields::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    if UnknownFields::KNOWN.contains(&key.as_str()) {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    } else {
+                        unknown.0.insert(key, map.next_value()?);
+                    }
+                }
+                Ok(unknown)
+            }
+        }
+        let mut de = serde_json::Deserializer::from_slice(bytes);
+        serde::Deserializer::deserialize_map(&mut de, Visitor).unwrap_or_default()
+    }
+}
+
+impl PartialEq for UnknownFields {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self
+                .0
+                .iter()
+                .zip(&other.0)
+                .all(|((ka, a), (kb, b))| ka == kb && a.get() == b.get())
+    }
 }
 
 /// A quality score and the edits it was measured on.
@@ -299,7 +374,8 @@ impl ImageRecord {
             && self.masks.is_empty()
             && self.detections.is_empty()
             && self.score.is_none()
-            && self.edited.is_none();
+            && self.edited.is_none()
+            && self.unknown.is_empty();
         debug_assert_eq!(
             empty,
             self.serializes_to_nothing(),
@@ -398,6 +474,7 @@ pub fn parse_record(
         ));
     }
     let mut rec: ImageRecord = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    rec.unknown = UnknownFields::of(bytes);
     rec.settle_edited(saved_at);
     Ok(rec)
 }
@@ -968,6 +1045,70 @@ mod tests {
         assert_eq!(rec.edited, None);
         rec.rating = None;
         assert!(rec.is_empty(), "an undone edit leaves no sidecar behind");
+    }
+
+    /// A later build's top-level field survives this build rating the photo,
+    /// and a record that holds only such a field is not deleted as empty.
+    #[test]
+    fn fields_a_later_build_added_survive_a_rewrite() {
+        let body = r#"{"rating":2,"cull_note":{"why":["blur"],"n":1.5}}"#;
+        let mut rec = parse_record(body.as_bytes(), || None).unwrap();
+        rec.rating = Some(4);
+        let written: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&rec).unwrap()).unwrap();
+        assert_eq!(written["rating"], 4);
+        assert_eq!(
+            written["cull_note"],
+            serde_json::json!({"why":["blur"],"n":1.5})
+        );
+
+        let mut only = parse_record(br#"{"cull_note":true}"#, || None).unwrap();
+        assert!(!only.is_empty());
+        only.unknown = UnknownFields::default();
+        assert!(only.is_empty());
+    }
+
+    /// `UnknownFields::KNOWN` is what stops a record's own field from being
+    /// read back as unknown and written twice.
+    #[test]
+    fn the_known_field_list_names_every_field_a_record_writes() {
+        let mut rec = parse_record(
+            br#"{"masks":[{"shape":{"kind":"radial","center":[0.5,0.5],"radii":[0.1,0.1]}}]}"#,
+            || None,
+        )
+        .unwrap();
+        rec.rating = Some(1);
+        rec.flag = Some(Flag::Pick);
+        rec.label = Some(ColorLabel::Red);
+        rec.adjustments.exposure = 1.0;
+        rec.touchups = vec![TouchUp {
+            center: [0.4, 0.5],
+            radius: 0.02,
+            source: [0.6, 0.5],
+            feather: 0.5,
+            delta: [0.01, -0.02, 0.0],
+            opacity: 1.0,
+        }];
+        rec.detections.set(
+            crate::develop::DetectTarget::Sky,
+            "5be1c0a39d2f7e14".parse().ok(),
+        );
+        rec.rotation = 1;
+        rec.score = Some(StoredScore {
+            score: sample_score(),
+            edits: 1,
+        });
+        rec.edited = Some(1);
+        let bytes = serde_json::to_vec(&rec).unwrap();
+
+        let written: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&bytes).unwrap();
+        let mut keys: Vec<String> = written.keys().cloned().collect();
+        keys.sort();
+        let mut known = UnknownFields::KNOWN.map(String::from).to_vec();
+        known.sort();
+        assert_eq!(keys, known);
+        assert!(UnknownFields::of(&bytes).is_empty());
     }
 
     #[test]
