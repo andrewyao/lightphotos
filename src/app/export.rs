@@ -241,8 +241,14 @@ impl App {
 
     /// Why Export can't run right now, shown under the disabled button.
     pub(crate) fn export_blocker(&self) -> Option<&'static str> {
+        self.export_blocker_for(&self.action_paths())
+    }
+
+    /// [`export_blocker`](Self::export_blocker) for a batch of `paths`, which
+    /// an agent's export can name outside the selection.
+    fn export_blocker_for(&self, paths: &[PathBuf]) -> Option<&'static str> {
         let t = crate::i18n::t();
-        if self.action_count() == 0 {
+        if paths.is_empty() {
             return Some(t.export_nothing_selected);
         }
         // One batch at a time. A second batch would pick the same file names
@@ -261,7 +267,7 @@ impl App {
         // nothing. One that failed exports as nothing too, but on purpose.
         if self
             .coverage
-            .pending_among(&self.action_paths(), &self.masks, &self.detections)
+            .pending_among(paths, &self.masks, &self.detections)
             > 0
         {
             return Some(t.export_masks_detecting);
@@ -313,7 +319,13 @@ impl App {
     ) -> Result<bool, String> {
         let saved = settings.map(|given| std::mem::replace(&mut self.exports.settings, given));
         let nothing_selected = crate::i18n::t().export_nothing_selected;
-        let started = match self.export_blocker().filter(|&why| why != nothing_selected) {
+        // The frame loop's kick covers the selection only. Start detection
+        // for named photos outside it, or the blocker would never lift.
+        self.coverage.kick(&paths, &self.masks, &self.detections);
+        let started = match self
+            .export_blocker_for(&paths)
+            .filter(|&why| why != nothing_selected)
+        {
             Some(why) => Err(why.to_string()),
             None => self.start_export(paths, confine),
         };
@@ -1423,6 +1435,27 @@ mod form_tests {
         app.focus = Region::Grid;
         app.sel = Some(0);
         (app, paths)
+    }
+
+    /// An export that names a photo outside the selection waits for that
+    /// photo's detection too, whether or not anything is selected.
+    #[test]
+    fn an_export_waits_for_the_detections_of_the_photos_it_names() {
+        use crate::develop::{DetectTarget, Mask};
+        use crate::scoring::detect::DetectError;
+
+        let (mut app, paths) = folder_app(2);
+        app.coverage = crate::app::coverage::CoverageStore::with_detector(|_, _, _| {
+            Err(DetectError::Failed("not today".into()))
+        });
+        app.masks
+            .insert(paths[1].clone(), vec![Mask::detected(DetectTarget::Sky)]);
+        let waiting = Err(crate::i18n::t().export_masks_detecting.to_string());
+
+        assert_eq!(app.export_with(vec![paths[1].clone()], None, None), waiting);
+        app.sel = None;
+        app.selected.clear();
+        assert_eq!(app.export_with(vec![paths[1].clone()], None, None), waiting);
     }
 
     /// Export's two sections, Destination and Output, set each label over
