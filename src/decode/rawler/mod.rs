@@ -563,7 +563,62 @@ fn develop_raw_image_to_linear_f16(
 pub fn fill_raw_metadata_from_path(meta: &mut ImageMetadata, path: &Path) {
     if let Ok(source) = rawler::rawsource::RawSource::new(path) {
         fill_from_raw_source(meta, &source);
+        meta.source_size = raw_display_size(&source);
     }
+}
+
+/// The size the full develop of `source` gives, in display orientation, read
+/// from the file's headers alone. `image::image_dimensions`, which reads the
+/// size of every other photo, picks its decoder by extension and has none
+/// for a RAW.
+fn raw_display_size(source: &rawler::rawsource::RawSource) -> Option<(u32, u32)> {
+    check_rawler_size_limit(source).ok()?;
+    let read = std::panic::AssertUnwindSafe(|| {
+        let raw = rawler::decode_dummy(source).ok()?;
+        let params = rawler::decoders::RawDecodeParams::default();
+        let orientation = rawler::get_decoder(source)
+            .ok()
+            .and_then(|decoder| decoder.raw_metadata(source, &params).ok())
+            .and_then(|meta| meta.exif.orientation)
+            .map(|code| exif_code_from_rawler_orientation(rawler::Orientation::from_u16(code)))
+            .unwrap_or_else(|| exif_code_from_rawler_orientation(raw.orientation));
+        developed_size(&raw, orientation)
+    });
+    std::panic::catch_unwind(read).ok().flatten()
+}
+
+/// What `develop_raw_image_to_linear_f16` makes of `raw` at full size: the
+/// default crop, clamped to the active area as the develop clamps it, or the
+/// active area, or the whole sensor, turned by EXIF `orientation`. `None`
+/// for a rotated Fuji sensor, whose develop is not the area's size.
+fn developed_size(raw: &rawler::RawImage, orientation: u8) -> Option<(u32, u32)> {
+    if raw.fuji_rotation_width.is_some() {
+        return None;
+    }
+    // Left, top, right and bottom.
+    let edges = |r: &rawler::imgop::Rect| {
+        (
+            r.p.x,
+            r.p.y,
+            r.p.x.saturating_add(r.d.w),
+            r.p.y.saturating_add(r.d.h),
+        )
+    };
+    let (x0, y0, x1, y1) = raw
+        .active_area
+        .as_ref()
+        .map_or((0, 0, raw.width, raw.height), edges);
+    let (cx0, cy0, cx1, cy1) = raw.crop_area.as_ref().map_or((x0, y0, x1, y1), |crop| {
+        let (l, t, r, b) = edges(crop);
+        (l.max(x0), t.max(y0), r.min(x1), b.min(y1))
+    });
+    let side = |lo: usize, hi: usize| u32::try_from(hi.checked_sub(lo)?).ok().filter(|&n| n > 0);
+    let (w, h) = (side(cx0, cx1)?, side(cy0, cy1)?);
+    Some(if matches!(orientation, 5..=8) {
+        (h, w)
+    } else {
+        (w, h)
+    })
 }
 
 /// [`fill_raw_metadata_from_path`] for a whole RAW file in memory.
@@ -715,7 +770,10 @@ fn embedded_image_from_bytes(bytes: &[u8], max_px: u32, any_format: bool) -> Opt
 
 #[cfg(test)]
 mod tests {
-    use super::{check_rawler_size_limit, fuji_dynamic_range_gain, linear_rgb, padded_to_tiles};
+    use super::{
+        check_rawler_size_limit, developed_size, fuji_dynamic_range_gain, linear_rgb,
+        padded_to_tiles,
+    };
     use rawler::imgop::develop::Intermediate;
     use rawler::pixarray::{Color2D, PixF32};
 
@@ -879,6 +937,34 @@ mod tests {
             (full_lo - half_lo).abs() <= 0.02 * full_lo,
             "{full_lo} vs {half_lo}"
         );
+    }
+
+    /// A RAW's size, which `fit` and the full-decode gate read, is what the
+    /// develop gives: the crop inside the active area, turned like the image.
+    #[test]
+    fn a_raws_display_size_is_its_crop_in_the_active_area_turned() {
+        let mut raw = bayer(33, 25, "RGGB", 1000);
+        assert_eq!(developed_size(&raw, 1), Some((33, 25)));
+        raw.active_area = Some(rect(1, 1, 32, 24));
+        assert_eq!(developed_size(&raw, 1), Some((32, 24)));
+        raw.crop_area = Some(rect(3, 3, 24, 16));
+        assert_eq!(developed_size(&raw, 1), Some((24, 16)));
+        assert_eq!(developed_size(&raw, 6), Some((16, 24)), "turned a quarter");
+        assert_eq!(developed_size(&raw, 3), Some((24, 16)), "half a turn");
+
+        let mut bad = bayer(40, 24, "RGGB", 1000);
+        bad.crop_area = Some(rect(30, 0, 20, 24));
+        assert_eq!(
+            developed_size(&bad, 1),
+            Some((10, 24)),
+            "clamped as develop does"
+        );
+        bad.crop_area = Some(rect(50, 0, 20, 24));
+        assert_eq!(developed_size(&bad, 1), None, "nothing left of the crop");
+
+        let mut fuji = bayer(40, 24, "RGGB", 1000);
+        fuji.fuji_rotation_width = Some(30);
+        assert_eq!(developed_size(&fuji, 1), None);
     }
 
     /// A default crop reaching past the active area is bad metadata. Both

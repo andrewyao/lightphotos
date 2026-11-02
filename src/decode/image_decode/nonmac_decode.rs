@@ -180,20 +180,23 @@ fn stamp_from_exif(exif: &exif::Exif) -> Option<crate::decode::image_decode::Cap
 pub fn read_metadata(path: &Path) -> ImageMetadata {
     let mut meta = ImageMetadata::default();
     crate::decode::image_decode::fill_file_facts(&mut meta, path);
-    meta.source_size = pixel_size(path).map(|(w, h)| {
-        if matches!(orientation_of(path), 5..=8) {
-            (h, w)
-        } else {
-            (w, h)
-        }
-    });
     if is_raw_extension(path) {
+        // Sets `source_size` too: `pixel_size` has no decoder for a RAW.
         crate::decode::rawler::fill_raw_metadata_from_path(&mut meta, path);
-    } else if let Ok(file) = std::fs::File::open(path) {
-        if let Ok(exif) =
-            exif::Reader::new().read_from_container(&mut std::io::BufReader::new(file))
-        {
-            fill_from_exif(&mut meta, &exif);
+    } else {
+        meta.source_size = pixel_size(path).map(|(w, h)| {
+            if matches!(orientation_of(path), 5..=8) {
+                (h, w)
+            } else {
+                (w, h)
+            }
+        });
+        if let Ok(file) = std::fs::File::open(path) {
+            if let Ok(exif) =
+                exif::Reader::new().read_from_container(&mut std::io::BufReader::new(file))
+            {
+                fill_from_exif(&mut meta, &exif);
+            }
         }
     }
     meta
