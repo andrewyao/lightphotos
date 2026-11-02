@@ -1571,6 +1571,20 @@ impl App {
             let listing_succeeded = result.is_ok();
             match result {
                 Ok(listing) => {
+                    // A file or folder deleted or renamed outside the app is
+                    // not in the listing, and must stop being a photo here.
+                    let listed_images = listing.images.iter().map(|(p, _)| p.clone()).collect();
+                    crate::paths::drop_unlisted_children(
+                        &mut self.web.file_handles,
+                        &dir,
+                        &listed_images,
+                    );
+                    let listed_dirs = listing.subdirs.iter().map(|(p, _)| p.clone()).collect();
+                    crate::paths::drop_unlisted_children(
+                        &mut self.web.dir_handles,
+                        &dir,
+                        &listed_dirs,
+                    );
                     let mut subdir_paths = Vec::with_capacity(listing.subdirs.len());
                     for (path, handle) in listing.subdirs {
                         subdir_paths.push(path.clone());

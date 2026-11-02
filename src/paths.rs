@@ -43,6 +43,19 @@ pub fn export_name(
     }
 }
 
+/// Drops the entries of `handles` that sit directly in `dir` and are not in
+/// `listed`, which a fresh listing of `dir` just returned: what was deleted or
+/// renamed outside the app. Entries of other folders stay. The browser keeps
+/// its file and folder handles by path, and only a listing can tell it a file
+/// is gone.
+pub fn drop_unlisted_children<V>(
+    handles: &mut std::collections::HashMap<PathBuf, V>,
+    dir: &Path,
+    listed: &HashSet<PathBuf>,
+) {
+    handles.retain(|path, _| path.parent() != Some(dir) || listed.contains(path));
+}
+
 /// The names [`export_target`] has handed out in one batch, which are not
 /// on disk yet.
 #[cfg(not(target_arch = "wasm32"))]
@@ -447,6 +460,30 @@ mod tests {
         let read = read_capped(&file, 1 << 20);
         let _ = std::fs::remove_file(&file);
         assert!(matches!(read, Err(CappedReadError::TooBig(_))), "{read:?}");
+    }
+
+    #[test]
+    fn a_listing_drops_the_handles_of_files_it_no_longer_holds() {
+        let mut handles: std::collections::HashMap<PathBuf, u8> = [
+            ("/Trip/a.jpg", 1),
+            ("/Trip/gone.jpg", 2),
+            ("/Trip/Day2/b.jpg", 3),
+            ("/Other/gone.jpg", 4),
+        ]
+        .into_iter()
+        .map(|(p, v)| (PathBuf::from(p), v))
+        .collect();
+        let listed: HashSet<PathBuf> = [PathBuf::from("/Trip/a.jpg")].into();
+
+        drop_unlisted_children(&mut handles, Path::new("/Trip"), &listed);
+
+        let mut kept: Vec<_> = handles.keys().map(|p| p.display().to_string()).collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            ["/Other/gone.jpg", "/Trip/Day2/b.jpg", "/Trip/a.jpg"],
+            "only the listed folder's children, and only the missing ones, go"
+        );
     }
 
     #[test]
