@@ -847,6 +847,11 @@ pub struct Loader {
     viewport_inflight: HashSet<(PathBuf, u32)>,
     /// Failed thumbnail keys, so callers stop re-requesting them every frame.
     thumb_failed: HashSet<(PathBuf, u32)>,
+    /// Loupe views, and full decodes, that failed, so a corrupt photo on
+    /// screen is not queued again every frame. Cleared with the Loupe's other
+    /// decodes, as a folder switch or refresh does.
+    view_failed: HashSet<(PathBuf, u32)>,
+    full_failed: HashSet<PathBuf>,
     thumb_capacity: usize,
     /// See [`Loader::thumb_epoch`].
     thumb_epoch: u64,
@@ -975,6 +980,8 @@ impl Loader {
             thumb_inflight: HashSet::new(),
             viewport_inflight: HashSet::new(),
             thumb_failed: HashSet::new(),
+            view_failed: HashSet::new(),
+            full_failed: HashSet::new(),
             thumb_capacity: limits.thumbs,
             thumb_epoch: next_thumb_epoch(),
             meta_inflight: HashSet::new(),
@@ -1025,7 +1032,10 @@ impl Loader {
         if escalate {
             self.escalation_wanted.insert(key.clone());
         }
-        if self.has_preview(&key) || self.preview_inflight.contains(&key) {
+        if self.has_preview(&key)
+            || self.preview_inflight.contains(&key)
+            || self.view_failed.contains(&key)
+        {
             return;
         }
         if let Some(img) = self.previews.get(&key) {
@@ -1080,7 +1090,10 @@ impl Loader {
             return;
         }
         let key = (path.to_path_buf(), target_px);
-        if self.has_preview(&key) || self.preview_inflight.contains(&key) {
+        if self.has_preview(&key)
+            || self.preview_inflight.contains(&key)
+            || self.view_failed.contains(&key)
+        {
             return;
         }
         if self.enqueue(Job::Preview(path.to_path_buf(), target_px, self.generation))
@@ -1098,7 +1111,10 @@ impl Loader {
         allow(dead_code, reason = "the web build has no full-resolution tier")
     )]
     pub fn request_full(&mut self, path: PathBuf) {
-        if self.fulls.contains(&path) || self.inflight.contains(&path) {
+        if self.fulls.contains(&path)
+            || self.inflight.contains(&path)
+            || self.full_failed.contains(&path)
+        {
             return;
         }
         if self.enqueue(Job::Full(path.clone(), self.full_target, self.generation)) == Enqueued::Yes
@@ -1459,6 +1475,8 @@ impl Loader {
         self.speed_keys.clear();
         self.preview_inflight.clear();
         self.speed_inflight.clear();
+        self.view_failed.clear();
+        self.full_failed.clear();
         self.embedded_previews.clear();
         let Ok(mut q) = lock_queue(&self.shared) else {
             return;
@@ -1866,7 +1884,10 @@ impl Loader {
                             self.insert_preview(key, Arc::new(img));
                             full.push(path);
                         }
-                        Err(e) => eprintln!("preview decode failed for {}: {e}", path.display()),
+                        Err(e) => {
+                            eprintln!("preview decode failed for {}: {e}", path.display());
+                            self.view_failed.insert(key);
+                        }
                     }
                 }
                 JobResult::Full(path, _, r) => {
@@ -1878,7 +1899,10 @@ impl Loader {
                             self.insert(path.clone(), Arc::new(img));
                             full.push(path);
                         }
-                        Err(e) => eprintln!("decode failed for {}: {e}", path.display()),
+                        Err(e) => {
+                            eprintln!("decode failed for {}: {e}", path.display());
+                            self.full_failed.insert(path);
+                        }
                     }
                 }
                 JobResult::Thumb(path, max_px, r) => {
@@ -2414,6 +2438,36 @@ mod tests {
         assert!(loader
             .get_full(&path(&(CacheLimits::PLATFORM.fulls + 1).to_string()))
             .is_some());
+    }
+
+    /// The Loupe asks for its photo every frame. A photo that will not decode
+    /// must stop being queued once it has failed, not run Speed then Preview
+    /// over and over.
+    #[test]
+    fn a_photo_that_fails_to_decode_is_not_queued_again_every_frame() {
+        let dir = std::env::temp_dir().join(format!("lp-loupe-failed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("bad.jpg");
+        std::fs::write(&bad, b"not a jpeg at all").unwrap();
+
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
+        loader.request_preview(bad.clone(), 1536);
+        loader.request_full(bad.clone());
+        let started = std::time::Instant::now();
+        while loader.has_pending_image() {
+            assert!(started.elapsed().as_secs() < 30, "the decode never ended");
+            loader.poll_all();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        loader.request_preview(bad.clone(), 1536);
+        loader.request_full(bad);
+        assert!(
+            !loader.has_pending_image(),
+            "a failed decode was queued again"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
