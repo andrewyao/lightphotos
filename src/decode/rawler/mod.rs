@@ -709,7 +709,19 @@ pub fn rawler_embedded_for_faces(bytes: &[u8], max_px: u32) -> Option<DecodedIma
     embedded_image_from_bytes(bytes, max_px, true)
 }
 
+/// Whether `bytes` can be a RAF or a CR3, the two containers whose camera
+/// JPEG [`rawler_full_image_from_bytes`] returns: a RAF opens with
+/// `FUJIFILM`, and a CR3 is an ISO base media file, whose first box is `ftyp`.
+/// Read before rawler is handed the file, since `RawSource::new_from_slice`
+/// copies all of it, and a JPEG, PNG, TIFF or ARW would only be turned away.
+fn may_be_raf_or_cr3(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"FUJIFILM") || bytes.get(4..8) == Some(b"ftyp".as_slice())
+}
+
 fn embedded_image_from_bytes(bytes: &[u8], max_px: u32, any_format: bool) -> Option<DecodedImage> {
+    if !any_format && !may_be_raf_or_cr3(bytes) {
+        return None;
+    }
     let run = std::panic::AssertUnwindSafe(|| -> Option<DecodedImage> {
         let source = rawler::rawsource::RawSource::new_from_slice(bytes);
         let params = rawler::decoders::RawDecodeParams::default();
@@ -772,7 +784,7 @@ fn embedded_image_from_bytes(bytes: &[u8], max_px: u32, any_format: bool) -> Opt
 mod tests {
     use super::{
         check_rawler_size_limit, developed_size, fuji_dynamic_range_gain, linear_rgb,
-        padded_to_tiles,
+        may_be_raf_or_cr3, padded_to_tiles, rawler_full_image_from_bytes,
     };
     use rawler::imgop::develop::Intermediate;
     use rawler::pixarray::{Color2D, PixF32};
@@ -937,6 +949,22 @@ mod tests {
             (full_lo - half_lo).abs() <= 0.02 * full_lo,
             "{full_lo} vs {half_lo}"
         );
+    }
+
+    /// A JPEG, PNG or TIFF-based RAW is turned away on its first bytes, so
+    /// the thumbnail path does not copy the whole file into rawler for it.
+    #[test]
+    fn only_a_raf_or_cr3_is_handed_to_rawler_for_its_embedded_image() {
+        assert!(may_be_raf_or_cr3(b"FUJIFILMCCD-RAW 0201FF392501"));
+        assert!(may_be_raf_or_cr3(b"\0\0\0\x18ftypcrx \0\0\0\x01crx isom"));
+        assert!(!may_be_raf_or_cr3(&[
+            0xFF, 0xD8, 0xFF, 0xE0, 0, 16, b'J', b'F'
+        ]));
+        assert!(!may_be_raf_or_cr3(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"));
+        assert!(!may_be_raf_or_cr3(&tiff(&[&[(256, 8), (257, 8)]])));
+        assert!(!may_be_raf_or_cr3(b"ftyp"));
+        assert!(!may_be_raf_or_cr3(&[]));
+        assert!(rawler_full_image_from_bytes(&[0xFF, 0xD8, 0xFF, 0xD9], 512).is_none());
     }
 
     /// A RAW's size, which `fit` and the full-decode gate read, is what the
