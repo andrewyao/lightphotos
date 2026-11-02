@@ -200,8 +200,9 @@ pub struct ScoreJob {
 impl ScoreJob {
     /// Queue `paths`, skipping any already waiting or in flight.
     pub fn add(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        let mut queued: HashSet<PathBuf> = self.pending.iter().cloned().collect();
         for p in paths {
-            if !self.in_flight.contains(&p) && !self.pending.contains(&p) {
+            if !self.in_flight.contains(&p) && queued.insert(p.clone()) {
                 self.pending.push_back(p);
                 self.total += 1;
             }
@@ -278,6 +279,17 @@ mod tests {
         job.add(paths(&["a", "c", "d"]));
         assert_eq!(job.progress(), (0, 4));
         assert_eq!(job.take(9), paths(&["b", "c", "d"]));
+    }
+
+    #[test]
+    fn adding_a_whole_large_folder_at_once_stays_linear() {
+        // A quadratic scan of the queue takes minutes at this size.
+        let mut job = ScoreJob::default();
+        let folder = || (0..100_000).map(|i| PathBuf::from(format!("/photos/IMG_{i}.jpg")));
+        job.add(folder());
+        job.add(folder());
+        assert_eq!(job.progress(), (0, 100_000));
+        assert_eq!(job.take(1), paths(&["/photos/IMG_0.jpg"]));
     }
 
     #[test]
