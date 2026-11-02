@@ -217,6 +217,9 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = [
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
+# Converts a photo's embedded ICC profile to sRGB at decode, where macOS
+# leaves that to ImageIO. Pure Rust, and already in the graph through `image`.
+moxcms = "0.8"
 mozjpeg-rs = "0.9.2"
 # Camera RAW decode. LGPL-2.1, so it stays out of the macOS build, which
 # decodes RAW through ImageIO instead. Redirected to a patched local vendor copy for every target via

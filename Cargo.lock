@@ -2220,6 +2220,7 @@ dependencies = [
  "js-sys",
  "kamadak-exif",
  "lightwatch-probe",
+ "moxcms",
  "mozjpeg-rs",
  "muda",
  "objc2 0.6.4",

@@ -112,6 +112,7 @@ pub fn decode_fit(
     let mut decoder = reader.into_decoder().map_err(|e| e.to_string())?;
     let orientation =
         orientation.unwrap_or_else(|| decoder.orientation().unwrap_or(Orientation::NoTransforms));
+    let icc = decoder.icc_profile().ok().flatten();
     let src = decoder.dimensions();
     check_decode_size(src.0, src.1)?;
     let plan = Plan::new(src, max_dim);
@@ -129,7 +130,55 @@ pub fn decode_fit(
         )))
     };
     let img = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
-    fit_and_orient(img, &plan, orientation)
+    let mut fitted = fit_and_orient(img, &plan, orientation)?;
+    if let Some(icc) = icc {
+        convert_to_srgb(&mut fitted, &icc);
+    }
+    Ok(fitted)
+}
+
+/// Takes `img`, whose colors are in the embedded ICC profile `icc`, to sRGB,
+/// which is what the rest of the app and the exports' sRGB tag assume (macOS
+/// has ImageIO do this). It runs on the fitted image, so a thumbnail pays for
+/// its own pixels. A profile that is not RGB, will not parse, or has sRGB's
+/// primaries leaves `img` as it is. Row by row, so it needs no second copy.
+fn convert_to_srgb(img: &mut RgbaImage, icc: &[u8]) {
+    use moxcms::{ColorProfile, DataColorSpace, Layout, TransformOptions};
+    let Ok(from) = ColorProfile::new_from_slice(icc) else {
+        return;
+    };
+    let srgb = ColorProfile::new_srgb();
+    let near = |a: moxcms::Xyzd, b: moxcms::Xyzd| {
+        [(a.x, b.x), (a.y, b.y), (a.z, b.z)]
+            .iter()
+            .all(|(a, b)| (a - b).abs() < 0.005)
+    };
+    if from.color_space != DataColorSpace::Rgb
+        || (near(from.red_colorant, srgb.red_colorant)
+            && near(from.green_colorant, srgb.green_colorant)
+            && near(from.blue_colorant, srgb.blue_colorant))
+    {
+        return;
+    }
+    let Ok(transform) = from.create_transform_8bit(
+        Layout::Rgba,
+        &srgb,
+        Layout::Rgba,
+        TransformOptions::default(),
+    ) else {
+        return;
+    };
+    let row_len = img.width() as usize * 4;
+    if row_len == 0 {
+        return;
+    }
+    let mut row = vec![0u8; row_len];
+    for line in img.chunks_exact_mut(row_len) {
+        row.copy_from_slice(line);
+        if transform.transform(&row, line).is_err() {
+            return;
+        }
+    }
 }
 
 /// [`decode_fit`]'s steps after the decode, for an image another decoder
@@ -477,6 +526,43 @@ fn walk<S: Copy, A: Copy + Default, const C: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 4x4 PNG of one color, tagged with `profile`.
+    fn png_in(profile: &moxcms::ColorProfile, rgb: [u8; 3]) -> Vec<u8> {
+        use image::ImageEncoder;
+        let pixels = RgbaImage::from_pixel(4, 4, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
+        let mut png = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut png);
+        encoder.set_icc_profile(profile.encode().unwrap()).unwrap();
+        encoder
+            .write_image(pixels.as_raw(), 4, 4, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        png
+    }
+
+    /// A Display P3 photo's numbers are P3's, so a muted red is a stronger one
+    /// in sRGB. Left as decoded it showed washed out, and was then exported
+    /// with an sRGB tag it did not match.
+    #[test]
+    fn a_photo_in_a_wider_profile_decodes_to_srgb() {
+        let p3 = png_in(&moxcms::ColorProfile::new_display_p3(), [128, 64, 64]);
+        let px = *decode_fit(&p3, None, 64, None).unwrap().get_pixel(0, 0);
+        assert!(px[0] > 130 && px[1] < 62 && px[2] < 64, "{px:?}");
+        assert_eq!(px[3], 255);
+
+        let srgb = png_in(&moxcms::ColorProfile::new_srgb(), [128, 64, 64]);
+        let px = *decode_fit(&srgb, None, 64, None).unwrap().get_pixel(0, 0);
+        assert_eq!(px.0, [128, 64, 64, 255], "an sRGB photo is left alone");
+    }
+
+    /// An embedded profile is whatever the file's writer put there.
+    #[test]
+    fn a_profile_that_will_not_parse_leaves_the_pixels_as_decoded() {
+        let mut img = RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]));
+        convert_to_srgb(&mut img, b"not an icc profile");
+        convert_to_srgb(&mut img, &[]);
+        assert_eq!(img.get_pixel(0, 0).0, [10, 20, 30, 255]);
+    }
 
     #[test]
     fn a_block_shrink_averages_whole_blocks_and_crops_the_partial_edge() {
