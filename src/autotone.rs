@@ -1,9 +1,11 @@
 //! Auto Tone: pick Develop slider values from a photo's histogram, the way a
 //! person does it by hand.
 //!
-//! Exposure moves the median to a little above the middle. Highlights then
-//! come down and Shadows come up until neither end of the histogram piles up
-//! against its wall. Those two moves shift the median, so the loop repeats.
+//! Exposure moves the median to a little above the middle. Highlights and
+//! Shadows then pull each end of the histogram off its wall if it piles up
+//! there. A top that stops well short of white is pushed out with more
+//! Exposure, so the photo uses its range. Those moves shift the median, so
+//! the loop repeats.
 //! Whites, Blacks and Contrast stay at zero.
 //!
 //! Slider values are solved by bisection against our real tone pipeline
@@ -26,6 +28,15 @@ const TARGET_MEDIAN: f32 = 0.55;
 const TOP_LEVEL: f32 = 240.0 / 255.0;
 const BOTTOM_LEVEL: f32 = 15.0 / 255.0;
 const END_PILE_FRACTION: f32 = 0.01;
+
+/// Where a top that stops short is pushed to: the 99th percentile aims for
+/// this display level. A top already between it and the pile-up band is left
+/// alone, so a photo that fills the range is untouched. The bottom is never
+/// deepened: darker Shadows only add shadow area.
+const TOP_TARGET: f32 = 0.90;
+
+/// Lifting the top with Exposure never takes the median past this.
+const MAX_MEDIAN: f32 = 0.70;
 
 /// Passes over the loop. Highlights and Shadows shift the median, so one pass
 /// isn't enough. Four settle well inside `edit_signature`'s 1e-3 rounding.
@@ -251,6 +262,23 @@ pub(crate) fn analyze(samples: &[[f32; 3]], format: PixelFormat) -> Adjustments 
             &mut adj,
             EXPOSURE_RANGE,
             TARGET_MEDIAN,
+            |a| &mut a.exposure,
+            median,
+        );
+
+        // A top that stops short is lifted with Exposure, since Highlights
+        // barely moves a bright, even mass like fog. The median caps the lift.
+        hold_above(
+            &mut adj,
+            EXPOSURE_RANGE,
+            TOP_TARGET,
+            |a| &mut a.exposure,
+            top,
+        );
+        hold_below(
+            &mut adj,
+            EXPOSURE_RANGE,
+            MAX_MEDIAN,
             |a| &mut a.exposure,
             median,
         );
@@ -634,13 +662,14 @@ mod tests {
     }
 
     #[test]
-    fn a_bright_photo_is_brought_down_to_the_target_median() {
+    fn a_bright_photo_is_brought_down_toward_the_target_median() {
         let photo = bright_pile(0.3, 2, 512);
         let adj = analyze(&photo, PixelFormat::Srgb8);
         assert!(adj.exposure < 0.0, "exposure {}", adj.exposure);
         let median = percentile_under(&photo, &adj, 0.50);
+        // Lifting a short top may carry the median up to `MAX_MEDIAN`.
         assert!(
-            (median - TARGET_MEDIAN).abs() < MEDIAN_TOLERANCE,
+            (TARGET_MEDIAN - MEDIAN_TOLERANCE..=MAX_MEDIAN + MEDIAN_TOLERANCE).contains(&median),
             "median {median} in {adj:?}"
         );
     }
@@ -649,7 +678,7 @@ mod tests {
     /// has nothing to fix.
     #[test]
     fn a_photo_without_pile_ups_keeps_highlights_and_shadows_at_zero() {
-        let photo = ramp(0.15, 0.9, 1024);
+        let photo = ramp(0.05, 0.92, 1024);
         let adj = analyze(&photo, PixelFormat::Srgb8);
         assert_eq!((adj.highlights, adj.shadows), (0.0, 0.0), "{adj:?}");
     }
@@ -714,6 +743,20 @@ mod tests {
             after <= original + 0.01,
             "{after} blown against {original} before, in {adj:?}"
         );
+    }
+
+    /// A foggy photo whose top stops well short of white has it lifted with
+    /// Exposure. Its dark end is left alone: Shadows never goes negative.
+    #[test]
+    fn a_top_that_stops_short_is_pushed_out_and_the_bottom_is_not_deepened() {
+        let photo = ramp(0.12, 0.86, 1024);
+        let before = Adjustments::default();
+        let adj = analyze(&photo, PixelFormat::Srgb8);
+        assert!(adj.shadows >= 0.0, "{adj:?}");
+        let top = percentile_under(&photo, &adj, 0.99);
+        assert!(top > percentile_under(&photo, &before, 0.99), "{top}");
+        let median = percentile_under(&photo, &adj, 0.50);
+        assert!(median <= MAX_MEDIAN + MEDIAN_TOLERANCE, "median {median}");
     }
 
     #[test]
