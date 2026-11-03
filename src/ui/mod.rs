@@ -521,6 +521,16 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             toolbar::toolbar_spacing(ui);
             ui.add_space(font_size::px(ui.style(), 4.0));
             ui.horizontal(|ui| {
+                // One height for the catalog picker, Undo, Redo and the
+                // buttons at the right, whatever each one holds.
+                let font = egui::TextStyle::Button.resolve(ui.style());
+                let text_h = ui.fonts_mut(|f| f.row_height(&font));
+                let height = ui
+                    .spacing()
+                    .interact_size
+                    .y
+                    .max(text_h + 2.0 * ui.spacing().button_padding.y);
+                ui.spacing_mut().interact_size.y = height;
                 ui.add_space(font_size::px(ui.style(), 8.0));
                 let font_id = egui::TextStyle::Heading.resolve(ui.style());
                 let mut job = egui::text::LayoutJob::default();
@@ -617,7 +627,7 @@ fn catalog_picker(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 fn undo_redo_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let size = egui::vec2(
         font_size::px(ui.style(), 44.0),
-        font_size::px(ui.style(), 30.0),
+        ui.spacing().interact_size.y,
     );
     let (undo, redo) = (t().menu.undo, t().menu.redo);
     let buttons = [
