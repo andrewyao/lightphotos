@@ -624,20 +624,25 @@ fn undo_redo_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         (
             false,
             app.undo_available(),
+            undo,
             format!("{undo} ({})", crate::i18n::keys("Cmd+Z")),
             UiAction::Undo,
         ),
         (
             true,
             app.redo_available(),
+            redo,
             format!("{redo} ({})", crate::i18n::keys("Cmd+Shift+Z")),
             UiAction::Redo,
         ),
     ];
-    for (mirror, enabled, tip, action) in buttons {
+    for (mirror, enabled, label, tip, action) in buttons {
         let clicked = ui
             .add_enabled_ui(enabled, |ui| {
                 let response = ui.add(egui::Button::new("").min_size(size));
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label)
+                });
                 let color = ui.style().interact(&response).fg_stroke.color;
                 paint_undo_arrow(
                     ui.painter(),
