@@ -457,6 +457,22 @@ fn flag(flag: FlagChange) -> Command {
     })
 }
 
+impl App {
+    /// Presses Cmd+Z, or Cmd+Shift+Z for `redo`, as the header buttons do:
+    /// the TouchUp tool's own undo, the input rules and the read-only gate
+    /// all follow the keyboard's.
+    pub(crate) fn press_undo(&mut self, redo: bool) {
+        let mods = if redo {
+            winit::keyboard::ModifiersState::SUPER | winit::keyboard::ModifiersState::SHIFT
+        } else {
+            winit::keyboard::ModifiersState::SUPER
+        };
+        let held = std::mem::replace(&mut self.modifiers, mods);
+        self.handle_key(KeyCode::KeyZ);
+        self.modifiers = held;
+    }
+}
+
 /// Whether `handle_key` binds the key to an edit of the open folder's
 /// photos: a rating, label, flag, rotation, group, crop, mask, touch-up,
 /// develop edit, paste, undo, redo or delete. Keep in step with `handle_key`.
@@ -596,6 +612,18 @@ mod tests {
             paths.iter().all(|p| app.rating_of(p) == 0),
             "0 clears them all"
         );
+    }
+
+    #[test]
+    fn cmd_z_takes_back_a_rating_made_with_a_digit() {
+        let (mut app, paths) = folder_app(3);
+        app.select_single(1);
+        press(&mut app, ModifiersState::empty(), KeyCode::Digit4);
+        assert_eq!(app.rating_of(&paths[1]), 4);
+        press(&mut app, CMD, KeyCode::KeyZ);
+        assert_eq!(app.rating_of(&paths[1]), 0);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyZ);
+        assert_eq!(app.rating_of(&paths[1]), 4);
     }
 
     #[test]
@@ -1896,6 +1924,28 @@ mod tests {
         assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 0.0);
         press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyZ);
         assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 1.0);
+    }
+
+    #[test]
+    fn the_header_buttons_undo_and_redo_as_the_keys_do() {
+        let (mut app, paths) = folder_app(1);
+        app.select_single(0);
+        assert!(!app.undo_available() && !app.redo_available());
+        app.run(
+            Command::parse(r#"{"id":"develop.set","params":{"controls":{"exposure":1}}}"#).unwrap(),
+        )
+        .unwrap();
+        assert!(app.undo_available() && !app.redo_available());
+
+        app.apply_ui_actions(vec![ui::UiAction::Undo]);
+        assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 0.0);
+        assert!(!app.undo_available() && app.redo_available());
+        app.apply_ui_actions(vec![ui::UiAction::Redo]);
+        assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 1.0);
+        assert!(
+            app.modifiers.is_empty(),
+            "the press leaves the held keys alone"
+        );
     }
 
     #[test]

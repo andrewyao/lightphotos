@@ -124,6 +124,8 @@ impl App {
         self.folder_store.leave_dir();
         self.burst_scan = None;
         self.expanded_stacks.clear();
+        // The steps name this folder's photos, and no folder takes them back.
+        self.history.clear();
         self.playlist = None;
         self.recompute_visible();
         self.clear_selection();

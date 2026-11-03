@@ -270,14 +270,10 @@ impl EditHistory {
         self.done.push(inverse);
     }
 
-    /// For the menu bar's Undo item.
-    #[cfg(any(test, target_os = "macos"))]
     pub(crate) fn can_undo(&self) -> bool {
         !self.done.is_empty() || self.open.is_some()
     }
 
-    /// For the menu bar's Redo item.
-    #[cfg(any(test, target_os = "macos"))]
     pub(crate) fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }

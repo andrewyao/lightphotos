@@ -1498,6 +1498,26 @@ mod tests {
     }
 
     #[test]
+    fn closing_the_folder_forgets_undo_and_redo() {
+        let (mut app, _, _) = folder_app("cmd-undo-close", 1);
+        app.select_single(0);
+        for exposure in [1, 2] {
+            run(
+                &mut app,
+                &format!(
+                    r#"{{"id":"develop.set","params":{{"controls":{{"exposure":{exposure}}}}}}}"#
+                ),
+            )
+            .unwrap();
+        }
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        assert!(app.undo_available() && app.redo_available());
+        app.close_folder();
+        assert!(!app.history.can_undo() && !app.history.can_redo());
+        assert!(!app.undo_available() && !app.redo_available());
+    }
+
+    #[test]
     fn a_new_folder_forgets_the_undo_steps() {
         let (mut app, dir, paths) = folder_app("cmd-undo-folder", 1);
         app.select_single(0);

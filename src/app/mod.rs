@@ -1609,6 +1609,8 @@ impl App {
                 ui::UiAction::GroupAllBursts => self.group_all_bursts(),
                 ui::UiAction::GroupSelectedBursts => self.group_bursts(),
                 ui::UiAction::GroupSelected => self.group_selected(),
+                ui::UiAction::Undo => self.press_undo(false),
+                ui::UiAction::Redo => self.press_undo(true),
                 ui::UiAction::RequestDeleteStack => self.request_delete_group(),
                 ui::UiAction::CompareStack => self.compare_stack(),
                 ui::UiAction::ToggleStack(pos) => self.toggle_stack(pos),

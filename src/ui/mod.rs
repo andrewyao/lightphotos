@@ -26,6 +26,9 @@ pub enum UiAction {
     GroupSelectedBursts,
     /// Stack the selected photos into one.
     GroupSelected,
+    /// The header's Undo and Redo buttons.
+    Undo,
+    Redo,
     /// Ask to trash every photo in the selected stacks.
     RequestDeleteStack,
     /// Open the stack under the cursor in the Compare pane.
@@ -322,6 +325,8 @@ impl UiAction {
             GroupAllBursts
                 | GroupSelectedBursts
                 | GroupSelected
+                | Undo
+                | Redo
                 | RequestDeleteStack
                 | ToggleLabel(_)
                 | ScoreAll
@@ -543,6 +548,8 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 ui.label(job);
                 ui.add_space(font_size::px(ui.style(), 8.0));
                 catalog_picker(ui, app, out);
+                ui.add_space(font_size::px(ui.style(), 8.0));
+                undo_redo_buttons(ui, app, out);
 
                 // Not in the F6 focus cycle; `?` and `Cmd+,` are their keyboard
                 // routes. Open Folder lives in the Folders panel.
@@ -603,6 +610,32 @@ fn catalog_picker(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     })
     .response
     .on_hover_text(t().catalog_tip);
+}
+
+/// Undo and Redo, big and beside the catalog picker so a slip is one click
+/// from being taken back. Off when there is nothing to take back or put back.
+fn undo_redo_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let size = font_size::px(ui.style(), 15.0);
+    let width = font_size::px(ui.style(), 64.0);
+    let button = |label: &str| {
+        egui::Button::new(egui::RichText::new(label).size(size).strong())
+            .min_size(egui::vec2(width, 0.0))
+    };
+    let (undo, redo) = (t().menu.undo, t().menu.redo);
+    if ui
+        .add_enabled(app.undo_available(), button(undo))
+        .on_hover_text(format!("{undo} ({})", crate::i18n::keys("Cmd+Z")))
+        .clicked()
+    {
+        out.actions.push(UiAction::Undo);
+    }
+    if ui
+        .add_enabled(app.redo_available(), button(redo))
+        .on_hover_text(format!("{redo} ({})", crate::i18n::keys("Cmd+Shift+Z")))
+        .clicked()
+    {
+        out.actions.push(UiAction::Redo);
+    }
 }
 
 /// The shown folder's name above the Grid or Loupe. In the Grid it ends in

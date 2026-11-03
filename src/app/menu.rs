@@ -25,12 +25,8 @@ impl App {
         match cmd {
             Cut | Copy | Paste | BiggerText | SmallerText => true,
             SelectAll => typing || (free && self.mode == ViewMode::Grid),
-            Undo => {
-                typing
-                    || (self.tool == LoupeTool::TouchUp && self.can_undo_touchup())
-                    || (free && rw && self.history.can_undo())
-            }
-            Redo => typing || (free && rw && self.history.can_redo()),
+            Undo => typing || self.undo_available(),
+            Redo => typing || self.redo_available(),
             Settings => matches!(blocker, None | Some(Blocker::Settings)),
             NewCatalog | OpenCatalog | OpenFolder | Export | KeyboardShortcuts => free,
             Crop => free && rw,
@@ -123,13 +119,6 @@ impl App {
                 repeat: false,
                 modifiers: egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND | shift,
             })
-    }
-
-    fn can_undo_touchup(&self) -> bool {
-        self.shown
-            .path()
-            .and_then(|path| self.touchup_undo.get(path))
-            .is_some_and(|steps| !steps.is_empty())
     }
 }
 

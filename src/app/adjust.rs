@@ -813,6 +813,26 @@ impl App {
         true
     }
 
+    pub(super) fn can_undo_touchup(&self) -> bool {
+        self.shown
+            .path()
+            .and_then(|path| self.touchup_undo.get(path))
+            .is_some_and(|steps| !steps.is_empty())
+    }
+
+    /// Whether Undo would act now, for the header button and the menu bar:
+    /// the TouchUp tool's own spots, or a step of the history in a folder
+    /// that takes edits.
+    pub(crate) fn undo_available(&self) -> bool {
+        (self.tool == LoupeTool::TouchUp && self.can_undo_touchup())
+            || (self.input_blocker().is_none() && !self.read_only() && self.history.can_undo())
+    }
+
+    /// Whether Redo would act now.
+    pub(crate) fn redo_available(&self) -> bool {
+        self.input_blocker().is_none() && !self.read_only() && self.history.can_redo()
+    }
+
     /// Steps the shown image's spots back to before the last add or delete.
     pub(super) fn undo_touchup(&mut self) {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
@@ -1668,9 +1688,10 @@ mod tests {
             }
 
             let painted = settled(&mut app);
-            assert!(
-                !painted.texts().contains(&"Undo"),
-                "Undo is Cmd+Z only, with no button"
+            assert_eq!(
+                painted.texts().iter().filter(|t| **t == "Undo").count(),
+                1,
+                "the header's button is the only Undo; the Masks tab has none"
             );
 
             app.touchup_selected = Some(0);
