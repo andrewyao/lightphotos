@@ -348,7 +348,8 @@ pub static FR: Strings = Strings {
         HelpSection {
             title: "Édition",
             rows: &[
-                ("Cmd+Z", "Annuler le dernier changement de développement"),
+                ("Cmd+Z", "Annuler le dernier changement : retouche, note, drapeau, étiquette ou rotation"),
+                ("Cmd+Shift+Z", "Rétablir le changement que la dernière annulation a retiré"),
                 ("Cmd+[ / Cmd+]", "Faire pivoter l'image de -90 / +90 degrés"),
                 ("R", "Recadrer"),
                 ("Y", "Comparer avant / après (dans l'éditeur)"),
@@ -973,6 +974,7 @@ pub static FR: Strings = Strings {
         export: "Exporter\u{2026}",
         edit: "Édition",
         undo: "Annuler",
+        redo: "Rétablir",
         cut: "Couper",
         copy: "Copier",
         paste: "Coller",

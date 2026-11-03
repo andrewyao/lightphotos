@@ -329,7 +329,8 @@ pub static ZH_HANS: Strings = Strings {
         HelpSection {
             title: "编辑",
             rows: &[
-                ("Cmd+Z", "撤销上一次调整"),
+                ("Cmd+Z", "撤销上一次更改:调整、评级、旗标、标签或旋转"),
+                ("Cmd+Shift+Z", "恢复上一次撤销的更改"),
                 ("Cmd+[ / Cmd+]", "向左 / 向右旋转 90 度"),
                 ("R", "裁剪"),
                 ("Y", "调整前 / 调整后对比（编辑器中）"),
@@ -815,6 +816,7 @@ pub static ZH_HANS: Strings = Strings {
         export: "导出\u{2026}",
         edit: "编辑",
         undo: "撤销",
+        redo: "恢复",
         cut: "剪切",
         copy: "拷贝",
         paste: "粘贴",

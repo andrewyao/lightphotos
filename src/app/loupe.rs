@@ -239,16 +239,22 @@ impl App {
             return;
         };
         let old_zoom = self.zoom();
-        let step = (self.current_rotation() % 4 + if cw { 1 } else { 3 }) % 4;
-        if step == 0 {
-            self.rotations.remove(&path);
-        } else {
-            self.rotations.insert(path.clone(), step);
-        }
-        self.folder_store.set_rotation(&path, step);
+        let now = self.current_rotation();
+        // The turn and the crop it flips are one undo step.
+        self.history.begin();
+        self.history.note_rotation(&path, now);
+        self.store_rotation(&path, (now % 4 + if cw { 1 } else { 3 }) % 4);
         #[cfg(target_arch = "wasm32")]
         crate::web::analytics::property("develop_edit_applied", "edit_kind", "adjustment");
         self.flip_crop_orientation();
+        self.history.end();
+        self.history.seal();
+        self.refit_after_rotate(old_zoom);
+    }
+
+    /// Refits the shown image after its rotation changed, keeping the zoom
+    /// of `old_zoom` when it was not fitted.
+    pub(super) fn refit_after_rotate(&mut self, old_zoom: f32) {
         if self.fitted {
             if self.cropping() {
                 self.fit_for_crop();

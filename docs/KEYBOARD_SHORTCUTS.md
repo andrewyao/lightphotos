@@ -58,7 +58,8 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 
 | Key | Action |
 | --- | --- |
-| `Cmd`+`Z` | Undo the last develop change: a slider drag, a reset, a crop, a preset, Auto Tone or a pasted look. Ratings, flags, labels and rotation are not undone |
+| `Cmd`+`Z` | Undo the last change: a slider drag, a reset, a crop, a preset, Auto Tone, a pasted look, or a rating, flag, label, rotation or stack change. A batch is one step |
+| `Cmd`+`Shift`+`Z` | Redo the change the last undo took back. A new change clears what can be redone |
 | `Cmd`+`[` / `Cmd`+`]` | Rotate image −90° / +90° |
 | `R` | Crop |
 | `C` | Compare: 2 to 6 selected photos, grouped or not, or else the photos in the selected stack, with a shared zoom square |

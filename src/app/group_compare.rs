@@ -1852,6 +1852,134 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Each stack's member names, in a stable order.
+    fn stacks(app: &App) -> Vec<Vec<String>> {
+        let mut all: Vec<Vec<String>> = app
+            .folder_store
+            .groups()
+            .map(|groups| {
+                groups
+                    .iter()
+                    .map(|(_, g)| {
+                        g.members()
+                            .iter()
+                            .map(|m| m.to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        all.sort();
+        all
+    }
+
+    #[test]
+    fn grouping_undoes_and_redoes() {
+        let (mut app, dir, paths) = folder_app("group-undo", 4);
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        app.selected = std::collections::BTreeSet::from([1, 2]);
+        app.sel = Some(1);
+        app.group_selected();
+        let grouped = stacks(&app);
+        assert_eq!(grouped, vec![vec![names[1].clone(), names[2].clone()]]);
+
+        assert_eq!(app.undo_edit(), 1);
+        assert!(stacks(&app).is_empty());
+        assert_eq!(cells(&app), vec![0, 1, 2, 3], "the grid lays out again");
+        assert_eq!(app.redo_edit(), 1);
+        assert_eq!(stacks(&app), grouped);
+        assert_eq!(app.undo_edit(), 1);
+        assert!(stacks(&app).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_representative_and_an_ungroup_undo_in_order() {
+        let (mut app, dir, paths) = folder_app("group-undo-rep", 4);
+        app.selected = std::collections::BTreeSet::from([1, 2]);
+        app.sel = Some(1);
+        app.group_selected();
+        let rep = |app: &App| {
+            let groups = app.folder_store.groups().unwrap();
+            let g = groups.get(groups.group_of(paths[1].file_name().unwrap()).unwrap());
+            g.unwrap().rep().cloned()
+        };
+        app.set_group_rep(&paths[2]);
+        assert_eq!(rep(&app).as_deref(), paths[2].file_name());
+
+        app.select_single(1);
+        app.ungroup_selected();
+        assert!(stacks(&app).is_empty());
+
+        app.undo_edit();
+        assert_eq!(
+            rep(&app).as_deref(),
+            paths[2].file_name(),
+            "the ungroup comes back with its representative"
+        );
+        app.undo_edit();
+        assert_eq!(rep(&app), None);
+        assert_eq!(stacks(&app).len(), 1);
+        app.redo_edit();
+        assert_eq!(rep(&app).as_deref(), paths[2].file_name());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undoing_a_group_that_absorbed_photos_restores_the_old_stack() {
+        let (mut app, dir, paths) = folder_app("group-undo-absorb", 4);
+        let name = |i: usize| paths[i].file_name().unwrap().to_string_lossy().into_owned();
+        app.selected = std::collections::BTreeSet::from([0, 1]);
+        app.sel = Some(0);
+        app.group_selected();
+        let first = stacks(&app);
+        assert_eq!(first, vec![vec![name(0), name(1)]]);
+
+        // A burst can overlap a stack: the new group takes photo 1, and the
+        // old one drops to a single photo and goes.
+        let overlap =
+            crate::persist::groups::Group::new(vec![name(1).into(), name(2).into()], None).unwrap();
+        let writes = app
+            .folder_store
+            .groups()
+            .unwrap()
+            .create(overlap, web_time::SystemTime::now());
+        assert!(app.apply_group_writes(writes));
+        assert_eq!(stacks(&app), vec![vec![name(1), name(2)]]);
+
+        app.undo_edit();
+        assert_eq!(stacks(&app), first, "the old stack is whole again");
+        app.undo_edit();
+        assert!(stacks(&app).is_empty());
+        app.redo_edit();
+        app.redo_edit();
+        assert_eq!(stacks(&app), vec![vec![name(1), name(2)]]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_undone_group_leaves_out_photos_trashed_since() {
+        let (mut app, dir, paths) = folder_app("group-undo-trashed", 4);
+        app.selected = std::collections::BTreeSet::from([0, 1, 2]);
+        app.sel = Some(0);
+        app.group_selected();
+        app.undo_edit();
+        // The photo leaves the folder while the step waits in the redo stack.
+        std::fs::remove_file(&paths[2]).unwrap();
+        app.playlist = Some(crate::navigation::Playlist::from_dir(&dir));
+        app.redo_edit();
+        let names = |ps: &[PathBuf]| -> Vec<String> {
+            ps.iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(stacks(&app), vec![names(&paths[..2])]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn an_expanded_stack_opens_its_member_in_edit() {
         let (mut app, dir, _) = folder_app("group-no-rep-open", 4);

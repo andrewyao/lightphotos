@@ -333,7 +333,8 @@ pub static KO: Strings = Strings {
         HelpSection {
             title: "편집",
             rows: &[
-                ("Cmd+Z", "마지막 현상 변경 실행 취소"),
+                ("Cmd+Z", "마지막 변경 실행 취소: 편집, 별점, 플래그, 레이블, 회전"),
+                ("Cmd+Shift+Z", "방금 실행 취소한 변경 다시 실행"),
                 ("Cmd+[ / Cmd+]", "이미지를 -90 / +90도 회전"),
                 ("R", "자르기"),
                 ("Y", "이전 / 이후 비교 (편집 화면에서)"),
@@ -824,6 +825,7 @@ pub static KO: Strings = Strings {
         export: "내보내기\u{2026}",
         edit: "편집",
         undo: "실행 취소",
+        redo: "다시 실행",
         cut: "오려두기",
         copy: "복사",
         paste: "붙여넣기",

@@ -646,9 +646,16 @@ mod tests {
         assert!(!app.autotone.is_running());
         assert!(app.edits.contains_key(&a) && app.edits.contains_key(&b));
 
+        let toned = (app.edits[&a], app.edits[&b]);
         assert_eq!(app.undo_edit(), 2, "one step for the batch");
         assert!(app.edits.is_empty());
         assert_eq!(app.undo_edit(), 0);
+
+        assert_eq!(app.redo_edit(), 2, "one step for the batch");
+        assert_eq!((app.edits[&a], app.edits[&b]), toned);
+        assert_eq!(app.redo_edit(), 0);
+        assert_eq!(app.undo_edit(), 2, "a redone batch undoes again");
+        assert!(app.edits.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

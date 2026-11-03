@@ -402,6 +402,7 @@ impl App {
             }
 
             KeyCode::KeyZ if cmd && !alt && !shift => self.run_ui(Command::Undo),
+            KeyCode::KeyZ if cmd && !alt && shift => self.run_ui(Command::Redo),
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => {
                 self.run_ui(select(SelectWord::All))
             }
@@ -458,7 +459,7 @@ fn flag(flag: FlagChange) -> Command {
 
 /// Whether `handle_key` binds the key to an edit of the open folder's
 /// photos: a rating, label, flag, rotation, group, crop, mask, touch-up,
-/// develop edit, paste, undo or delete. Keep in step with `handle_key`.
+/// develop edit, paste, undo, redo or delete. Keep in step with `handle_key`.
 fn key_edits_folder(code: KeyCode, cmd: bool, shift: bool, alt: bool, loupe: bool) -> bool {
     if !cmd && !alt && digit_of(code).is_some() {
         return true;
@@ -473,7 +474,7 @@ fn key_edits_folder(code: KeyCode, cmd: bool, shift: bool, alt: bool, loupe: boo
         KeyCode::KeyG => cmd && !alt,
         KeyCode::KeyU => !alt && (!cmd || !shift),
         KeyCode::KeyV => !alt && (!cmd || shift),
-        KeyCode::KeyZ => cmd && !alt && !shift,
+        KeyCode::KeyZ => cmd && !alt,
         KeyCode::Delete => true,
         // Deletes the selected mask or touch-up spot.
         KeyCode::Backspace => !cmd,
@@ -1878,7 +1879,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_z_undoes_and_cmd_shift_z_does_not() {
+    fn cmd_z_undoes_and_cmd_shift_z_redoes() {
         let (mut app, paths) = folder_app(1);
         app.select_single(0);
         app.run(
@@ -1886,9 +1887,15 @@ mod tests {
         )
         .unwrap();
         press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyZ);
-        assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 1.0);
+        assert_eq!(
+            app.folder_store.adjustments(&paths[0]).exposure,
+            1.0,
+            "nothing to redo yet"
+        );
         press(&mut app, CMD, KeyCode::KeyZ);
         assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 0.0);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyZ);
+        assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 1.0);
     }
 
     #[test]

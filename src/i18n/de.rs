@@ -337,7 +337,8 @@ pub static DE: Strings = Strings {
         HelpSection {
             title: "Bearbeiten",
             rows: &[
-                ("Cmd+Z", "Die letzte Entwicklungsänderung widerrufen"),
+                ("Cmd+Z", "Die letzte Änderung widerrufen: Bearbeitung, Bewertung, Markierung, Farbe oder Drehung"),
+                ("Cmd+Shift+Z", "Die zuletzt widerrufene Änderung wiederholen"),
                 ("Cmd+[ / Cmd+]", "Bild um -90 / +90 Grad drehen"),
                 ("R", "Zuschneiden"),
                 ("Y", "Vorher-nachher-Vergleich (im Editor)"),
@@ -927,6 +928,7 @@ pub static DE: Strings = Strings {
         export: "Exportieren\u{2026}",
         edit: "Bearbeiten",
         undo: "Widerrufen",
+        redo: "Wiederholen",
         cut: "Ausschneiden",
         copy: "Kopieren",
         paste: "Einsetzen",

@@ -13,7 +13,7 @@ impl App {
     /// Runs `cmd` if [`check`](Self::check) allows it.
     pub(crate) fn run(&mut self, cmd: Command) -> Result<Outcome, CommandError> {
         self.check(&cmd)?;
-        if cmd == Command::Undo {
+        if matches!(cmd, Command::Undo | Command::Redo) {
             let out = self.apply_command(cmd);
             self.request_redraw();
             return out;
@@ -264,7 +264,7 @@ impl App {
                     Photos::Selected => self.set_flag(flag),
                     Photos::Named(_) => {
                         for path in &paths {
-                            self.folder_store.set_flag(path, flag);
+                            self.put_flag(path, flag);
                         }
                         self.after_flag_change();
                     }
@@ -459,6 +459,7 @@ impl App {
                 })
             }
             Command::Undo => done(self.undo_edit()),
+            Command::Redo => done(self.redo_edit()),
         }
     }
 
@@ -634,16 +635,27 @@ impl App {
         });
         for path in paths {
             if on {
-                self.folder_store.set_label(path, Some(label));
+                self.put_label(path, Some(label));
             } else if self.folder_store.label(path) == Some(label) {
-                self.folder_store.set_label(path, None);
+                self.put_label(path, None);
             }
         }
         if !self.label_filter.is_empty() {
             self.refilter_after_folder_store_change();
             self.resync_loupe_selection();
         }
+        self.history.seal();
         self.request_redraw();
+    }
+
+    /// The one writer of a photo's label for an edit: records the label it
+    /// replaces for Undo, then stores the new one.
+    fn put_label(&mut self, path: &Path, label: Option<ColorLabel>) {
+        let before = self.folder_store.label(path);
+        if before != label {
+            self.history.note_label(path, before);
+        }
+        self.folder_store.set_label(path, label);
     }
 
     fn rotate_path(&mut self, path: &Path, cw: bool) {
@@ -652,7 +664,14 @@ impl App {
             return;
         }
         let now = self.rotations.get(path).copied().unwrap_or(0);
-        let step = (now % 4 + if cw { 1 } else { 3 }) % 4;
+        self.history.note_rotation(path, now);
+        self.store_rotation(path, (now % 4 + if cw { 1 } else { 3 }) % 4);
+        self.history.seal();
+    }
+
+    /// Stores `step` quarter turns as `path`'s rotation in the mirror and the
+    /// folder store. No undo record.
+    pub(super) fn store_rotation(&mut self, path: &Path, step: u8) {
         if step == 0 {
             self.rotations.remove(path);
         } else {
@@ -1310,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_puts_back_a_crop_and_skips_ratings() {
+    fn undo_puts_back_a_crop_and_then_a_rating() {
         let (mut app, _, paths) = folder_app("cmd-undo-crop", 1);
         sized(&mut app, &paths, (4000, 3000));
         app.select_single(0);
@@ -1321,13 +1340,161 @@ mod tests {
         );
         run(&mut app, r#"{"id":"photo.rate","params":{"stars":5}}"#).unwrap();
         run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        assert_eq!(app.rating_of(&paths[0]), 0, "the rating is the last step");
+        let adj = app.folder_store.adjustments(&paths[0]);
+        assert!(adj.crop.is_some(), "the crop is the step before");
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
         let adj = app.folder_store.adjustments(&paths[0]);
         assert_eq!((adj.crop, adj.straighten), (None, 0.0));
+    }
+
+    #[test]
+    fn redo_puts_back_what_undo_took_away() {
+        let (mut app, _, paths) = folder_app("cmd-redo", 1);
+        app.select_single(0);
+        run(
+            &mut app,
+            r#"{"id":"develop.set","params":{"controls":{"exposure":1}}}"#,
+        )
+        .unwrap();
+        run(
+            &mut app,
+            r#"{"id":"develop.set","params":{"controls":{"exposure":2}}}"#,
+        )
+        .unwrap();
+        let exposure = |app: &App| app.folder_store.adjustments(&paths[0]).exposure;
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        assert_eq!(exposure(&app), 0.0);
         assert_eq!(
-            app.rating_of(&paths[0]),
-            5,
-            "undo covers develop edits only"
+            run(&mut app, r#"{"id":"edit.redo"}"#).map(|o| o.photos),
+            Ok(1)
         );
+        assert_eq!(exposure(&app), 1.0);
+        run(&mut app, r#"{"id":"edit.redo"}"#).unwrap();
+        assert_eq!(exposure(&app), 2.0);
+        assert_eq!(
+            run(&mut app, r#"{"id":"edit.redo"}"#).map(|o| o.photos),
+            Ok(0),
+            "nothing left to redo"
+        );
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        assert_eq!(exposure(&app), 1.0, "a redone step undoes again");
+    }
+
+    #[test]
+    fn a_new_edit_after_an_undo_ends_redo() {
+        let (mut app, _, paths) = folder_app("cmd-redo-cleared", 1);
+        app.select_single(0);
+        run(
+            &mut app,
+            r#"{"id":"develop.set","params":{"controls":{"exposure":1}}}"#,
+        )
+        .unwrap();
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        run(&mut app, r#"{"id":"photo.rate","params":{"stars":3}}"#).unwrap();
+        assert!(!app.history.can_redo());
+        assert_eq!(
+            run(&mut app, r#"{"id":"edit.redo"}"#).map(|o| o.photos),
+            Ok(0)
+        );
+        assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 0.0);
+    }
+
+    #[test]
+    fn a_batch_of_ratings_undoes_each_photos_own_value_in_one_step() {
+        let (mut app, _, paths) = folder_app("cmd-undo-batch-rate", 3);
+        app.set_rating_of(paths[0].clone(), 2);
+        app.set_rating_of(paths[1].clone(), 4);
+        app.select_all();
+        run(&mut app, r#"{"id":"photo.rate","params":{"stars":5}}"#).unwrap();
+        assert!(paths.iter().all(|p| app.rating_of(p) == 5));
+
+        assert_eq!(
+            run(&mut app, r#"{"id":"edit.undo"}"#).map(|o| o.photos),
+            Ok(3)
+        );
+        let now: Vec<u8> = paths.iter().map(|p| app.rating_of(p)).collect();
+        assert_eq!(now, [2, 4, 0]);
+        let stored: Vec<_> = paths.iter().map(|p| app.folder_store.get(p)).collect();
+        assert_eq!(stored, [Some(2), Some(4), None]);
+
+        run(&mut app, r#"{"id":"edit.redo"}"#).unwrap();
+        assert!(paths.iter().all(|p| app.rating_of(p) == 5));
+        assert!(paths.iter().all(|p| app.folder_store.get(p) == Some(5)));
+    }
+
+    #[test]
+    fn a_batch_flag_and_label_undo_and_redo() {
+        let (mut app, _, paths) = folder_app("cmd-undo-batch-flag", 2);
+        app.folder_store.set_flag(&paths[0], Some(Flag::Reject));
+        app.select_all();
+        run(&mut app, r#"{"id":"photo.flag","params":{"flag":"pick"}}"#).unwrap();
+        run(&mut app, r#"{"id":"photo.label","params":{"label":"red"}}"#).unwrap();
+        let flags = |app: &App| -> Vec<Option<Flag>> {
+            paths.iter().map(|p| app.folder_store.flag(p)).collect()
+        };
+        assert_eq!(flags(&app), [Some(Flag::Pick), Some(Flag::Pick)]);
+
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        assert!(paths.iter().all(|p| app.folder_store.label(p).is_none()));
+        assert_eq!(flags(&app), [Some(Flag::Pick), Some(Flag::Pick)]);
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        assert_eq!(flags(&app), [Some(Flag::Reject), None]);
+
+        run(&mut app, r#"{"id":"edit.redo"}"#).unwrap();
+        assert_eq!(flags(&app), [Some(Flag::Pick), Some(Flag::Pick)]);
+        run(&mut app, r#"{"id":"edit.redo"}"#).unwrap();
+        assert!(paths
+            .iter()
+            .all(|p| app.folder_store.label(p) == Some(ColorLabel::Red)));
+    }
+
+    #[test]
+    fn a_batch_rotate_undoes_and_redoes() {
+        let (mut app, _, paths) = folder_app("cmd-undo-rotate", 2);
+        app.folder_store.set_rotation(&paths[1], 1);
+        app.rotations.insert(paths[1].clone(), 1);
+        let rotate =
+            r#"{"id":"photo.rotate","params":{"clockwise":true,"photos":["0.jpg","1.jpg"]}}"#;
+        run(&mut app, rotate).unwrap();
+        let turns =
+            |app: &App| -> Vec<u8> { paths.iter().map(|p| app.folder_store.rotation(p)).collect() };
+        assert_eq!(turns(&app), [1, 2]);
+
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        assert_eq!(turns(&app), [0, 1]);
+        assert!(!app.rotations.contains_key(&paths[0]));
+        run(&mut app, r#"{"id":"edit.redo"}"#).unwrap();
+        assert_eq!(turns(&app), [1, 2]);
+        assert_eq!(app.rotations.get(&paths[1]), Some(&2));
+    }
+
+    #[test]
+    fn a_rating_that_changes_nothing_adds_no_step() {
+        let (mut app, _, paths) = folder_app("cmd-undo-noop-rate", 1);
+        app.select_single(0);
+        run(&mut app, r#"{"id":"photo.rate","params":{"stars":3}}"#).unwrap();
+        run(&mut app, r#"{"id":"photo.rate","params":{"stars":3}}"#).unwrap();
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        assert_eq!(app.rating_of(&paths[0]), 0, "one step for both");
+        assert_eq!(
+            run(&mut app, r#"{"id":"edit.undo"}"#).map(|o| o.photos),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn a_monochrome_undoes_and_redoes() {
+        let (mut app, _, paths) = folder_app("cmd-undo-mono", 2);
+        app.select_all();
+        run(&mut app, r#"{"id":"develop.monochrome"}"#).unwrap();
+        let sat = |app: &App, i: usize| app.folder_store.adjustments(&paths[i]).saturation;
+        assert_eq!(sat(&app, 0), -100.0);
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        assert_eq!((sat(&app, 0), sat(&app, 1)), (0.0, 0.0));
+        run(&mut app, r#"{"id":"edit.redo"}"#).unwrap();
+        assert_eq!((sat(&app, 0), sat(&app, 1)), (-100.0, -100.0));
     }
 
     #[test]

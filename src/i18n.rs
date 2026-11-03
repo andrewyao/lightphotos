@@ -967,6 +967,7 @@ pub struct MenuStrings {
     pub export: &'static str,
     pub edit: &'static str,
     pub undo: &'static str,
+    pub redo: &'static str,
     pub cut: &'static str,
     pub copy: &'static str,
     pub paste: &'static str,

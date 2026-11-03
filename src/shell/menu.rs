@@ -31,6 +31,7 @@ pub enum MenuCommand {
     OpenFolder,
     Export,
     Undo,
+    Redo,
     Cut,
     Copy,
     Paste,
@@ -83,6 +84,7 @@ impl MenuCommand {
             OpenFolder => (cmd, KeyCode::KeyO),
             Export => (shift_cmd, KeyCode::KeyE),
             Undo => (cmd, KeyCode::KeyZ),
+            Redo => (shift_cmd, KeyCode::KeyZ),
             Cut => (cmd, KeyCode::KeyX),
             Copy => (cmd, KeyCode::KeyC),
             Paste => (cmd, KeyCode::KeyV),
@@ -176,8 +178,8 @@ impl MenuCommand {
             ToggleZoom => zoom(Zoom::Cycle),
             ZoomIn => zoom(Zoom::In),
             ZoomOut => zoom(Zoom::Out),
-            Settings | NewCatalog | OpenCatalog | OpenFolder | Export | Undo | Cut | Copy
-            | Paste | SelectAll | CopySettings | PasteSettings | AutoToneSelection
+            Settings | NewCatalog | OpenCatalog | OpenFolder | Export | Undo | Redo | Cut
+            | Copy | Paste | SelectAll | CopySettings | PasteSettings | AutoToneSelection
             | ScorePhotos | MoveToTrash | GroupSelected | GroupBursts | Ungroup | DeleteGroup
             | Crop | CompareStack | InfoPanel | BeforeAfter | BiggerText | SmallerText
             | KeyboardShortcuts => {
@@ -314,6 +316,7 @@ const MENUS: &[(Label, Role, &[Row])] = &[
         Role::Plain,
         &[
             Command(C::Undo, |m| m.undo),
+            Command(C::Redo, |m| m.redo),
             Separator,
             Command(C::Cut, |m| m.cut),
             Command(C::Copy, |m| m.copy),

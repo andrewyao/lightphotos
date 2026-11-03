@@ -332,7 +332,8 @@ pub static ZH_HANT: Strings = Strings {
         HelpSection {
             title: "編輯",
             rows: &[
-                ("Cmd+Z", "還原上一次調整"),
+                ("Cmd+Z", "還原上一次變更:調整、評級、旗標、標籤或旋轉"),
+                ("Cmd+Shift+Z", "恢復上一次還原的變更"),
                 ("Cmd+[ / Cmd+]", "向左 / 向右旋轉 90 度"),
                 ("R", "裁切"),
                 ("Y", "修改前 / 修改後比較（編輯器中）"),
@@ -823,6 +824,7 @@ pub static ZH_HANT: Strings = Strings {
         export: "匯出\u{2026}",
         edit: "編輯",
         undo: "還原",
+        redo: "恢復",
         cut: "剪下",
         copy: "拷貝",
         paste: "貼上",

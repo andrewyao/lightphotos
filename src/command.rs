@@ -85,6 +85,8 @@ pub enum Command {
     Export(ExportParams),
     #[serde(rename = "edit.undo")]
     Undo,
+    #[serde(rename = "edit.redo")]
+    Redo,
 }
 
 /// Which photos a command acts on. Absent means what the keyboard acts on:
@@ -574,7 +576,8 @@ fn apply_to_record(
         | Command::SavePreset(_)
         | Command::AddPresetFolder(_)
         | Command::Export(_)
-        | Command::Undo => return Err(CommandError::NeedsApp),
+        | Command::Undo
+        | Command::Redo => return Err(CommandError::NeedsApp),
     }
     Ok(())
 }
@@ -1085,6 +1088,7 @@ impl Command {
             AddPresetFolder(_) => "preset.add_folder",
             Export(_) => "export",
             Undo => "edit.undo",
+            Redo => "edit.redo",
         }
     }
 
@@ -1095,7 +1099,7 @@ impl Command {
         match self {
             Rate(_) | Flag(_) | Label(_) | Rotate(_) | Score(_) | Develop(_) | Reset(_)
             | AutoTone(_) | Monochrome(_) | Crop(_) | AddMask(_) | SetMask(_) | ClearMasks(_)
-            | PasteSettings(_) | Preset(_) | Undo => true,
+            | PasteSettings(_) | Preset(_) | Undo | Redo => true,
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
             | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | CopySettings(_)
             | SavePreset(_) | AddPresetFolder(_) | Export(_) => false,
@@ -1121,7 +1125,7 @@ impl Command {
             Export(p) => Some(&p.photos),
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
             | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | CopySettings(_)
-            | SavePreset(_) | AddPresetFolder(_) | Undo => None,
+            | SavePreset(_) | AddPresetFolder(_) | Undo | Redo => None,
         }
     }
 
@@ -1219,7 +1223,11 @@ impl Command {
                 "Export with the form's settings, or with `settings` for this run.",
                 false,
             ),
-            Undo => ("Undo the last develop change.", false),
+            Undo => (
+                "Undo the last change: a develop edit, rating, flag, label, rotation or stack.",
+                false,
+            ),
+            Redo => ("Redo the change the last undo took back.", false),
         }
     }
 
@@ -1342,6 +1350,7 @@ impl Command {
             }),
             Command::Export(ExportParams::default()),
             Command::Undo,
+            Command::Redo,
         ]
     }
 
@@ -1522,6 +1531,7 @@ mod tests {
             ControlValue::Default(DefaultWord::Default)
         );
         assert_eq!(Command::parse(r#"{"id":"edit.undo"}"#), Ok(Command::Undo));
+        assert_eq!(Command::parse(r#"{"id":"edit.redo"}"#), Ok(Command::Redo));
         assert_eq!(
             Command::parse(r#"{"id":"photo.score"}"#),
             Ok(Command::Score(PhotosParams::default()))

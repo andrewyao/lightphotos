@@ -336,7 +336,8 @@ pub static EN: Strings = Strings {
         HelpSection {
             title: "Edit",
             rows: &[
-                ("Cmd+Z", "Undo the last develop change"),
+                ("Cmd+Z", "Undo the last change: an edit, rating, flag, label or rotation"),
+                ("Cmd+Shift+Z", "Redo the change the last undo took back"),
                 ("Cmd+[ / Cmd+]", "Rotate image -90 / +90 degrees"),
                 ("R", "Crop"),
                 ("Y", "Before / after compare (in editor)"),
@@ -846,6 +847,7 @@ pub static EN: Strings = Strings {
         export: "Export\u{2026}",
         edit: "Edit",
         undo: "Undo",
+        redo: "Redo",
         cut: "Cut",
         copy: "Copy",
         paste: "Paste",

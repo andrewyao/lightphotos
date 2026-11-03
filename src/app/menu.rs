@@ -30,6 +30,7 @@ impl App {
                     || (self.tool == LoupeTool::TouchUp && self.can_undo_touchup())
                     || (free && rw && self.history.can_undo())
             }
+            Redo => typing || (free && rw && self.history.can_redo()),
             Settings => matches!(blocker, None | Some(Blocker::Settings)),
             NewCatalog | OpenCatalog | OpenFolder | Export | KeyboardShortcuts => free,
             Crop => free && rw,
@@ -105,8 +106,13 @@ impl App {
                 return Some(egui::Event::Paste(text.replace("\r\n", "\n")));
             }
             MenuCommand::SelectAll => egui::Key::A,
-            MenuCommand::Undo => egui::Key::Z,
+            MenuCommand::Undo | MenuCommand::Redo => egui::Key::Z,
             _ => return None,
+        };
+        let shift = if cmd == MenuCommand::Redo {
+            egui::Modifiers::SHIFT
+        } else {
+            egui::Modifiers::NONE
         };
         self.egui_ctx
             .text_edit_focused()
@@ -115,7 +121,7 @@ impl App {
                 physical_key: None,
                 pressed: true,
                 repeat: false,
-                modifiers: egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND,
+                modifiers: egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND | shift,
             })
     }
 

@@ -1,9 +1,11 @@
 use super::*;
 use std::path::Path;
 
+use super::history::{Before, EditStep, GroupBefore};
 use crate::develop::curve::Channel;
 use crate::develop::image_ops;
 use crate::develop::{self, Adjustments, GpuAdjust, GpuTouchUp, TouchUp};
+use crate::persist::groups::{Group, GroupWrite};
 
 impl App {
     /// Develop adjustments of the image currently shown (identity if unset).
@@ -433,17 +435,38 @@ impl App {
         }
     }
 
-    /// Puts back the edits from before the last undo step. Returns how many
-    /// photos it changed. A photo that has left the folder is skipped.
+    /// Puts back what the photos held before the last undo step. Returns how
+    /// many photos it changed. A photo that has left the folder is skipped.
     pub(super) fn undo_edit(&mut self) -> usize {
         // Undo takes back a running batch's step, so the batch must not land
         // more results after it.
         self.cancel_auto_tone();
         self.cancel_remove_ca();
-        let Some(step) = self.history.pop() else {
+        let Some(step) = self.history.pop_undo() else {
             return 0;
         };
+        let (n, inverse) = self.apply_step(step);
+        self.history.push_redo(inverse);
+        n
+    }
+
+    /// Puts back what the photos held before the last undo, as `undo_edit`
+    /// does for a step. Returns how many photos it changed.
+    pub(super) fn redo_edit(&mut self) -> usize {
+        let Some(step) = self.history.pop_redo() else {
+            return 0;
+        };
+        let (n, inverse) = self.apply_step(step);
+        self.history.push_done(inverse);
+        n
+    }
+
+    /// Writes `step`'s values to its photos and returns how many photos that
+    /// changed, with the values they held until now: a step that puts it all
+    /// back.
+    fn apply_step(&mut self, step: EditStep) -> (usize, EditStep) {
         let shown = self.shown.path().map(Path::to_path_buf);
+        let old_zoom = self.zoom();
         // A set, not a scan of the folder per photo: a step can hold every
         // photo in a large folder.
         let in_folder: std::collections::HashSet<&Path> = self
@@ -456,12 +479,19 @@ impl App {
             .into_iter()
             .filter(|b| in_folder.contains(b.path.as_path()))
             .collect();
-        let mut n = 0;
+        let restored_groups = step.groups;
+        let mut inverse = Vec::with_capacity(befores.len());
+        let (mut ratings, mut flags, mut labels) = (false, false, false);
         for before in befores {
             let path = before.path;
-            self.store_edit(&path, before.adj);
-            self.folder_store.set_adjustments(&path, &before.adj);
+            let mut now = Before::new(path.clone());
+            if let Some(adj) = before.adj {
+                now.adj = Some(self.edits.get(&path).copied().unwrap_or_default());
+                self.store_edit(&path, adj);
+                self.folder_store.set_adjustments(&path, &adj);
+            }
             if let Some(touchups) = before.touchups {
+                now.touchups = Some(self.touchups.get(&path).cloned().unwrap_or_default());
                 self.folder_store.set_touchups(&path, &touchups);
                 if touchups.is_empty() {
                     self.touchups.remove(&path);
@@ -470,19 +500,96 @@ impl App {
                 }
             }
             if let Some(masks) = before.masks {
+                now.masks = Some(self.masks.get(&path).cloned().unwrap_or_default());
                 self.store_masks(&path, masks);
             }
-            n += 1;
+            let marks = before.marks;
+            if let Some(stars) = marks.rating {
+                now.marks.rating = Some(self.rating_of(&path));
+                self.store_rating(&path, stars);
+                ratings = true;
+            }
+            if let Some(flag) = marks.flag {
+                now.marks.flag = Some(self.folder_store.flag(&path));
+                self.folder_store.set_flag(&path, flag);
+                flags = true;
+            }
+            if let Some(label) = marks.label {
+                now.marks.label = Some(self.folder_store.label(&path));
+                self.folder_store.set_label(&path, label);
+                labels = true;
+            }
+            let turned = marks.rotation.is_some();
+            if let Some(rotation) = marks.rotation {
+                now.marks.rotation = Some(self.rotations.get(&path).copied().unwrap_or(0));
+                self.store_rotation(&path, rotation);
+            }
+            inverse.push(now);
             if shown.as_ref() == Some(&path) {
                 self.push_adjustments();
                 self.hist.invalidate();
-                if self.fitted {
+                if turned {
+                    self.refit_after_rotate(old_zoom);
+                } else if self.fitted {
                     self.fit_to_window();
                 }
             }
         }
+        // Marks a filter looks at can put a photo in or out of view.
+        if (ratings && self.filter.is_some())
+            || (flags && self.flag_filter.hides_any())
+            || (labels && !self.label_filter.is_empty())
+        {
+            self.refilter_after_folder_store_change();
+            self.resync_loupe_selection();
+        }
+        let groups = self.restore_groups(restored_groups);
         self.request_redraw();
-        n
+        (inverse.len() + groups.len(), EditStep::new(inverse, groups))
+    }
+
+    /// Writes each group back as `befores` has it, and returns each as it
+    /// stood until now. Photos that have left the folder since, trashed
+    /// ones, are dropped from a group, and a group left under two is gone.
+    fn restore_groups(&mut self, befores: Vec<GroupBefore>) -> Vec<GroupBefore> {
+        if befores.is_empty() {
+            return Vec::new();
+        }
+        let Some(groups) = self.folder_store.groups() else {
+            return Vec::new();
+        };
+        let (mut deletes, mut puts) = (Vec::new(), Vec::new());
+        let mut inverse = Vec::with_capacity(befores.len());
+        for before in befores {
+            let now = groups.get(&before.id).cloned();
+            let target = before.group.and_then(|g| {
+                let here = |m: &std::ffi::OsString| {
+                    self.playlist
+                        .as_ref()
+                        .is_some_and(|pl| pl.index_of(m).is_some())
+                };
+                let members = g.members().iter().filter(|m| here(m)).cloned().collect();
+                let rep = g.rep().filter(|r| here(r)).cloned();
+                Group::new(members, rep)
+            });
+            if now != target {
+                match target {
+                    Some(g) => puts.push(GroupWrite::Put(before.id.clone(), g)),
+                    None => deletes.push(GroupWrite::Delete(before.id.clone())),
+                }
+            }
+            inverse.push(GroupBefore {
+                id: before.id,
+                group: now,
+            });
+        }
+        // Deletes first, so a group put back never takes members from one
+        // that is about to go.
+        deletes.extend(puts);
+        if self.write_groups(deletes) {
+            self.after_group_writes();
+        }
+        inverse
     }
 
     /// The page or window went out of sight: save an edit a held slider

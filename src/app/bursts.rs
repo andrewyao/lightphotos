@@ -137,7 +137,8 @@ impl App {
         let mut grouped = 0;
         let mut photos = 0;
         let mut failed = false;
-        // One grid re-layout after the loop, not one per burst.
+        // One grid re-layout and one undo step after the loop, not one per burst.
+        self.history.begin();
         for burst in bursts {
             let Some(groups) = self.folder_store.groups() else {
                 self.set_status(StatusKind::Error, t.group_refused_loading.to_string());
@@ -156,6 +157,8 @@ impl App {
             grouped += 1;
             photos += burst.len();
         }
+        self.history.end();
+        self.history.seal();
         if grouped > 0 {
             self.after_group_writes();
         }

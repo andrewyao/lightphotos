@@ -5,7 +5,7 @@ use crate::develop::copy::{self, CopyItem, CopyItems};
 use crate::develop::Adjustments;
 use crate::navigation::{Cmp, FlagSet};
 use crate::persist::folder_store::{GroupWriteRefused, Patch};
-use crate::persist::groups::{Group, GroupWrite};
+use crate::persist::groups::{Group, GroupId, GroupWrite};
 use crate::sidecar::Flag;
 use crate::ui;
 
@@ -469,17 +469,34 @@ impl App {
         if self.rating_of(&path) != stars {
             crate::web::analytics::event("photo_rated");
         }
-        if stars == 0 {
-            self.ratings.remove(&path);
-        } else {
-            self.ratings.insert(path.clone(), stars);
-        }
-        self.folder_store.set(&path, stars);
+        self.put_rating(&path, stars);
         if self.filter.is_some() {
             self.refilter_after_folder_store_change();
             self.resync_loupe_selection();
         }
+        self.history.seal();
         self.request_redraw();
+    }
+
+    /// The one writer of a photo's rating for an edit: records the rating it
+    /// replaces for Undo, then stores the new one.
+    fn put_rating(&mut self, path: &Path, stars: u8) {
+        let before = self.rating_of(path);
+        if before != stars {
+            self.history.note_rating(path, before);
+        }
+        self.store_rating(path, stars);
+    }
+
+    /// Stores `stars` (0 clears) as `path`'s rating in the mirror and the
+    /// folder store. No undo record.
+    pub(super) fn store_rating(&mut self, path: &Path, stars: u8) {
+        if stars == 0 {
+            self.ratings.remove(path);
+        } else {
+            self.ratings.insert(path.to_path_buf(), stars);
+        }
+        self.folder_store.set(path, stars);
     }
 
     /// Flags the selected photo, or the photos `set_rating` would rate, with
@@ -495,8 +512,19 @@ impl App {
 
     /// Flags `path`, as `set_flag` does the selected photo.
     pub(super) fn set_flag_of(&mut self, path: PathBuf, flag: Option<Flag>) {
-        self.folder_store.set_flag(&path, flag);
+        self.put_flag(&path, flag);
         self.after_flag_change();
+        self.history.seal();
+    }
+
+    /// The one writer of a photo's flag for an edit: records the flag it
+    /// replaces for Undo, then stores the new one.
+    pub(super) fn put_flag(&mut self, path: &Path, flag: Option<Flag>) {
+        let before = self.folder_store.flag(path);
+        if before != flag {
+            self.history.note_flag(path, before);
+        }
+        self.folder_store.set_flag(path, flag);
     }
 
     pub(super) fn after_flag_change(&mut self) {
@@ -516,6 +544,7 @@ impl App {
             return false;
         }
         self.after_group_writes();
+        self.history.seal();
         true
     }
 
@@ -530,6 +559,36 @@ impl App {
     /// [`apply_group_writes`](Self::apply_group_writes) without the grid
     /// re-layout.
     pub(super) fn store_group_writes(&mut self, writes: Vec<GroupWrite>) -> bool {
+        // Every group a write changes, as it stands now, for Undo: the groups
+        // written, and the ones a new group takes members from.
+        let before: Vec<_> = self.folder_store.groups().map_or_else(Vec::new, |groups| {
+            let mut ids: Vec<&GroupId> = Vec::new();
+            for write in &writes {
+                let (id, taken) = match write {
+                    GroupWrite::Put(id, group) => (id, group.members()),
+                    GroupWrite::Delete(id) => (id, &[][..]),
+                };
+                ids.push(id);
+                ids.extend(taken.iter().filter_map(|m| groups.group_of(m)));
+            }
+            ids.sort();
+            ids.dedup();
+            ids.into_iter()
+                .map(|id| (id.clone(), groups.get(id).cloned()))
+                .collect()
+        });
+        if !self.write_groups(writes) {
+            return false;
+        }
+        for (id, group) in &before {
+            self.history.note_group(id, group.as_ref());
+        }
+        true
+    }
+
+    /// Sends `writes` to the folder store, and says why when it refuses. No
+    /// undo record.
+    pub(super) fn write_groups(&mut self, writes: Vec<GroupWrite>) -> bool {
         match self.folder_store.apply_group_writes(writes) {
             Ok(()) => true,
             Err(e) => {
@@ -1120,17 +1179,13 @@ impl App {
             crate::web::analytics::event("photo_rated");
         }
         for path in &paths {
-            if stars == 0 {
-                self.ratings.remove(path);
-            } else {
-                self.ratings.insert(path.clone(), stars);
-            }
-            self.folder_store.set(path, stars);
+            self.put_rating(path, stars);
         }
         if self.filter.is_some() {
             self.refilter_after_folder_store_change();
             self.resync_loupe_selection();
         }
+        self.history.seal();
         let n = paths.len();
         self.set_status(
             StatusKind::Success,
@@ -1150,9 +1205,10 @@ impl App {
             return;
         }
         for path in &paths {
-            self.folder_store.set_flag(path, flag);
+            self.put_flag(path, flag);
         }
         self.after_flag_change();
+        self.history.seal();
         let n = paths.len();
         self.set_status(
             StatusKind::Success,

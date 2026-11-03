@@ -336,7 +336,8 @@ pub static JA: Strings = Strings {
         HelpSection {
             title: "編集",
             rows: &[
-                ("Cmd+Z", "直前の現像の変更を取り消す"),
+                ("Cmd+Z", "直前の変更を取り消す(現像、レーティング、フラグ、ラベル、回転)"),
+                ("Cmd+Shift+Z", "取り消した変更をやり直す"),
                 ("Cmd+[ / Cmd+]", "画像を左 / 右に 90 度回転"),
                 ("R", "切り抜き"),
                 ("Y", "ビフォー / アフターの比較（編集画面）"),
@@ -840,6 +841,7 @@ pub static JA: Strings = Strings {
         export: "書き出し\u{2026}",
         edit: "編集",
         undo: "取り消す",
+        redo: "やり直す",
         cut: "カット",
         copy: "コピー",
         paste: "ペースト",

@@ -476,7 +476,8 @@ impl App {
             | Command::CopySettings(_)
             | Command::PasteSettings(_)
             | Command::Preset(_)
-            | Command::Undo => {}
+            | Command::Undo
+            | Command::Redo => {}
         }
         if let Some(why) = self.photos_outside_anchor(&cmd) {
             return Err(refuse(&why));
