@@ -1690,8 +1690,8 @@ mod tests {
             let painted = settled(&mut app);
             assert_eq!(
                 painted.texts().iter().filter(|t| **t == "Undo").count(),
-                1,
-                "the header's button is the only Undo; the Masks tab has none"
+                0,
+                "the header's Undo is an icon, and the Masks tab has no Undo button"
             );
 
             app.touchup_selected = Some(0);

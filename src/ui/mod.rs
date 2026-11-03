@@ -615,27 +615,83 @@ fn catalog_picker(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// Undo and Redo, big and beside the catalog picker so a slip is one click
 /// from being taken back. Off when there is nothing to take back or put back.
 fn undo_redo_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let size = font_size::px(ui.style(), 15.0);
-    let width = font_size::px(ui.style(), 64.0);
-    let button = |label: &str| {
-        egui::Button::new(egui::RichText::new(label).size(size).strong())
-            .min_size(egui::vec2(width, 0.0))
-    };
+    let size = egui::vec2(
+        font_size::px(ui.style(), 44.0),
+        font_size::px(ui.style(), 30.0),
+    );
     let (undo, redo) = (t().menu.undo, t().menu.redo);
-    if ui
-        .add_enabled(app.undo_available(), button(undo))
-        .on_hover_text(format!("{undo} ({})", crate::i18n::keys("Cmd+Z")))
-        .clicked()
-    {
-        out.actions.push(UiAction::Undo);
+    let buttons = [
+        (
+            false,
+            app.undo_available(),
+            format!("{undo} ({})", crate::i18n::keys("Cmd+Z")),
+            UiAction::Undo,
+        ),
+        (
+            true,
+            app.redo_available(),
+            format!("{redo} ({})", crate::i18n::keys("Cmd+Shift+Z")),
+            UiAction::Redo,
+        ),
+    ];
+    for (mirror, enabled, tip, action) in buttons {
+        let clicked = ui
+            .add_enabled_ui(enabled, |ui| {
+                let response = ui.add(egui::Button::new("").min_size(size));
+                let color = ui.style().interact(&response).fg_stroke.color;
+                paint_undo_arrow(
+                    ui.painter(),
+                    response.rect.center(),
+                    font_size::px(ui.style(), 1.3),
+                    mirror,
+                    color,
+                );
+                response.on_hover_text(tip).clicked()
+            })
+            .inner;
+        if clicked {
+            out.actions.push(action);
+        }
     }
-    if ui
-        .add_enabled(app.redo_available(), button(redo))
-        .on_hover_text(format!("{redo} ({})", crate::i18n::keys("Cmd+Shift+Z")))
-        .clicked()
-    {
-        out.actions.push(UiAction::Redo);
-    }
+}
+
+/// A curved arrow centred on `c`, `u` points to a unit: an arc over the top
+/// that ends in a head pointing down on the left (Undo), or on the right
+/// when `mirror` is set (Redo). Strokes only, so it needs no font coverage.
+fn paint_undo_arrow(
+    painter: &egui::Painter,
+    c: egui::Pos2,
+    u: f32,
+    mirror: bool,
+    color: egui::Color32,
+) {
+    let sign = if mirror { -1.0 } else { 1.0 };
+    let p = |x: f32, y: f32| egui::pos2(c.x + sign * x * u, c.y + (y + 3.0) * u);
+    let stroke = egui::Stroke::new(1.9 * u, color);
+    let radius = 8.0;
+    let steps = 24;
+    let start = -20.0_f32.to_radians();
+    let end = -160.0_f32.to_radians();
+    let arc: Vec<egui::Pos2> = (0..=steps)
+        .map(|i| {
+            let a = start + (end - start) * i as f32 / steps as f32;
+            p(radius * a.cos(), radius * a.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(arc, stroke));
+    let (tip_x, tip_y) = (radius * end.cos(), radius * end.sin());
+    let (dx, dy) = (end.sin(), -end.cos());
+    let at = |along: f32, across: f32| {
+        p(
+            tip_x + dx * along - dy * across,
+            tip_y + dy * along + dx * across,
+        )
+    };
+    painter.add(egui::Shape::convex_polygon(
+        vec![at(5.0, 0.0), at(-0.6, -3.6), at(-0.6, 3.6)],
+        color,
+        egui::Stroke::NONE,
+    ));
 }
 
 /// The shown folder's name above the Grid or Loupe. In the Grid it ends in
