@@ -969,6 +969,34 @@ mod tests {
         (app, paths)
     }
 
+    /// On a slow machine the next photo's size can arrive while the Loupe
+    /// still shows the previous photo's preview. The view must stay fitted to
+    /// the photo on screen, not take the next photo's aspect.
+    #[test]
+    fn the_next_photos_size_does_not_refit_the_photo_on_screen() {
+        let (mut app, paths) = fitted_app("loupe-next-size", (1440.0, 900.0));
+        app.exif_cache.insert(
+            paths[1].clone(),
+            image_decode::ImageMetadata {
+                source_size: Some((6000, 4000)),
+                ..Default::default()
+            },
+        );
+        let before = app.loupe_transform();
+
+        app.want = Some(paths[2].clone());
+        app.on_exif_info(vec![(
+            paths[2].clone(),
+            image_decode::ImageMetadata {
+                source_size: Some((3000, 6000)),
+                ..Default::default()
+            },
+        )]);
+
+        assert_eq!(app.display_size(), (6000.0, 4000.0));
+        assert_eq!(app.loupe_transform(), before);
+    }
+
     #[test]
     fn a_small_photos_preview_shows_as_full_resolution() {
         let (app, _) = small_photo_app("loupe-small-tier");
