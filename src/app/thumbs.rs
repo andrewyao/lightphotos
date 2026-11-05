@@ -247,9 +247,19 @@ impl App {
     /// Image size in source pixels for all view math. Until the metadata
     /// lands, falls back to the texture's size. Every tier has the same aspect
     /// ratio, so a fit is already right; only absolute scales (100% zoom,
-    /// touch-up radii) need the real size.
+    /// touch-up radii) need the real size. `source_size` is the wanted
+    /// photo's, which a slow decode can leave on screen behind the previous
+    /// photo, so that one reads its size from the metadata cache.
     pub(super) fn image_size(&self) -> (f32, f32) {
-        self.source_size
+        let shown = self.shown.path();
+        let source_size = if shown.is_some() && shown == self.want.as_deref() {
+            self.source_size
+        } else {
+            shown
+                .and_then(|p| self.exif_cache.get(p))
+                .and_then(|m| m.source_size)
+        };
+        source_size
             .map(|(w, h)| (w as f32, h as f32))
             .or_else(|| {
                 self.renderer

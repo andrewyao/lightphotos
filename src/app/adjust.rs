@@ -1264,6 +1264,7 @@ mod tests {
         fn loupe(tag: &str) -> App {
             let (mut app, _dir, paths) = folder_app(tag, 1);
             app.mode = ViewMode::Loupe;
+            app.want = Some(paths[0].clone());
             app.shown = Shown::Preview(paths[0].clone(), 4000, 3000);
             app.source_size = Some((4000, 3000));
             app.develop_open = true;
