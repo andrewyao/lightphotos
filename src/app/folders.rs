@@ -906,6 +906,21 @@ mod tests {
         );
     }
 
+    /// Run frames until the open folder's lock is decided, leaving its
+    /// sidecar load pending. A quit ends the retries of an undecided lock,
+    /// so a test that quits first must not wait for the visit after.
+    fn decide_lock(app: &mut App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.folder_store.lock_undecided() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "folder lock never decided"
+            );
+            app.pump_folder_store();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// Review 3.7 round 2, findings 1 and 6: every lock is the UI thread's,
     /// so A, B, A in quick succession, with loads still running, leaves A
     /// writable on its lock and B free, and a quit right after an open
@@ -930,6 +945,7 @@ mod tests {
         let writable = !app.read_only();
         let rated = crate::sidecar::read_record(&photo).unwrap().rating;
         app.load_playlist(Playlist::from_dir(&b), b.clone());
+        decide_lock(&mut app);
         app.folder_store.begin_quit();
         app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
