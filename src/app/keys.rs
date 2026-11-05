@@ -1268,6 +1268,67 @@ mod tests {
     }
 
     #[test]
+    fn a_slide_show_holds_a_photo_until_the_next_one_has_decoded() {
+        use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
+        use crate::jobs::loader::Loader;
+        use crate::jobs::thumbnail::Origin;
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, paths) = editor_app();
+        app.loader = Some(Loader::queue_only_for_test());
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        let t0 = Instant::now();
+        let next = app.tick_slideshow(t0).unwrap_or(t0);
+
+        // Time is up, but only the next photo's thumbnail could be shown.
+        let up = next + Duration::from_secs(1);
+        let again = app.tick_slideshow(up);
+        assert_eq!(
+            app.sel,
+            Some(0),
+            "the photo stays up while the next decodes"
+        );
+        assert!(again.is_some_and(|at| at < up + Duration::from_millis(100)));
+        app.tick_slideshow(up + Duration::from_secs(5));
+        assert_eq!(app.sel, Some(0));
+
+        let target = app.preview_px();
+        let img = std::sync::Arc::new(DecodedImage::new_tracked(DecodedImageFields {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+            pixel_format: PixelFormat::Srgb8,
+        }));
+        if let Some(loader) = &mut app.loader {
+            loader.insert_preview_external(paths[1].clone(), target, img, Origin::Decoded);
+        }
+        app.tick_slideshow(up + Duration::from_secs(6));
+        assert_eq!(app.sel, Some(1), "it steps once the next photo is decoded");
+    }
+
+    #[test]
+    fn a_slide_show_steps_anyway_when_the_next_photo_never_decodes() {
+        use crate::jobs::loader::Loader;
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, _) = editor_app();
+        app.loader = Some(Loader::queue_only_for_test());
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        let t0 = Instant::now();
+        let next = app.tick_slideshow(t0).unwrap_or(t0);
+        app.tick_slideshow(next + Duration::from_secs(9));
+        assert_eq!(app.sel, Some(0));
+        app.tick_slideshow(next + Duration::from_secs(11));
+        assert_eq!(
+            app.sel,
+            Some(1),
+            "a photo that cannot decode must not hold the show"
+        );
+    }
+
+    #[test]
     fn a_slide_show_from_the_grid_goes_back_to_it() {
         let (mut app, _) = folder_app(3);
         let panels = (app.develop_open, app.side_page);

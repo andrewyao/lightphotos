@@ -598,6 +598,19 @@ impl App {
         }
     }
 
+    /// Whether the photo the show takes next has a decode the Loupe can
+    /// show, so stepping to it lands sharp rather than on its thumbnail.
+    /// True when there is nothing to wait for.
+    fn slideshow_next_loaded(&self) -> bool {
+        let Some(path) = self.slideshow_next_pos().and_then(|p| self.cell_path(p)) else {
+            return true;
+        };
+        let Some(loader) = &self.loader else {
+            return true;
+        };
+        loader.get_full(&path).is_some() || loader.get_preview(&path, self.preview_px()).is_some()
+    }
+
     /// Asks for the face analysis of the photo after this one, so its
     /// faces are known when it shows, and says whether the analysis of the
     /// photo shown is still running. A show that doesn't fill has no use
@@ -624,6 +637,7 @@ impl App {
         let dialog = self.confirm_open() || self.preset_name_edit.is_some();
         let faces_pending = self.slide_faces_pending();
         let ready = photo_ready(&self.shown, self.want.as_deref());
+        let next_loaded = self.slideshow_next_loaded();
         let shown_path = self.shown.path().map(Path::to_path_buf);
         let show = self.fullscreen.as_mut()?.slideshow.as_mut()?;
         // These act on the photo shown when they are answered.
@@ -691,6 +705,11 @@ impl App {
                 self.push_transform();
             }
             return Some(next_at);
+        }
+        // The photo stays up past its time until the next one has decoded,
+        // so the show never fades into its thumbnail.
+        if !stepped && !next_loaded && now.saturating_duration_since(show.next_at) < LOAD_PATIENCE {
+            return Some(now + LOAD_WAIT);
         }
         show.next_at = now + slide;
         show.progress = 0.0;
