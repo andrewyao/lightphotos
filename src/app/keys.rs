@@ -1308,6 +1308,55 @@ mod tests {
     }
 
     #[test]
+    fn a_slide_show_waits_for_the_final_decode_not_a_quick_pass() {
+        use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
+        use crate::jobs::loader::Loader;
+        use crate::jobs::thumbnail::Origin;
+        use std::time::Duration;
+        use web_time::Instant;
+
+        let (mut app, paths) = editor_app();
+        let target = app.preview_px();
+        let image = |side: u32| {
+            std::sync::Arc::new(DecodedImage::new_tracked(DecodedImageFields {
+                width: side,
+                height: side,
+                rgba: vec![0; (side * side * 4) as usize],
+                pixel_format: PixelFormat::Srgb8,
+            }))
+        };
+        app.loader = Some(Loader::queue_only_for_test());
+        // The first photo is only a quick pass, smaller than the target.
+        if let Some(loader) = &mut app.loader {
+            loader.insert_speed((paths[0].clone(), target), image(2), Origin::Decoded);
+        }
+        press(&mut app, ModifiersState::SUPER, KeyCode::Enter);
+        app.wait_for_first_photo();
+        let t0 = Instant::now();
+        app.tick_slideshow(t0 + Duration::from_secs(1));
+        assert!(app.slide_cover(), "a quick pass is not shown");
+        if let Some(loader) = &mut app.loader {
+            loader.insert_preview_external(paths[0].clone(), target, image(2), Origin::Decoded);
+        }
+        app.tick_slideshow(t0 + Duration::from_secs(2));
+        assert!(!app.slide_cover(), "the final decode starts the show");
+
+        // The next photo's quick pass does not let the show step either.
+        if let Some(loader) = &mut app.loader {
+            loader.insert_speed((paths[1].clone(), target), image(2), Origin::Decoded);
+        }
+        let next = app.tick_slideshow(t0 + Duration::from_secs(2));
+        let up = next.unwrap_or(t0) + Duration::from_secs(1);
+        app.tick_slideshow(up);
+        assert_eq!(app.sel, Some(0), "the previous photo stays up");
+        if let Some(loader) = &mut app.loader {
+            loader.insert_preview_external(paths[1].clone(), target, image(2), Origin::Decoded);
+        }
+        app.tick_slideshow(up + Duration::from_millis(100));
+        assert_eq!(app.sel, Some(1));
+    }
+
+    #[test]
     fn a_slide_show_steps_anyway_when_the_next_photo_never_decodes() {
         use crate::jobs::loader::Loader;
         use std::time::Duration;

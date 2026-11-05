@@ -54,7 +54,7 @@ const LOAD_WAIT: Duration = Duration::from_millis(50);
 const LOAD_PATIENCE: Duration = Duration::from_secs(10);
 
 /// Whether the Loupe has uploaded a decode of `want`, not the thumbnail that
-/// stands in while it loads.
+/// stands in while it loads. `photo_settled` says whether it is the final one.
 fn photo_ready(shown: &super::Shown, want: Option<&Path>) -> bool {
     use super::Shown as Loupe;
     match shown {
@@ -598,17 +598,24 @@ impl App {
         }
     }
 
-    /// Whether the photo the show takes next has a decode the Loupe can
-    /// show, so stepping to it lands sharp rather than on its thumbnail.
-    /// True when there is nothing to wait for.
-    fn slideshow_next_loaded(&self) -> bool {
-        let Some(path) = self.slideshow_next_pos().and_then(|p| self.cell_path(p)) else {
-            return true;
-        };
+    /// Whether `path` has the decode the Loupe settles on, not a quick pass
+    /// that a sharper one replaces or a full decode still running. True when
+    /// there is nothing to wait for.
+    fn photo_settled(&self, path: &Path) -> bool {
         let Some(loader) = &self.loader else {
             return true;
         };
-        loader.get_full(&path).is_some() || loader.get_preview(&path, self.preview_px()).is_some()
+        loader.get_full(path).is_some()
+            || (loader.preview_settled(path, self.preview_px()) && !loader.full_inflight(path))
+    }
+
+    /// Whether the photo the show takes next is decoded, so stepping to it
+    /// lands sharp rather than on its thumbnail or a quick pass. True when
+    /// there is nothing to wait for.
+    fn slideshow_next_loaded(&self) -> bool {
+        self.slideshow_next_pos()
+            .and_then(|p| self.cell_path(p))
+            .is_none_or(|path| self.photo_settled(&path))
     }
 
     /// Asks for the face analysis of the photo after this one, so its
@@ -636,7 +643,8 @@ impl App {
         let slide = self.slideshow_settings.slide();
         let dialog = self.confirm_open() || self.preset_name_edit.is_some();
         let faces_pending = self.slide_faces_pending();
-        let ready = photo_ready(&self.shown, self.want.as_deref());
+        let ready = photo_ready(&self.shown, self.want.as_deref())
+            && self.want.as_deref().is_none_or(|w| self.photo_settled(w));
         let next_loaded = self.slideshow_next_loaded();
         let shown_path = self.shown.path().map(Path::to_path_buf);
         let show = self.fullscreen.as_mut()?.slideshow.as_mut()?;

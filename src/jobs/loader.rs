@@ -1154,6 +1154,18 @@ impl Loader {
         self.previews.get(&(path.to_path_buf(), target_px)).cloned()
     }
 
+    /// Whether `get_preview`'s image is the one the Loupe settles on: the
+    /// `Preview` decode, or a speed result that already reaches `target_px`,
+    /// which no later decode replaces.
+    pub fn preview_settled(&self, path: &Path, target_px: u32) -> bool {
+        let key = (path.to_path_buf(), target_px);
+        self.has_preview(&key)
+            || self
+                .previews
+                .get(&key)
+                .is_some_and(|img| img.width.max(img.height) >= target_px)
+    }
+
     /// Whether `key`'s `Preview` decode, not only its speed pass, is held.
     fn has_preview(&self, key: &(PathBuf, u32)) -> bool {
         self.previews.contains(key) && !self.speed_keys.contains(key)
@@ -1962,7 +1974,12 @@ impl Loader {
 
     // A landed preview replaces the speed result, which `get_preview` would
     // never return again.
-    fn insert_speed(&mut self, key: (PathBuf, u32), img: Arc<DecodedImage>, origin: Origin) {
+    pub(crate) fn insert_speed(
+        &mut self,
+        key: (PathBuf, u32),
+        img: Arc<DecodedImage>,
+        origin: Origin,
+    ) {
         if self.has_preview(&key) {
             return;
         }
