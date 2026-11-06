@@ -150,8 +150,16 @@ impl App {
         {
             return false;
         }
-        let zoom = self.slide_view().map_or(self.zoom(), |(zoom, _)| zoom);
-        self.outruns_preview_at(zoom) && !self.preview_is_complete()
+        // A slide show decides once per photo, as it loads the next one, so
+        // the photo never sharpens mid-slide. Once up, the full decode may
+        // leave the tier to make room for the next photo's; the GPU keeps it.
+        if self.slideshow_playing() && !self.compare {
+            return self
+                .want
+                .as_deref()
+                .is_some_and(|w| !self.shown.is_full_of(w) && self.slide_needs_full(w));
+        }
+        self.outruns_preview_at(self.zoom()) && !self.preview_is_complete()
     }
 
     /// Whether the wanted photo's landed preview already holds every source
@@ -801,7 +809,7 @@ fn frame_size((w, h): (f32, f32), [l, t, r, b]: [f32; 4]) -> (f32, f32) {
     ((r - l) * w, (b - t) * h)
 }
 
-fn fit_scale_of(image_size: (f32, f32), area: (f32, f32)) -> f32 {
+pub(super) fn fit_scale_of(image_size: (f32, f32), area: (f32, f32)) -> f32 {
     let (iw, ih) = image_size;
     let (ww, wh) = area;
     (ww / iw).min(wh / ih)

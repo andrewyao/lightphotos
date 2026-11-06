@@ -143,13 +143,7 @@ impl Deck {
     /// photo is shuffled in again, the one just taken not first, so none
     /// shows twice in a row. `None` when there is no other photo.
     pub(super) fn take(&mut self, cur: Option<usize>, n: usize) -> Option<usize> {
-        if self.peek(cur, n).is_none() {
-            let start = self.fresh;
-            self.shuffle(cur, n);
-            if start {
-                self.left.retain(|&p| Some(p) != cur);
-            }
-        }
+        self.refill(cur, n);
         let next = self.peek(cur, n)?;
         while let Some(p) = self.left.pop() {
             if p == next {
@@ -160,6 +154,20 @@ impl Deck {
             self.shuffle(Some(next), n);
         }
         Some(next)
+    }
+
+    /// Shuffles the photos in when none is left after `cur`, as `take`
+    /// would, so `peek` knows the next photo and it can load ahead. The
+    /// first shuffle leaves out `cur`, the photo the show starts on.
+    pub(super) fn refill(&mut self, cur: Option<usize>, n: usize) {
+        if self.peek(cur, n).is_some() {
+            return;
+        }
+        let start = self.fresh;
+        self.shuffle(cur, n);
+        if start {
+            self.left.retain(|&p| Some(p) != cur);
+        }
     }
 
     /// Fills the deck with every position in random order, `skip` not

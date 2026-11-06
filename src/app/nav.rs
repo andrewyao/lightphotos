@@ -644,6 +644,10 @@ impl App {
             return;
         }
         let target = self.preview_px();
+        if self.slideshow_playing() {
+            self.request_slide_next(target);
+            return;
+        }
         let current_ready = match (&self.want, self.loader.as_ref()) {
             (Some(want), Some(loader)) => loader.get_preview(want, target).is_some(),
             _ => false,
@@ -692,16 +696,44 @@ impl App {
         }
     }
 
-    /// The previous and next photos around the selection, wrapping.
+    /// Loads the photo a slide show takes next, at the decode the show
+    /// waits for, once the photo on screen has its own, so the two never
+    /// compete. On wasm32 `request_web_preview` loads it instead.
+    fn request_slide_next(&mut self, target: u32) {
+        use super::fullscreen::SlideDecode;
+        let current = self.want.as_deref().map(|w| self.slide_decode(w));
+        if current == Some(SlideDecode::Pending) {
+            return;
+        }
+        let Some(next) = self.neighbor_paths().into_iter().next() else {
+            return;
+        };
+        let full = self.slide_needs_full(&next);
+        if let Some(loader) = &mut self.loader {
+            loader.request_preview(next.clone(), target);
+            #[cfg(not(target_arch = "wasm32"))]
+            if full {
+                loader.request_full(next);
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = full;
+    }
+
+    /// The previous and next photos around the selection, wrapping, or in a
+    /// slide show the one it takes next.
     pub(super) fn neighbor_paths(&self) -> Vec<PathBuf> {
         let n = self.visible.len();
         let Some(cur) = self.sel.filter(|_| n > 1) else {
             return Vec::new();
         };
-        // A random slide show loads the photo it takes next instead of the
-        // one before.
-        let first = self.slideshow_next().unwrap_or((cur + n - 1) % n);
-        [first, (cur + 1) % n]
+        // A slide show only goes forward, to the photo it takes next.
+        let positions = if self.slideshow_playing() {
+            self.slideshow_next_pos().into_iter().collect()
+        } else {
+            vec![(cur + n - 1) % n, (cur + 1) % n]
+        };
+        positions
             .iter()
             .filter_map(|&p| self.visible.get(p).copied())
             .filter_map(|i| self.playlist.as_ref().and_then(|pl| pl.entry(i)))

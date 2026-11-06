@@ -1288,6 +1288,14 @@ impl App {
         landed
     }
 
+    /// Whether the browser's decode of `path`'s preview at `target` failed
+    /// for good.
+    pub(super) fn web_preview_failed(&self, path: &Path, target: u32) -> bool {
+        self.web
+            .preview_failed
+            .contains(&(path.to_path_buf(), target))
+    }
+
     /// The wasm32 version of `loader.request_full`: reads the wanted photo and
     /// asks the Worker pool for a full decode at the GPU's max texture size.
     /// Returns true if a read started.

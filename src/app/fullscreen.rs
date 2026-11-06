@@ -46,21 +46,23 @@ const FACE_WAIT: Duration = Duration::from_millis(50);
 /// A job that dies in the browser sends no result, so the wait needs an end.
 const FACE_PATIENCE: Duration = Duration::from_secs(3);
 
-/// How often to look again while the first photo loads.
+/// How often to look again while a photo decodes.
 const LOAD_WAIT: Duration = Duration::from_millis(50);
 
-/// How long the show waits for its first photo before it starts anyway, so a
-/// photo that never loads does not leave a black screen.
-const LOAD_PATIENCE: Duration = Duration::from_secs(10);
+/// How long the show waits on one photo's decode before it counts the decode
+/// as failed. A decode reports a failure, so this only ends the wait for a
+/// job that dies without a word, as one in the browser can.
+const LOAD_PATIENCE: Duration = Duration::from_secs(60);
 
-/// Whether the Loupe has uploaded a decode of `want`, not the thumbnail that
-/// stands in while it loads. `photo_settled` says whether it is the final one.
-fn photo_ready(shown: &super::Shown, want: Option<&Path>) -> bool {
-    use super::Shown as Loupe;
-    match shown {
-        Loupe::Preview(path, ..) | Loupe::Full(path) => Some(path.as_path()) == want,
-        Loupe::Nothing | Loupe::Thumb(_) => false,
-    }
+/// Where a photo's decode for the show stands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum SlideDecode {
+    /// The decode the show settles on has landed, so the photo shows sharp.
+    Ready,
+    /// Still decoding.
+    Pending,
+    /// It can't decode, so the show passes it by.
+    Failed,
 }
 
 /// The opacity of the photo fading out, `elapsed` into the fade; `None`
@@ -282,11 +284,17 @@ struct Slideshow {
     progress: f32,
     /// A dialog was open at the last tick; the photo gets its time again after.
     held: bool,
-    /// The first photo has loaded, so the clock runs and the photo shows.
-    /// A show with no window has nothing to wait for.
+    /// The photo on screen has decoded, so its clock runs. The first photo
+    /// and one the user steps to show at once and sharpen as they decode;
+    /// one the show steps to has decoded already. A show with no window has
+    /// nothing to wait for.
     started: bool,
-    /// When the show began, for how long it has waited for its first photo.
+    /// Since when the clock has waited for the photo on screen to decode.
     began: Instant,
+    /// The photo the show takes next, and since when it has waited for it.
+    next_wait: Option<(PathBuf, Instant)>,
+    /// Photos whose decode never reported back. The show passes them by.
+    gave_up: HashSet<PathBuf>,
     /// The photo whose faces the show is waiting for, and since when.
     faces_wait: Option<(PathBuf, Instant)>,
     /// A photo the show stopped waiting for. It pans without faces, even if
@@ -443,6 +451,9 @@ impl App {
             self.toggle_fullscreen();
         }
         let sel = self.sel;
+        if let Some(deck) = &mut deck {
+            deck.refill(sel, self.visible.len());
+        }
         if let Some(shown) = &mut self.fullscreen {
             let mut show = Slideshow {
                 sel,
@@ -454,6 +465,8 @@ impl App {
                 held: false,
                 started: self.renderer.is_none(),
                 began: Instant::now(),
+                next_wait: None,
+                gave_up: HashSet::new(),
                 faces_wait: None,
                 faces_skipped: None,
                 reverse: false,
@@ -469,9 +482,9 @@ impl App {
         self.request_neighbors();
     }
 
-    /// Whether the show is still waiting for its first photo, which a black
-    /// cover hides the thumbnail placeholder behind.
-    pub(crate) fn slide_cover(&self) -> bool {
+    /// Whether the show's clock waits for the photo on screen to decode.
+    #[cfg(test)]
+    pub(crate) fn slide_waiting(&self) -> bool {
         self.slideshow().is_some_and(|show| !show.started)
     }
 
@@ -523,14 +536,6 @@ impl App {
             focus,
             show.reverse,
         )
-    }
-
-    /// The photo a random show takes next, to load ahead.
-    pub(super) fn slideshow_next(&self) -> Option<usize> {
-        self.slideshow()?
-            .deck
-            .as_ref()?
-            .peek(self.sel, self.visible.len())
     }
 
     /// Makes the show pan photos without faces one way, now and for every
@@ -589,33 +594,125 @@ impl App {
         ])
     }
 
-    /// The photo the show takes after this one, if it is known yet.
-    fn slideshow_next_pos(&self) -> Option<usize> {
+    /// The photo the show takes after this one, if it is known yet. A show
+    /// in grid order passes by photos that can't decode; a random one drops
+    /// them from its deck in `skip_failed_next`.
+    pub(super) fn slideshow_next_pos(&self) -> Option<usize> {
         let n = self.visible.len();
         match &self.slideshow()?.deck {
             Some(deck) => deck.peek(self.sel, n),
-            None => (n > 1).then(|| self.sel.map_or(0, |s| (s + 1) % n)),
+            None if n > 1 => {
+                let from = self.sel.map_or(0, |s| s + 1);
+                (0..n)
+                    .map(|k| (from + k) % n)
+                    .filter(|&p| Some(p) != self.sel)
+                    .find(|&p| self.slide_decode_at(p) != SlideDecode::Failed)
+            }
+            None => None,
         }
     }
 
-    /// Whether `path` has the decode the Loupe settles on, not a quick pass
-    /// that a sharper one replaces or a full decode still running. True when
-    /// there is nothing to wait for.
-    fn photo_settled(&self, path: &Path) -> bool {
-        let Some(loader) = &self.loader else {
-            return true;
-        };
-        loader.get_full(path).is_some()
-            || (loader.preview_settled(path, self.preview_px()) && !loader.full_inflight(path))
+    /// Shuffles a random show's deck in ahead of time, and drops from it the
+    /// photos next in line that can't decode, so the show neither waits for
+    /// them nor shows them soft.
+    fn skip_failed_next(&mut self) {
+        let (sel, n) = (self.sel, self.visible.len());
+        if let Some(deck) = self
+            .fullscreen
+            .as_mut()
+            .and_then(|shown| shown.slideshow.as_mut())
+            .and_then(|show| show.deck.as_mut())
+        {
+            deck.refill(sel, n);
+        }
+        for _ in 0..n {
+            let Some(next) = self.slideshow_next_pos() else {
+                return;
+            };
+            if self.slide_decode_at(next) != SlideDecode::Failed {
+                return;
+            }
+            let Some(deck) = self
+                .fullscreen
+                .as_mut()
+                .and_then(|shown| shown.slideshow.as_mut())
+                .and_then(|show| show.deck.as_mut())
+            else {
+                return;
+            };
+            deck.take(sel, n);
+        }
     }
 
-    /// Whether the photo the show takes next is decoded, so stepping to it
-    /// lands sharp rather than on its thumbnail or a quick pass. True when
-    /// there is nothing to wait for.
-    fn slideshow_next_loaded(&self) -> bool {
-        self.slideshow_next_pos()
-            .and_then(|p| self.cell_path(p))
-            .is_none_or(|path| self.photo_settled(&path))
+    fn slide_decode_at(&self, pos: usize) -> SlideDecode {
+        self.cell_path(pos)
+            .map_or(SlideDecode::Failed, |path| self.slide_decode(&path))
+    }
+
+    /// Whether the show needs `path`'s full-resolution decode to show it
+    /// sharp: its source is larger than the preview and the slide shows it
+    /// larger, filled (where a crop or faces can zoom further in), cropped,
+    /// or fitted to a screen bigger than the preview. Decided once per photo
+    /// so it never sharpens mid-slide. The web build keeps one full decode,
+    /// so it shows the preview.
+    pub(super) fn slide_needs_full(&self, path: &Path) -> bool {
+        if cfg!(target_arch = "wasm32") {
+            return false;
+        }
+        let preview = self.preview_px();
+        let fill = self.slideshow_settings.fill;
+        let Some((w, h)) = self.exif_cache.get(path).and_then(|m| m.source_size) else {
+            return fill;
+        };
+        if w.max(h) <= preview {
+            return false;
+        }
+        let cropped = self.edits.get(path).is_some_and(|adj| adj.crop.is_some());
+        fill || cropped || {
+            let (w, h) = (w as f32, h as f32);
+            let area = self.loupe_area();
+            // Either way up, since a quarter turn swaps the sides.
+            let fit = super::loupe::fit_scale_of((w, h), area)
+                .max(super::loupe::fit_scale_of((h, w), area));
+            w.max(h) * fit * self.panel_scale > preview as f32
+        }
+    }
+
+    /// Where `path`'s decode for the show stands: `Ready` once the decode
+    /// the Loupe settles on has landed, so not the thumbnail, a quick pass
+    /// that a sharper one replaces, or a preview that a running or needed
+    /// full decode replaces.
+    pub(super) fn slide_decode(&self, path: &Path) -> SlideDecode {
+        if self
+            .slideshow()
+            .is_some_and(|show| show.gave_up.contains(path))
+        {
+            return SlideDecode::Failed;
+        }
+        let Some(loader) = &self.loader else {
+            return SlideDecode::Ready;
+        };
+        // On screen at full resolution, whether or not the tier still has it.
+        if loader.get_full(path).is_some() || self.shown.is_full_of(path) {
+            return SlideDecode::Ready;
+        }
+        // A full decode that fails leaves the preview as the best there is.
+        if self.slide_needs_full(path) && !loader.full_failed(path) {
+            return SlideDecode::Pending;
+        }
+        let target = self.preview_px();
+        if loader.preview_settled(path, target) && !loader.full_inflight(path) {
+            return SlideDecode::Ready;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let failed = self.web_preview_failed(path, target);
+        #[cfg(not(target_arch = "wasm32"))]
+        let failed = loader.preview_failed(path, target);
+        if failed {
+            SlideDecode::Failed
+        } else {
+            SlideDecode::Pending
+        }
     }
 
     /// Asks for the face analysis of the photo after this one, so its
@@ -634,7 +731,9 @@ impl App {
     }
 
     /// Steps the slide show when its photo's time is up, and returns when
-    /// to call again.
+    /// to call again. The show steps only to a photo whose decode has
+    /// landed, so it never shows one soft: the photo on screen stays up past
+    /// its time until then. A photo that can't decode is passed by.
     pub(crate) fn tick_slideshow(&mut self, now: Instant) -> Option<Instant> {
         if !self.fullscreen_shown() {
             return None;
@@ -643,16 +742,24 @@ impl App {
         let slide = self.slideshow_settings.slide();
         let dialog = self.confirm_open() || self.preset_name_edit.is_some();
         let faces_pending = self.slide_faces_pending();
-        let ready = photo_ready(&self.shown, self.want.as_deref())
-            && self.want.as_deref().is_none_or(|w| self.photo_settled(w));
-        let next_loaded = self.slideshow_next_loaded();
+        // With no window nothing uploads, so nothing is waited for.
+        let windowed = self.renderer.is_some();
+        let current = match self.want.as_deref() {
+            Some(want) if !windowed || self.shown.path() == Some(want) => self.slide_decode(want),
+            Some(_) => SlideDecode::Pending,
+            None => SlideDecode::Ready,
+        };
+        self.skip_failed_next();
+        let next = self.slideshow_next_pos();
+        let next_path = next.and_then(|p| self.cell_path(p));
+        let next_decode = next_path.as_deref().map(|p| self.slide_decode(p));
         let shown_path = self.shown.path().map(Path::to_path_buf);
         let show = self.fullscreen.as_mut()?.slideshow.as_mut()?;
         // These act on the photo shown when they are answered.
         if dialog {
             show.held = true;
             // A dialog is not the photo's fault, so it does not use up the
-            // wait for the first one.
+            // wait for its decode.
             show.began = now;
             return None;
         }
@@ -661,10 +768,32 @@ impl App {
             show.next_at = now + slide;
             show.progress = 0.0;
         }
-        // The first photo is not shown, nor its time started, until it has
-        // loaded.
+        // A photo the user steps to shows at once and sharpens as it
+        // decodes, like the first, and gets its full time once decoded.
+        let stepped = show.sel != sel;
+        if stepped {
+            show.sel = sel;
+            show.started = !windowed;
+            show.began = now;
+            show.next_at = now + slide;
+            show.progress = 0.0;
+            show.next_wait = None;
+            show.roll();
+        }
+        let fade_over = show
+            .fade
+            .is_some_and(|(_, at)| fade_opacity(now.saturating_duration_since(at)).is_none());
+        if fade_over || stepped {
+            show.fade = None;
+            if let Some(r) = &mut self.renderer {
+                r.free_snapshot();
+            }
+        }
+        // The photo's time starts once it has decoded.
         if !show.started {
-            if !ready && now.saturating_duration_since(show.began) < LOAD_PATIENCE {
+            if current == SlideDecode::Pending
+                && now.saturating_duration_since(show.began) < LOAD_PATIENCE
+            {
                 show.next_at = now + slide;
                 show.progress = 0.0;
                 return Some(now + LOAD_WAIT);
@@ -672,17 +801,6 @@ impl App {
             show.started = true;
             show.next_at = now + slide;
             show.progress = 0.0;
-        }
-        let fade_over = show
-            .fade
-            .is_some_and(|(_, at)| fade_opacity(now.saturating_duration_since(at)).is_none());
-        // A photo the user steps to shows at once, for its full time.
-        let stepped = show.sel != sel;
-        if fade_over || stepped {
-            show.fade = None;
-            if let Some(r) = &mut self.renderer {
-                r.free_snapshot();
-            }
         }
         // The photo's pan depends on where its faces are, so its time waits
         // for them.
@@ -704,7 +822,7 @@ impl App {
             }
             show.faces_skipped = shown_path;
         }
-        if !stepped && now < show.next_at {
+        if now < show.next_at {
             let left = show.next_at.saturating_duration_since(now);
             show.progress = 1.0 - left.as_secs_f32() / slide.as_secs_f32();
             let next_at = show.next_at;
@@ -714,20 +832,39 @@ impl App {
             }
             return Some(next_at);
         }
-        // The photo stays up past its time until the next one has decoded,
-        // so the show never fades into its thumbnail.
-        if !stepped && !next_loaded && now.saturating_duration_since(show.next_at) < LOAD_PATIENCE {
+        // The photo stays up past its time until the next one has decoded.
+        if next_decode == Some(SlideDecode::Pending) {
+            let since = match &show.next_wait {
+                Some((path, since)) if Some(path) == next_path.as_ref() => *since,
+                _ => {
+                    show.next_wait = next_path.clone().map(|path| (path, now));
+                    now
+                }
+            };
+            if now.saturating_duration_since(since) >= LOAD_PATIENCE {
+                // A decode that never reports back; the next tick passes it by.
+                if let Some(path) = next_path {
+                    eprintln!(
+                        "[lightphotos] slide show: gave up on {} after {LOAD_PATIENCE:?}",
+                        path.display()
+                    );
+                    show.gave_up.insert(path);
+                }
+                show.next_wait = None;
+            }
             return Some(now + LOAD_WAIT);
         }
+        show.next_wait = None;
         show.next_at = now + slide;
         show.progress = 0.0;
         show.roll();
-        let next = match &mut show.deck {
-            _ if stepped => None,
-            Some(deck) => deck.take(sel, n),
-            None => (n > 1).then(|| sel.map_or(0, |s| (s + 1) % n)),
+        // Nothing else that can decode: this photo goes round again.
+        let ready_next = next.filter(|_| next_decode == Some(SlideDecode::Ready));
+        let step = match (&mut show.deck, ready_next) {
+            (Some(deck), Some(_)) => deck.take(sel, n),
+            (_, pos) => pos,
         };
-        if let Some(pos) = next {
+        if let Some(pos) = step {
             show.fade = self
                 .renderer
                 .as_mut()
@@ -1217,6 +1354,8 @@ mod tests {
             held: false,
             started: true,
             began: Instant::now(),
+            next_wait: None,
+            gave_up: HashSet::new(),
             faces_wait: None,
             faces_skipped: None,
             reverse: false,

@@ -1166,6 +1166,26 @@ impl Loader {
                 .is_some_and(|img| img.width.max(img.height) >= target_px)
     }
 
+    /// Whether the Loupe's view of `path` at `target_px` failed to decode.
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the web build tracks its own preview failures")
+    )]
+    pub fn preview_failed(&self, path: &Path, target_px: u32) -> bool {
+        self.view_failed.contains(&(path.to_path_buf(), target_px))
+    }
+
+    /// Whether `path`'s full-resolution decode failed.
+    pub fn full_failed(&self, path: &Path) -> bool {
+        self.full_failed.contains(path)
+    }
+
+    /// Records that the Loupe's view of `path` at `target_px` failed.
+    #[cfg(test)]
+    pub(crate) fn fail_preview_for_test(&mut self, path: PathBuf, target_px: u32) {
+        self.view_failed.insert((path, target_px));
+    }
+
     /// Whether `key`'s `Preview` decode, not only its speed pass, is held.
     fn has_preview(&self, key: &(PathBuf, u32)) -> bool {
         self.previews.contains(key) && !self.speed_keys.contains(key)
@@ -1301,7 +1321,13 @@ impl Loader {
     /// tests can inspect them.
     #[cfg(test)]
     pub(crate) fn queue_only_for_test() -> Self {
-        let mut loader = Self::with_workers(16384, 0, CacheLimits::PLATFORM);
+        Self::queue_only_with_limits_for_test(CacheLimits::PLATFORM)
+    }
+
+    /// `queue_only_for_test` with the given cache limits.
+    #[cfg(test)]
+    pub(crate) fn queue_only_with_limits_for_test(limits: CacheLimits) -> Self {
+        let mut loader = Self::with_workers(16384, 0, limits);
         loader.workers = 1;
         loader
     }

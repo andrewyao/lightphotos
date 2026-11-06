@@ -79,8 +79,25 @@ impl App {
         let mut previews = vec![(want.clone(), px)];
         previews.extend(neighbors.iter().map(|p| (p.clone(), px)));
         previews.extend(self.compare_previews_waiting());
+        // A slide show needs the next photo's full decode more than the
+        // shown one's, which the GPU already holds. When both don't fit the
+        // full tier, the shown one may go.
         #[cfg(not(target_arch = "wasm32"))]
-        let fulls = std::iter::once(want)
+        let keep_shown = !self.slideshow_playing()
+            || self.loader.as_ref().is_some_and(|loader| {
+                let sized: Vec<_> = neighbors
+                    .iter()
+                    .map(|p| {
+                        let size = self.exif_cache.get(p).and_then(|m| m.source_size);
+                        (p.clone(), size)
+                    })
+                    .collect();
+                loader.neighbor_fulls_fit(&want, &sized)
+            });
+        #[cfg(not(target_arch = "wasm32"))]
+        let fulls = keep_shown
+            .then_some(want)
+            .into_iter()
             .chain(neighbors)
             .chain(self.compare_fulls_waiting())
             .collect();
