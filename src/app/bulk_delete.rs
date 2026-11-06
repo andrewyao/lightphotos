@@ -181,7 +181,24 @@ impl App {
 
     /// Begin trashing `paths`. Refused while another delete or an export is
     /// running: the export reads bytes from files this batch would remove.
-    pub(super) fn start_delete(&mut self, mut paths: Vec<PathBuf>) {
+    pub(super) fn start_delete(&mut self, paths: Vec<PathBuf>) {
+        self.start_delete_with(
+            paths,
+            #[cfg(not(target_arch = "wasm32"))]
+            spawn_trash_worker,
+        );
+    }
+
+    /// [`Self::start_delete`] with the trash worker passed in, so a test can
+    /// stand in for it and hand back results at its own pace.
+    fn start_delete_with(
+        &mut self,
+        mut paths: Vec<PathBuf>,
+        #[cfg(not(target_arch = "wasm32"))] spawn_worker: impl FnOnce(
+            Sender<DeleteResult>,
+        )
+            -> Option<Sender<PathBuf>>,
+    ) {
         let mut seen = HashSet::new();
         paths.retain(|p| seen.insert(p.clone()));
         if paths.is_empty() {
@@ -218,7 +235,7 @@ impl App {
         };
 
         #[cfg(not(target_arch = "wasm32"))]
-        let submit = spawn_trash_worker(done_tx.clone());
+        let submit = spawn_worker(done_tx.clone());
 
         self.bulk_delete = Some(BulkDelete {
             queue: paths.into(),
@@ -623,25 +640,21 @@ mod tests {
     fn trashed_photos_leave_the_grid_without_touching_the_playlist() {
         let names = ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg"];
         let (mut app, dir, paths) = app_with_photos(&names);
-        app.start_delete(paths.clone());
 
-        // Take over the real worker's result channel. Results it already sent
-        // were collected by the poll in `start_delete`; any it sends later go
-        // to the dropped receiver.
-        let (results, pending) = {
-            let d = app.bulk_delete.as_mut().unwrap();
-            d.submit = None;
+        // Stand in for the worker: take every submission and trash nothing,
+        // so no result arrives until the test sends it.
+        let mut results = None;
+        let mut submitted = None;
+        app.start_delete_with(paths.clone(), |done_tx| {
+            results = Some(done_tx);
             let (tx, rx) = channel();
-            d.done_tx = tx.clone();
-            d.done_rx = rx;
-            let mut pending: Vec<PathBuf> = d.in_flight.iter().cloned().collect();
-            pending.sort();
-            (tx, pending)
-        };
-        assert!(
-            pending.len() > 1,
-            "the worker must not finish the batch inside `start_delete`"
-        );
+            submitted = Some(rx);
+            Some(tx)
+        });
+        let results = results.unwrap();
+        let mut pending: Vec<PathBuf> = submitted.unwrap().try_iter().collect();
+        pending.sort();
+        assert_eq!(pending.len(), names.len(), "every photo is submitted");
 
         let (last, before_last) = pending.split_last().unwrap();
         for (fed, path) in before_last.iter().enumerate() {
