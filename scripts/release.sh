@@ -75,5 +75,5 @@ echo "==> Tagging $(git rev-parse --short HEAD) as $version (previous: ${latest:
 git tag -f "$version" HEAD
 git push origin "refs/tags/$version"
 
-echo "==> Pushed $version. Follow the build with:"
+echo "==> Pushed $version. CI stamps the builds with ${version#v}, which the app's update check compares against the latest release. Follow the build with:"
 echo "    gh run watch \$(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"

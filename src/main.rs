@@ -32,6 +32,7 @@ mod persist;
 mod renderer;
 mod shell;
 mod ui;
+mod update;
 #[cfg(any(target_arch = "wasm32", test))]
 mod web;
 
@@ -542,6 +543,7 @@ impl App {
         let immich_connecting = self.poll_immich_connect() | self.poll_album_add();
         #[cfg(target_arch = "wasm32")]
         let immich_connecting = false;
+        let update_checking = self.poll_update_check();
         if !outcomes.is_empty() {
             self.on_export_outcomes(outcomes);
             self.request_redraw();
@@ -629,6 +631,7 @@ impl App {
                 || self.catalog.backlog() > 0
                 || marks_waiting
                 || immich_connecting
+                || update_checking
                 || vision_pending
                 || scoring
                 || detecting

@@ -68,6 +68,14 @@ jobs:
         shell: bash
         run: ./scripts/setup-vendor-rawler.sh
 
+      # The app's "update available" cue compares this with the latest GitHub
+      # release (`src/update.rs`). A manual run on a branch has no tag, so it
+      # ships unstamped, and an unstamped build never checks.
+      - name: Stamp the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: echo "LIGHTPHOTOS_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       # Only the shipped binary, not the mac-only dev probes in src/bin.
       - name: Build
         if: runner.os != 'macOS'

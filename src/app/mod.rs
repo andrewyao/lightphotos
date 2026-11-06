@@ -458,6 +458,8 @@ pub(crate) struct App {
     score_job: Option<crate::jobs::score::ScoreJob>,
     /// The export form, its settings and the exports it started.
     exports: export::Exports,
+    /// The running version and the newest release known, for the update cue.
+    update: crate::update::UpdateState,
     /// The running bulk delete, if any. `pub(crate)` because the frame loop
     /// polls it.
     pub(crate) bulk_delete: Option<bulk_delete::BulkDelete>,
@@ -839,6 +841,7 @@ pub(crate) use state::{PhotoList, State};
 pub(crate) mod test_support;
 mod thumbs;
 mod tour;
+mod update;
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
@@ -930,6 +933,11 @@ impl App {
             score_pool: None,
             score_job: None,
             exports: export::Exports::new(),
+            update: {
+                let mut update = crate::update::UpdateState::new();
+                update.start_if_due();
+                update
+            },
             bulk_delete: None,
             playlist: None,
             want: None,
@@ -1761,6 +1769,11 @@ impl App {
                     self.update_window_title();
                     self.request_redraw();
                 }
+                ui::UiAction::SetUpdateCheck(on) => {
+                    self.update.set_auto_check(on);
+                    self.request_redraw();
+                }
+                ui::UiAction::OpenDownloads => self.open_downloads(),
                 ui::UiAction::SetTheme(theme) => {
                     ui::theme::set(&self.egui_ctx, theme);
                     self.request_redraw();

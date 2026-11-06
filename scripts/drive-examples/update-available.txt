@@ -1,0 +1,11 @@
+# The "Update available" cue in the header and in Settings. Needs a stamped
+# build and a pretend latest release, so no request is made:
+#   LIGHTPHOTOS_VERSION=0.1.37 cargo build --release
+#   LIGHTPHOTOS_UPDATE_LATEST=0.1.38 ./target/release/lightphotos \
+#     --drive scripts/drive-examples/update-available.txt --drive-out /tmp/d
+size 1200 800
+idle
+shot update-header
+key cmd+,
+idle
+shot update-settings

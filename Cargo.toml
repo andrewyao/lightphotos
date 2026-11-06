@@ -126,6 +126,11 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 # `hotpath-alloc`: both install a global allocator.
 heap-stats = ["dep:cap"]
 
+# The Mac App Store build. Apple disallows pointing users at a download outside
+# the store, so this build never checks for a newer version or shows the cue
+# (`src/update.rs`). Off by default: the direct downloads keep it.
+app-store = []
+
 # Census. Compiles lightwatch's counters and its emit thread in; with it off,
 # every tracked type is the struct it would have been without the attribute.
 lightwatch = ["lightwatch/enabled"]

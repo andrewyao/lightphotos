@@ -406,6 +406,11 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         if raw_setting {
             labels.push(t.settings_raw);
         }
+        let version = app.current_version();
+        if version.is_some() {
+            labels.push(t.settings_version);
+            labels.push(t.settings_updates);
+        }
         let form = Form::new(ui, &labels);
         form.section(ui, t.form_general, |ui| {
             form.button_row(ui, t.settings_theme, |ui| {
@@ -430,6 +435,25 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
                     }
                 }
             });
+            if let Some(version) = version {
+                form.row(ui, t.settings_version, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(version.to_string());
+                        if app.update_available().is_some()
+                            && super::update_link(ui, t.update_available).clicked()
+                        {
+                            out.actions.push(UiAction::OpenDownloads);
+                        }
+                    });
+                });
+                form.row(ui, t.settings_updates, |ui| {
+                    let mut on = app.update_check_on();
+                    if ui.checkbox(&mut on, t.check_updates).changed() {
+                        out.actions.push(UiAction::SetUpdateCheck(on));
+                    }
+                    form::hint(ui, t.check_updates_hint);
+                });
+            }
         });
         #[cfg(target_os = "macos")]
         form.section(ui, t.develop, |ui| {

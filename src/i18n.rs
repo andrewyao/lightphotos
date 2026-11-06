@@ -277,6 +277,14 @@ pub struct Strings {
     )]
     pub apple_tone_curve_hint: &'static str,
     pub form_general: &'static str,
+    pub settings_version: &'static str,
+    pub settings_updates: &'static str,
+    pub check_updates: &'static str,
+    pub check_updates_hint: &'static str,
+    /// The header link, and the Settings one beside the version.
+    pub update_available: &'static str,
+    /// Hover text for those links; `{version}` stands for the new version.
+    pub update_tip: &'static str,
     pub theme_dark: &'static str,
     pub theme_medium: &'static str,
     pub theme_light: &'static str,

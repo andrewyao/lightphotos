@@ -161,6 +161,15 @@ one you pass, e.g. `./scripts/release.sh v0.2.0`), and pushes the tag. CI then
 builds the macOS `.dmg`s, Linux tarballs and Windows zip and publishes the
 GitHub Release. The checkout must be clean and at `origin/main`.
 
+CI stamps each build with its tag's version (`LIGHTPHOTOS_VERSION`). A stamped
+desktop build shows its version in Settings and, at most once a day, asks the
+GitHub Releases API for the latest one; when that is newer, the header shows an
+"Update available" link to lightphotos.app/downloads. Settings has a checkbox
+to turn the check off. A build without a stamp (anything you build locally), the
+browser app, and a build made with `--features app-store` never check.
+To see the cue without a network, build with `LIGHTPHOTOS_VERSION=0.1.0` and
+run with `LIGHTPHOTOS_UPDATE_LATEST=0.2.0`.
+
 ---
 
 Dual-licensed under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE),

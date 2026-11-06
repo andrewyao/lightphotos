@@ -278,6 +278,10 @@ pub enum UiAction {
     SetGradeZone(crate::develop::Zone),
     SetLanguage(Lang),
     SetTheme(theme::Theme),
+    /// Turn the once-a-day check for a newer version on or off.
+    SetUpdateCheck(bool),
+    /// Open the downloads page in the browser.
+    OpenDownloads,
     /// Render RAWs with Apple's tone curve, or with our own base curve.
     #[cfg(target_os = "macos")]
     SetAppleToneCurve(bool),
@@ -578,11 +582,33 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     if ui.button("?").on_hover_text(t().help_tip).clicked() {
                         out.actions.push(UiAction::ToggleHelp);
                     }
+                    if let Some(newer) = app.update_available() {
+                        if update_link(ui, t().update_available)
+                            .on_hover_text(t().update_tip.replace("{version}", &newer.to_string()))
+                            .clicked()
+                        {
+                            out.actions.push(UiAction::OpenDownloads);
+                        }
+                    }
                 });
             });
             ui.add_space(font_size::px(ui.style(), 4.0));
         });
     tour::anchor(ui.ctx(), tour::TourStep::Header, panel.response.rect);
+}
+
+/// The update cue: a small red pill, the way a notification badge reads, so a
+/// new version is noticed without a dialog or a toast. It takes the danger
+/// fill, which every theme's contrast test already holds.
+pub(super) fn update_link(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let colors = theme::colors(ui.ctx());
+    let label = egui::RichText::new(text).color(colors.danger_text);
+    ui.add(
+        egui::Button::new(label)
+            .fill(colors.danger_fill)
+            .corner_radius(egui::CornerRadius::same(u8::MAX)),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The catalog picker's text: the catalog's name with a dropdown mark.
