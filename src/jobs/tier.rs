@@ -81,6 +81,18 @@ impl<K: Clone + Eq + Hash> Tier<K> {
         }
     }
 
+    /// Takes `key`'s image out of the tier.
+    pub(crate) fn remove<Q>(&mut self, key: &Q) -> Option<Arc<DecodedImage>>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        let img = self.images.remove(key)?;
+        self.order.retain(|k| k.borrow() != key);
+        self.bytes = self.bytes.saturating_sub(img.bytes());
+        Some(img)
+    }
+
     pub(crate) fn clear(&mut self) {
         self.images.clear();
         self.order.clear();

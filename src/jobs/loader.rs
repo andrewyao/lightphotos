@@ -63,6 +63,11 @@ pub fn start_clock() {
     launched_at();
 }
 
+/// A pixel buffer a full decode fills instead of allocating its own: the
+/// one of the photo on screen, which the GPU already holds. Empty for none.
+#[derive(Default)]
+struct Spare(Vec<u8>);
+
 enum Job {
     /// The fastest decode near the target size, which may be the file's
     /// embedded preview. For RAW this is the win: a Sony ARW's 1616px embedded
@@ -80,7 +85,7 @@ enum Job {
         target_arch = "wasm32",
         allow(dead_code, reason = "the web build has no full-resolution tier")
     )]
-    Full(PathBuf, u32, Generation),
+    Full(PathBuf, u32, Generation, Spare),
     /// Thumbnail whose longest side is at most the carried size.
     Thumb(PathBuf, u32),
     /// Camera, lens, and exposure metadata for the info panel.
@@ -593,10 +598,10 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
             report_decode("preview", &path, target, t0, &r);
             JobResult::Preview(path, target, generation, r)
         }
-        Job::Full(path, target, generation) => {
+        Job::Full(path, target, generation, Spare(spare)) => {
             let t0 = web_time::Instant::now();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                image_decode::decode(&path, target)
+                image_decode::decode_reusing(&path, target, spare)
             }))
             .unwrap_or_else(|_| Err(format!("decode panicked: {}", path.display())));
             report_decode("full", &path, target, t0, &r);
@@ -1117,8 +1122,42 @@ impl Loader {
         {
             return;
         }
-        if self.enqueue(Job::Full(path.clone(), self.full_target, self.generation)) == Enqueued::Yes
+        self.enqueue_full(path, Spare::default());
+    }
+
+    /// `request_full`, decoding into the memory of `from`'s full decode,
+    /// which leaves the tier. For a slide show whose next photo's full
+    /// decode doesn't fit beside the one on screen: the GPU already holds
+    /// that one, so its buffer is free to fill. When something else still
+    /// holds `from`'s image, the decode allocates as usual.
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the web build has no full-resolution tier")
+    )]
+    pub fn request_full_reusing(&mut self, path: PathBuf, from: &Path) {
+        if self.fulls.contains(&path)
+            || self.inflight.contains(&path)
+            || self.full_failed.contains(&path)
         {
+            return;
+        }
+        let spare = self
+            .fulls
+            .remove(from)
+            .and_then(|img| Arc::try_unwrap(img).ok())
+            .map(DecodedImage::into_pixels)
+            .unwrap_or_default();
+        self.embedded_fulls.remove(from);
+        self.enqueue_full(path, Spare(spare));
+    }
+
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the web build has no full-resolution tier")
+    )]
+    fn enqueue_full(&mut self, path: PathBuf, spare: Spare) {
+        let job = Job::Full(path.clone(), self.full_target, self.generation, spare);
+        if self.enqueue(job) == Enqueued::Yes {
             self.inflight.insert(path);
         }
     }
@@ -1178,6 +1217,17 @@ impl Loader {
     /// Whether `path`'s full-resolution decode failed.
     pub fn full_failed(&self, path: &Path) -> bool {
         self.full_failed.contains(path)
+    }
+
+    /// The capacity of the spare buffer the queued full decode of `path`
+    /// carries, if one is queued.
+    #[cfg(test)]
+    pub(crate) fn queued_full_spare_for_test(&self, path: &Path) -> Option<usize> {
+        let q = self.shared.queue.lock().unwrap();
+        q.full.iter().find_map(|job| match job {
+            Job::Full(p, _, _, Spare(spare)) if p == path => Some(spare.capacity()),
+            _ => None,
+        })
     }
 
     /// Records that the Loupe's view of `path` at `target_px` failed.
@@ -2130,8 +2180,12 @@ mod tests {
         q.thumbs.push_back(Job::Thumb(path("t"), 192));
         q.bake.push_back(bake_job("b", 1));
         q.exif.push_back(Job::Exif(path("e")));
-        q.full
-            .push_back(Job::Full(path("f"), 16384, Generation::default()));
+        q.full.push_back(Job::Full(
+            path("f"),
+            16384,
+            Generation::default(),
+            Spare::default(),
+        ));
         q.preview
             .push_back(Job::Preview(path("p"), 2048, Generation::default()));
         q.speed
@@ -2403,8 +2457,12 @@ mod tests {
     #[test]
     fn a_preview_outranks_a_full_decode_already_queued() {
         let mut q = Queue::default();
-        q.full
-            .push_back(Job::Full(path("previous"), 16384, Generation::default()));
+        q.full.push_back(Job::Full(
+            path("previous"),
+            16384,
+            Generation::default(),
+            Spare::default(),
+        ));
         q.preview
             .push_back(Job::Preview(path("next"), 2048, Generation::default()));
         assert_eq!(drain_labels(&mut q, false), ["preview", "full"]);
@@ -2414,6 +2472,22 @@ mod tests {
     fn an_empty_queue_yields_nothing() {
         assert!(Queue::default().take_next(false, true).is_none());
         assert!(Queue::default().take_next(true, true).is_none());
+    }
+
+    #[test]
+    fn a_full_decode_can_take_over_the_memory_of_another() {
+        let mut loader = Loader::queue_only_for_test();
+        loader.insert_full_external(path("shown"), image(10, 10), Origin::Decoded);
+        loader.request_full_reusing(path("next"), &path("shown"));
+        assert!(loader.get_full(&path("shown")).is_none(), "out of the tier");
+        assert_eq!(loader.queued_full_spare_for_test(&path("next")), Some(400));
+
+        // An image something else still holds stays with it.
+        let held = image(10, 10);
+        loader.insert_full_external(path("a"), Arc::clone(&held), Origin::Decoded);
+        loader.request_full_reusing(path("b"), &path("a"));
+        assert_eq!(loader.queued_full_spare_for_test(&path("b")), Some(0));
+        assert_eq!(held.rgba.len(), 400);
     }
 
     fn image(w: u32, h: u32) -> Arc<DecodedImage> {
@@ -2593,7 +2667,7 @@ mod tests {
         for p in ["a", "b", "c"] {
             push_job(
                 &loader.shared,
-                Job::Full(path(p), 16384, Generation::default()),
+                Job::Full(path(p), 16384, Generation::default(), Spare::default()),
             );
             loader.inflight.insert(path(p));
         }
@@ -2834,7 +2908,7 @@ mod tests {
         let p = path("a.arw");
         loader.request_full(p.clone());
         let old = loader.shared.queue.lock().unwrap().full.pop_front();
-        let Some(Job::Full(_, _, old)) = old else {
+        let Some(Job::Full(_, _, old, _)) = old else {
             panic!("the full decode was queued");
         };
 
@@ -2852,7 +2926,7 @@ mod tests {
         assert!(loader.get_full(&p).is_none(), "the stale decode is dropped");
         assert!(loader.full_inflight(&p), "the new request is still pending");
 
-        let Some(Job::Full(_, _, new)) = loader.shared.queue.lock().unwrap().full.pop_front()
+        let Some(Job::Full(_, _, new, _)) = loader.shared.queue.lock().unwrap().full.pop_front()
         else {
             panic!("the new full decode was queued");
         };
@@ -3037,7 +3111,7 @@ mod tests {
         loader.insert_preview((path("cached"), 2560), image(1, 1));
         loader.request_full(path("running"));
         let running = loader.shared.queue.lock().unwrap().full.pop_front();
-        let Some(Job::Full(_, _, running)) = running else {
+        let Some(Job::Full(_, _, running, _)) = running else {
             panic!("the full decode was queued");
         };
         loader.request_full(path("queued"));

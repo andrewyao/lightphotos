@@ -120,6 +120,29 @@ pub struct DecodedImage {
     pub pixel_format: PixelFormat,
 }
 
+impl DecodedImage {
+    /// The pixel buffer, for a later decode to fill rather than allocate
+    /// its own; see `pixel_buffer`.
+    pub fn into_pixels(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.rgba)
+    }
+}
+
+/// A zeroed buffer of `len` bytes, made from `spare` when that is big
+/// enough and not much bigger, else newly allocated. A slide show hands one
+/// full decode's buffer to the next, so two full-size images are never
+/// held at once. `spare` is dropped before any new allocation.
+pub fn pixel_buffer(mut spare: Vec<u8>, len: usize) -> Vec<u8> {
+    let cap = spare.capacity();
+    if cap >= len && cap <= len.saturating_add(len / 4) {
+        spare.clear();
+        spare.resize(len, 0);
+        return spare;
+    }
+    drop(spare);
+    vec![0u8; len]
+}
+
 // The generated `Measured` would report `size_of::<Self>()`, about 40 bytes for
 // an image whose pixels are megabytes. The census would then be a histogram of
 // 40s and would answer nothing.
@@ -362,18 +385,26 @@ pub fn decode_for_export(path: &Path, max_dim: u32) -> Result<DecodedImage, Stri
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
 pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
+    decode_reusing(path, max_dim, Vec::new())
+}
+
+/// [`decode`] into `spare`'s memory when it fits; see `pixel_buffer`.
+#[cfg(target_os = "macos")]
+pub fn decode_reusing(path: &Path, max_dim: u32, spare: Vec<u8>) -> Result<DecodedImage, String> {
     if is_raw_extension(path) {
-        match raw_filter::decode(path, max_dim, apple_tone_curve()) {
+        // The spare goes to CoreImage. Should it fail, ImageIO allocates.
+        match raw_filter::decode(path, max_dim, apple_tone_curve(), spare) {
             Ok(img) => return Ok(img),
             Err(e) => eprintln!("[decode] {}: {e}; using ImageIO", path.display()),
         }
+        return decode_imageio(path, max_dim, Vec::new());
     }
-    decode_imageio(path, max_dim)
+    decode_imageio(path, max_dim, spare)
 }
 
 /// [`decode`] through ImageIO, for every format.
 #[cfg(target_os = "macos")]
-fn decode_imageio(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
+fn decode_imageio(path: &Path, max_dim: u32, spare: Vec<u8>) -> Result<DecodedImage, String> {
     let source = open_image_source(path)?;
 
     // SAFETY: no options are passed; an index past the end returns NULL,
@@ -389,7 +420,7 @@ fn decode_imageio(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
 
     let (w, h) = fit_within(src_w, src_h, max_dim);
 
-    let decoded = cgimage_to_rgba(&image, w, h)?;
+    let decoded = cgimage_into_rgba(&image, w, h, spare)?;
     // `image_at_index` ignores EXIF orientation, so rotate here to match the
     // thumbnails, which ImageIO orients for us.
     Ok(apply_exif_orientation(decoded, read_orientation(&source)))
@@ -909,13 +940,24 @@ pub fn cgimage_to_rgba(
     target_w: u32,
     target_h: u32,
 ) -> Result<DecodedImage, String> {
+    cgimage_into_rgba(image, target_w, target_h, Vec::new())
+}
+
+/// [`cgimage_to_rgba`] into `spare`'s memory when it fits.
+#[cfg(target_os = "macos")]
+fn cgimage_into_rgba(
+    image: &CGImage,
+    target_w: u32,
+    target_h: u32,
+    spare: Vec<u8>,
+) -> Result<DecodedImage, String> {
     if target_w == 0 || target_h == 0 {
         return Err("target dimensions must be non-zero".into());
     }
     check_decode_size(target_w, target_h)?;
 
     let bytes_per_row = (target_w as usize) * 4;
-    let mut buffer = vec![0u8; bytes_per_row * (target_h as usize)];
+    let mut buffer = pixel_buffer(spare, bytes_per_row * (target_h as usize));
 
     // SAFETY: buffer holds target_w * target_h * 4 bytes and outlives `ctx`.
     let ctx = unsafe {
@@ -975,6 +1017,27 @@ pub fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_spare_buffer_that_fits_is_filled_instead_of_allocating() {
+        let spare = vec![7u8; 1000];
+        let at = spare.as_ptr();
+        let buf = pixel_buffer(spare, 900);
+        assert_eq!(buf.as_ptr(), at, "the same memory");
+        assert_eq!(buf.len(), 900);
+        assert!(buf.iter().all(|&b| b == 0), "zeroed");
+    }
+
+    #[test]
+    fn a_spare_buffer_too_small_or_far_too_big_is_not_used() {
+        assert_eq!(pixel_buffer(vec![1u8; 10], 20), vec![0u8; 20]);
+        let big = pixel_buffer(vec![1u8; 1000], 100);
+        assert_eq!(big.len(), 100);
+        assert!(
+            big.capacity() < 1000,
+            "a small photo doesn't keep a big buffer"
+        );
+    }
 
     #[test]
     fn the_decode_budget_admits_big_panoramas_and_refuses_bombs() {

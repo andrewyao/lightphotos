@@ -24,6 +24,14 @@ pub use crate::develop::apply_raw_preview_boost;
 /// everything else goes through the `image` crate.
 #[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
+/// [`decode`]. The `image` crate and rawler allocate their own buffers, so
+/// `spare` is dropped first, which still keeps two full-size images from
+/// being held at once.
+pub fn decode_reusing(path: &Path, max_dim: u32, spare: Vec<u8>) -> Result<DecodedImage, String> {
+    drop(spare);
+    decode(path, max_dim)
+}
+
 pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     if is_raw_extension(path) {
         return crate::decode::rawler::decode_raw_nonmac(

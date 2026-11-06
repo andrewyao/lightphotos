@@ -80,6 +80,7 @@ pub(super) fn decode(
     path: &std::path::Path,
     max_dim: u32,
     apple_curve: bool,
+    spare: Vec<u8>,
 ) -> Result<DecodedImage, String> {
     if AnyClass::get(c"CIRAWFilter").is_none() {
         return Err("CIRAWFilter needs macOS 12 or later".into());
@@ -141,7 +142,7 @@ pub(super) fn decode(
         let linear = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceExtendedLinearSRGB }))
             .ok_or("could not create linear sRGB color space")?;
         let row_bytes = w as usize * PixelFormat::TonedF16.bytes_per_pixel();
-        let mut rgba = vec![0u8; row_bytes * h as usize];
+        let mut rgba = super::pixel_buffer(spare, row_bytes * h as usize);
         let bounds = CGRect {
             origin: CGPoint { x, y },
             size: CGSize {
@@ -210,7 +211,7 @@ mod tests {
 
         let empty = dir.join("empty.arw");
         std::fs::write(&empty, b"").unwrap();
-        assert!(decode(&empty, u32::MAX, true).is_err());
+        assert!(decode(&empty, u32::MAX, true, Vec::new()).is_err());
         assert!(super::super::decode(&empty, u32::MAX).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -232,9 +233,9 @@ mod tests {
     fn matches_imageio_on_real_raws() {
         for path in real_raws() {
             for max_dim in [u32::MAX, 2560] {
-                let ci = decode(&path, max_dim, true).unwrap();
+                let ci = decode(&path, max_dim, true, Vec::new()).unwrap();
                 assert_eq!(ci.pixel_format, PixelFormat::TonedF16);
-                let io = super::super::decode_imageio(&path, max_dim).unwrap();
+                let io = super::super::decode_imageio(&path, max_dim, Vec::new()).unwrap();
                 assert_eq!(
                     (ci.width, ci.height),
                     (io.width, io.height),
@@ -275,8 +276,8 @@ mod tests {
             g[g.len() / 2]
         };
         for path in real_raws() {
-            let toned = decode(&path, 1024, true).unwrap();
-            let linear = decode(&path, 1024, false).unwrap();
+            let toned = decode(&path, 1024, true, Vec::new()).unwrap();
+            let linear = decode(&path, 1024, false, Vec::new()).unwrap();
             assert_eq!(linear.pixel_format, PixelFormat::LinearF16);
             for img in [&toned, &linear] {
                 let px = img.rgba.as_chunks::<8>().0;

@@ -709,11 +709,24 @@ impl App {
             return;
         };
         let full = self.slide_needs_full(&next);
+        // When the next photo's full decode won't fit beside the one on
+        // screen, which the GPU already holds, it decodes into that one's
+        // memory instead.
+        #[cfg(not(target_arch = "wasm32"))]
+        let reuse = match (&self.want, self.loader.as_ref()) {
+            (Some(want), Some(loader)) if full && self.shown.is_full_of(want) => {
+                let size = self.exif_cache.get(&next).and_then(|m| m.source_size);
+                (!loader.neighbor_fulls_fit(want, &[(next.clone(), size)])).then(|| want.clone())
+            }
+            _ => None,
+        };
         if let Some(loader) = &mut self.loader {
             loader.request_preview(next.clone(), target);
             #[cfg(not(target_arch = "wasm32"))]
-            if full {
-                loader.request_full(next);
+            match reuse {
+                Some(shown) => loader.request_full_reusing(next, &shown),
+                None if full => loader.request_full(next),
+                None => {}
             }
         }
         #[cfg(target_arch = "wasm32")]

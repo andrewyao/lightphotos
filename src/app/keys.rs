@@ -1439,6 +1439,15 @@ mod tests {
                 !app.full_wanted(),
                 "the full on screen is not asked for again"
             );
+            let spare = app
+                .loader
+                .as_ref()
+                .and_then(|l| l.queued_full_spare_for_test(&paths[1]));
+            let reused = spare.is_some_and(|cap| cap > 0);
+            assert_eq!(
+                reused, !keeps_shown,
+                "the next decode takes over the shown one's memory only when both won't fit"
+            );
         }
     }
 
