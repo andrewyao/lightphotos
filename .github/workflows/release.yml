@@ -6,7 +6,9 @@ name: release
 # HEIC/Vision code is cfg-gated off on non-macOS so it still compiles).
 # Ships: macOS Apple Silicon and Intel .dmgs + Linux x86_64/arm64 tarballs +
 # Windows x86_64 zip. The Intel .dmg is cross-built on the Apple Silicon runner.
-# The .app inside each .dmg carries the CLI binary at Contents/MacOS/lightphotos.
+# The .app inside each .dmg carries the CLI binary at Contents/MacOS/lightphotos
+# and the MCP server next to it at Contents/MacOS/lightphotos-mcp. The tarballs
+# and zip carry both too.
 
 on:
   push:
@@ -76,10 +78,10 @@ jobs:
         shell: bash
         run: echo "LIGHTPHOTOS_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      # Only the shipped binary, not the mac-only dev probes in src/bin.
+      # Only the shipped binaries, not the mac-only dev probes in src/bin.
       - name: Build
         if: runner.os != 'macOS'
-        run: cargo build --release --bin lightphotos --target ${{ matrix.target }}
+        run: cargo build --release --bin lightphotos --bin lightphotos-mcp --target ${{ matrix.target }}
 
       # Puts the Developer ID certificate in a throwaway keychain and the
       # notary API key on disk for make-dmg.sh. A tag build without the
@@ -135,14 +137,14 @@ jobs:
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        run: tar -czf "${{ matrix.name }}.tar.gz" -C "target/${{ matrix.target }}/release" lightphotos -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.txt -C "$GITHUB_WORKSPACE/patches" LICENSE-LGPL
+        run: tar -czf "${{ matrix.name }}.tar.gz" -C "target/${{ matrix.target }}/release" lightphotos lightphotos-mcp -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.txt -C "$GITHUB_WORKSPACE/patches" LICENSE-LGPL
 
-      # Windows: zip the .exe and the license files. Compress-Archive ships
+      # Windows: zip the .exes and the license files. Compress-Archive ships
       # with the runner; git-bash has no `zip`.
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path "target/${{ matrix.target }}/release/lightphotos.exe", LICENSE-MIT, LICENSE-APACHE, patches/LICENSE-LGPL, THIRD-PARTY-LICENSES.txt -DestinationPath "${{ matrix.name }}.zip"
+        run: Compress-Archive -Path "target/${{ matrix.target }}/release/lightphotos.exe", "target/${{ matrix.target }}/release/lightphotos-mcp.exe", LICENSE-MIT, LICENSE-APACHE, patches/LICENSE-LGPL, THIRD-PARTY-LICENSES.txt -DestinationPath "${{ matrix.name }}.zip"
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:

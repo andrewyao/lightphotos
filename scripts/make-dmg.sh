@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
-# Build the release binary for one macOS target, assemble and sign
-# LightPhotos.app around it, and wrap that in a drag-install .dmg whose mounted
+# Build the release binaries for one macOS target (the app and its MCP
+# server), assemble and sign LightPhotos.app around them, and wrap that in a drag-install .dmg whose mounted
 # volume shows the app icon instead of a blank disk. release.yml runs it once
 # per target.
 #
@@ -21,6 +21,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:?usage: $0 <target-triple> <out.dmg>}"
 OUT="${2:?usage: $0 <target-triple> <out.dmg>}"
 BIN_NAME="lightphotos"
+MCP_NAME="lightphotos-mcp"
 IDENTITY="${MACOS_SIGN_IDENTITY:-}"
 
 if [[ -n "$IDENTITY" ]]; then
@@ -46,15 +47,17 @@ trap cleanup EXIT
 # Rust's x86_64 default is 10.12; match Info.plist's LSMinimumSystemVersion.
 export MACOSX_DEPLOYMENT_TARGET=11.0
 rustup target add "$TARGET"
-echo "==> Building release binary for $TARGET"
-cargo build --release --bin "$BIN_NAME" --target "$TARGET" --manifest-path "$ROOT/Cargo.toml"
+echo "==> Building release binaries for $TARGET"
+cargo build --release --bin "$BIN_NAME" --bin "$MCP_NAME" --target "$TARGET" --manifest-path "$ROOT/Cargo.toml"
 
 APP="$STAGE/LightPhotos.app"
 echo "==> Assembling LightPhotos.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
-cp "$ROOT/target/$TARGET/release/$BIN_NAME" "$APP/Contents/MacOS/$BIN_NAME"
-chmod +x "$APP/Contents/MacOS/$BIN_NAME"
+for bin in "$BIN_NAME" "$MCP_NAME"; do
+  cp "$ROOT/target/$TARGET/release/$bin" "$APP/Contents/MacOS/$bin"
+  chmod +x "$APP/Contents/MacOS/$bin"
+done
 
 # Rendered from assets/icon/lightphotos.svg by scripts/make-icons.sh.
 cp "$ROOT/assets/icon/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
@@ -63,12 +66,15 @@ cp "$ROOT/LICENSE-MIT" "$ROOT/LICENSE-APACHE" "$ROOT/THIRD-PARTY-LICENSES.txt" "
 # The linker signs only the binary, which leaves the bundle's signature invalid
 # and makes Gatekeeper call a downloaded copy "damaged". Notarization requires
 # the hardened runtime and a secure timestamp. The ad-hoc fallback downgrades
-# "damaged" to an "Open Anyway" prompt.
+# "damaged" to an "Open Anyway" prompt. Signing the bundle signs only its main
+# executable, so the MCP server is signed on its own first.
 if [[ -n "$IDENTITY" ]]; then
   echo "==> Signing LightPhotos.app as $IDENTITY"
+  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP/Contents/MacOS/$MCP_NAME"
   codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
 else
   echo "==> Ad-hoc signing LightPhotos.app (MACOS_SIGN_IDENTITY unset)"
+  codesign --force --sign - "$APP/Contents/MacOS/$MCP_NAME"
   codesign --force --sign - "$APP"
 fi
 codesign --verify --strict --verbose=2 "$APP"
