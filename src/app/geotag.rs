@@ -392,6 +392,7 @@ impl App {
                     0 => StatusKind::Error,
                     _ => StatusKind::Success,
                 };
+                eprintln!("[lightphotos] geotag: {msg}");
                 self.set_status(kind, msg);
             }
             self.request_redraw();
