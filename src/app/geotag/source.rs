@@ -101,14 +101,14 @@ fn resolve_days(dir: &Path, first: NaiveDate, last: NaiveDate, before: &[Day]) -
             }
         }
     }
-    for (dates, note) in [
-        (missing, Note::Missing as fn(_) -> _),
-        (late, Note::NotDownloaded),
-        (downloaded, Note::Downloaded),
-    ] {
-        if !dates.is_empty() {
-            out.notes.push(note(dates));
-        }
+    if !missing.is_empty() {
+        out.notes.push(Note::Missing(missing));
+    }
+    if !late.is_empty() {
+        out.notes.push(Note::NotDownloaded(late));
+    }
+    if !downloaded.is_empty() {
+        out.notes.push(Note::Downloaded(downloaded));
     }
     out
 }
