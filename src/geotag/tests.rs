@@ -50,10 +50,25 @@ fn track(points: &[(i64, f64, f64, Option<f64>)]) -> Track {
 }
 
 fn at_utc(track: &Track, utc: i64) -> MatchOutcome {
-    let clock = ClockModel::Manual {
+    let clock = ClockModel::Setting {
         camera_minus_utc_s: 0,
     };
-    locate(track, &clock, false, Some(&wall(utc)))
+    locate(track, Some(&clock), false, Some(&wall(utc)))
+}
+
+fn offset_of(outcome: &MatchOutcome) -> Option<(i64, Option<ClockSource>)> {
+    match outcome {
+        MatchOutcome::Located(GeoTag {
+            source:
+                GeoSource::Gpx {
+                    camera_minus_utc_s,
+                    clock,
+                    ..
+                },
+            ..
+        }) => Some((*camera_minus_utc_s, *clock)),
+        _ => None,
+    }
 }
 
 fn located(o: MatchOutcome) -> GeoTag {
@@ -65,7 +80,9 @@ fn located(o: MatchOutcome) -> GeoTag {
 
 /// LightRemote's shared contract (`LightRemoteTests/Fixtures/clock_matching.json`),
 /// which `MacHelper/test_geotag.py` checks against `geotag.py` too: every case
-/// picks the same camera offset, or none.
+/// picks the same camera offset, or none. LightPhotos ignores `offsets`, the
+/// phone's time zones; a case without clock measurements gives the camera's
+/// time zone setting in `setting`, as the user would.
 #[test]
 fn the_clock_matching_contract_holds_case_by_case() {
     #[derive(serde::Deserialize)]
@@ -75,6 +92,8 @@ fn the_clock_matching_contract_holds_case_by_case() {
         points: Vec<String>,
         clock: Vec<(String, i64)>,
         offsets: Vec<(String, i64)>,
+        #[serde(default)]
+        setting: Option<i64>,
         wall: String,
         expected_offset: Option<i64>,
     }
@@ -94,19 +113,10 @@ fn the_clock_matching_contract_holds_case_by_case() {
         let zones: Vec<_> = case.offsets.iter().map(|(t, m)| (t.as_str(), *m)).collect();
         let track = Track::parse("day.gpx", gpx(&points, &clock, &zones).as_bytes()).unwrap();
         assert_eq!(track.camera_clock.len(), case.clock.len(), "{}", case.name);
-        let model = ClockModel::select(&track, None).unwrap();
+        let model = ClockModel::select(&track, case.setting).unwrap();
         let stamp = case.wall.replace('-', ":").replace('T', " ");
-        let outcome = locate(&track, &model, false, Some(&stamp));
-        let offset = match &outcome {
-            MatchOutcome::Located(GeoTag {
-                source:
-                    GeoSource::Gpx {
-                        camera_minus_utc_s, ..
-                    },
-                ..
-            }) => Some(*camera_minus_utc_s),
-            _ => None,
-        };
+        let outcome = locate(&track, Some(&model), false, Some(&stamp));
+        let offset = offset_of(&outcome).map(|(o, _)| o);
         assert_eq!(offset, case.expected_offset, "{}: {outcome:?}", case.name);
         if case.name.contains("repeated") {
             assert_eq!(outcome, MatchOutcome::Ambiguous, "{}", case.name);
@@ -155,56 +165,133 @@ fn interpolation_takes_the_short_way_across_the_antimeridian() {
 }
 
 #[test]
-fn a_manual_offset_shifts_the_wall_time_to_utc() {
+fn the_camera_setting_shifts_the_wall_time_to_utc() {
     let t = track(&[(T0, 10.0, 20.0, None)]);
     let tokyo = ClockModel::select(&t, Some(9 * 3600)).unwrap();
-    let tag = located(locate(&t, &tokyo, false, Some(&wall(T0 + 9 * 3600))));
+    let tag = located(locate(&t, Some(&tokyo), false, Some(&wall(T0 + 9 * 3600))));
     assert_eq!(
         tag.source,
         GeoSource::Gpx {
             file_name: "day.gpx".into(),
-            camera_minus_utc_s: 9 * 3600
+            camera_minus_utc_s: 9 * 3600,
+            clock: Some(ClockSource::Setting),
         }
     );
     let utc = ClockModel::select(&t, Some(0)).unwrap();
     assert_eq!(
-        locate(&t, &utc, false, Some(&wall(T0 + 9 * 3600))),
+        locate(&t, Some(&utc), false, Some(&wall(T0 + 9 * 3600))),
         MatchOutcome::OutsideTrack
     );
 }
 
 #[test]
-fn the_clock_model_prefers_measurement_then_the_phone_zone_then_the_user() {
+fn a_measurement_beats_the_setting_and_the_setting_serves_without_one() {
     let p = [(T0, 1.0, 2.0, None)];
-    let at = iso(T0);
-    let both = Track::parse("day.gpx", gpx(&p, &[(&at, 5)], &[(&at, 60)]).as_bytes()).unwrap();
-    assert!(both.knows_the_clock());
-    assert!(matches!(
-        ClockModel::select(&both, Some(0)),
-        Some(ClockModel::Measured(_))
-    ));
-    let zone = Track::parse("day.gpx", gpx(&p, &[], &[(&at, 60)]).as_bytes()).unwrap();
+    let at = iso(T0 - 3600);
+    let measured = Track::parse("day.gpx", gpx(&p, &[(&at, 3600)], &[]).as_bytes()).unwrap();
+    // The setting says UTC; LightRemote measured the camera an hour ahead.
+    let model = ClockModel::select(&measured, Some(0)).unwrap();
+    assert_eq!(model.source(), ClockSource::Measured);
+    let photo = wall(T0 + 3600);
     assert_eq!(
-        ClockModel::select(&zone, None),
-        Some(ClockModel::PhoneZone(vec![ClockPeriod {
-            from: T0,
-            camera_minus_utc_s: 3600
-        }]))
+        offset_of(&locate(&measured, Some(&model), false, Some(&photo))),
+        Some((3600, Some(ClockSource::Measured)))
     );
+
     let bare = track(&p);
-    assert!(!bare.knows_the_clock());
+    let model = ClockModel::select(&bare, Some(3600)).unwrap();
+    assert_eq!(
+        offset_of(&locate(&bare, Some(&model), false, Some(&photo))),
+        Some((3600, Some(ClockSource::Setting)))
+    );
     assert_eq!(ClockModel::select(&bare, None), None);
     assert_eq!(ClockModel::select(&bare, Some(i64::MAX)), None);
+    assert_eq!(
+        locate(&bare, None, false, Some(&photo)),
+        MatchOutcome::NoClock
+    );
+}
+
+#[test]
+fn the_phone_time_zone_is_not_the_camera_clock() {
+    let p = [(T0, 1.0, 2.0, None)];
+    let at = iso(T0 - 3600);
+    let zoned = Track::parse("day.gpx", gpx(&p, &[], &[(&at, 540)]).as_bytes()).unwrap();
+    assert_eq!(ClockModel::select(&zoned, None), None);
+    let model = ClockModel::select(&zoned, Some(3600)).unwrap();
+    assert_eq!(
+        model,
+        ClockModel::Setting {
+            camera_minus_utc_s: 3600
+        }
+    );
+    let junk = Track::parse(
+        "day.gpx",
+        gpx(&p, &[], &[(&at, 99_999)])
+            .replace(&at, "garbage")
+            .as_bytes(),
+    );
+    assert!(junk.is_ok(), "an lr:utcOffset is not read: {junk:?}");
+}
+
+#[test]
+fn a_measurement_on_day_one_covers_a_photo_on_day_four() {
+    let day = 86_400;
+    let at = iso(T0);
+    let first = Track::parse(
+        "2025-11-08.gpx",
+        gpx(&[(T0, 1.0, 1.0, None)], &[(&at, 3600 + 4)], &[]).as_bytes(),
+    )
+    .unwrap();
+    let fourth = Track::parse(
+        "2025-11-11.gpx",
+        gpx(&[(T0 + 3 * day, 4.0, 4.0, None)], &[], &[]).as_bytes(),
+    )
+    .unwrap();
+    let both = Track::merge([first, fourth]).unwrap();
+    // The setting is wrong by the DST hour; the measurement still holds.
+    let model = ClockModel::select(&both, Some(0)).unwrap();
+    let outcome = locate(&both, Some(&model), false, Some(&wall(T0 + 3 * day + 3604)));
+    assert_eq!(
+        offset_of(&outcome),
+        Some((3604, Some(ClockSource::Measured)))
+    );
+    assert_eq!(located(outcome).lat, 4.0);
+}
+
+#[test]
+fn the_dst_switch_adds_an_hour_and_odd_offsets_are_refused() {
+    let tokyo = CameraZone::new(540, false).unwrap();
+    assert_eq!(tokyo.camera_minus_utc_s(), 9 * 3600);
+    let summer = CameraZone::new(-480, true).unwrap();
+    assert_eq!(summer.camera_minus_utc_s(), -7 * 3600);
+    let kathmandu = CameraZone::new(345, true).unwrap();
+    assert_eq!(kathmandu.camera_minus_utc_s(), (345 + 60) * 60);
+    assert_eq!(CameraZone::new(17, false), None);
+    assert_eq!(CameraZone::new(15 * 60, false), None);
+    assert!(ZONES.iter().any(|(m, _)| *m == -720) && ZONES.iter().any(|(m, _)| *m == 840));
+    assert_eq!(CameraZone::nearest(9 * 3600 + 120), tokyo);
+    assert_eq!(CameraZone::nearest(i64::MIN).utc_offset_min, -720);
+}
+
+#[test]
+fn a_measurement_half_an_hour_off_the_setting_is_a_disagreement() {
+    assert_eq!(disagreement(3600, 0), Some(3600));
+    assert_eq!(disagreement(0, 3600), Some(-3600));
+    assert_eq!(disagreement(1800, 0), Some(1800));
+    assert_eq!(disagreement(1799, 0), None);
+    assert_eq!(disagreement(3604, 3600), None);
+    assert!(disagreement(i64::MIN, i64::MAX).is_some());
 }
 
 #[test]
 fn file_gps_wins_and_a_missing_or_garbled_capture_time_is_reported() {
     let t = track(&[(T0, 10.0, 20.0, None)]);
-    let clock = ClockModel::Manual {
+    let clock = ClockModel::Setting {
         camera_minus_utc_s: 0,
     };
     assert_eq!(
-        locate(&t, &clock, true, Some(&wall(T0))),
+        locate(&t, Some(&clock), true, Some(&wall(T0))),
         MatchOutcome::AlreadyHasGps
     );
     for bad in [
@@ -215,17 +302,17 @@ fn file_gps_wins_and_a_missing_or_garbled_capture_time_is_reported() {
         Some("2025:11:08 08:00:0é"),
     ] {
         assert_eq!(
-            locate(&t, &clock, false, bad),
+            locate(&t, Some(&clock), false, bad),
             MatchOutcome::NoCaptureTime,
             "{bad:?}"
         );
     }
     // Hostile extremes never overflow.
-    let far = ClockModel::Manual {
+    let far = ClockModel::Setting {
         camera_minus_utc_s: MAX_CLOCK_ERROR_S,
     };
     assert_eq!(
-        locate(&t, &far, false, Some("0001:01:01 00:00:00")),
+        locate(&t, Some(&far), false, Some("0001:01:01 00:00:00")),
         MatchOutcome::OutsideTrack
     );
 }
@@ -261,14 +348,6 @@ fn malformed_gpx_is_an_error_not_a_panic() {
         ),
         (
             wrap(&format!("<lr:cameraClock measuredAt=\"{at}\" cameraMinusUtcSeconds=\"9223372036854775807\"/>{ok_point}")),
-            |e| matches!(e, GpxError::Malformed(_)),
-        ),
-        (
-            wrap(&format!("<lr:utcOffset from=\"{at}\" minutes=\"x\"/>{ok_point}")),
-            |e| matches!(e, GpxError::Malformed(_)),
-        ),
-        (
-            wrap(&format!("<lr:utcOffset from=\"{at}\" minutes=\"99999\"/>{ok_point}")),
             |e| matches!(e, GpxError::Malformed(_)),
         ),
         (
@@ -314,14 +393,28 @@ fn a_geotag_serializes_with_its_source_tagged_by_kind() {
         source: GeoSource::Gpx {
             file_name: "2026-11-08.gpx".into(),
             camera_minus_utc_s: 32400,
+            clock: Some(ClockSource::Measured),
         },
     };
     let json = serde_json::to_value(&tag).unwrap();
     assert_eq!(
         json,
-        serde_json::json!({"lat":35.5,"lon":139.25,"source":{"kind":"gpx","file_name":"2026-11-08.gpx","camera_minus_utc_s":32400}})
+        serde_json::json!({"lat":35.5,"lon":139.25,"source":{"kind":"gpx","file_name":"2026-11-08.gpx","camera_minus_utc_s":32400,"clock":"measured"}})
     );
     assert_eq!(serde_json::from_value::<GeoTag>(json).unwrap(), tag);
+    let older = serde_json::json!({"lat":35.5,"lon":139.25,"source":{"kind":"gpx","file_name":"2026-11-08.gpx","camera_minus_utc_s":32400}});
+    let older: GeoTag = serde_json::from_value(older).unwrap();
+    assert!(
+        matches!(
+            older.source,
+            GeoSource::Gpx {
+                clock: None,
+                camera_minus_utc_s: 32400,
+                ..
+            }
+        ),
+        "a record from before the clock source was kept still reads"
+    );
     let off_globe = GeoTag { lat: 91.0, ..tag };
     assert_eq!(off_globe.gps(), None);
 }
@@ -362,9 +455,8 @@ fn a_utc_offset_reads_the_ways_people_and_exif_write_it() {
 fn two_days_merge_so_a_photo_at_midnight_lies_between_their_fixes() {
     // 2026-11-08T14:55:00Z, five minutes before midnight at +09:00.
     let t = 1_794_149_700;
-    let at = iso(t - 3600);
     let day = |name: &str, points: &[(i64, f64, f64, Option<f64>)]| {
-        Track::parse(name, gpx(points, &[], &[(&at, 540)]).as_bytes()).unwrap()
+        Track::parse(name, gpx(points, &[], &[]).as_bytes()).unwrap()
     };
     let before = day(
         "2026-11-08.gpx",
@@ -377,17 +469,17 @@ fn two_days_merge_so_a_photo_at_midnight_lies_between_their_fixes() {
     // 00:00:10 on the 9th by the camera: 310 s past the last fix of the 8th,
     // 290 s before the first of the 9th.
     let photo = "2026:11:09 00:00:10";
-    let alone = ClockModel::select(&before, None).unwrap();
+    let alone = ClockModel::select(&before, Some(9 * 3600)).unwrap();
     assert_eq!(
-        locate(&before, &alone, false, Some(photo)),
+        locate(&before, Some(&alone), false, Some(photo)),
         MatchOutcome::OutsideTrack,
         "the 8th alone is too far"
     );
 
     let both = Track::merge([before, after]).unwrap();
     assert_eq!(both.file_names(), ["2026-11-08.gpx", "2026-11-09.gpx"]);
-    let clock = ClockModel::select(&both, None).unwrap();
-    let tag = located(locate(&both, &clock, false, Some(photo)));
+    let clock = ClockModel::select(&both, Some(9 * 3600)).unwrap();
+    let tag = located(locate(&both, Some(&clock), false, Some(photo)));
     assert!(
         (tag.lat - 35.31).abs() < 1e-9,
         "on the line between days: {tag:?}"
@@ -396,11 +488,17 @@ fn two_days_merge_so_a_photo_at_midnight_lies_between_their_fixes() {
         tag.source,
         GeoSource::Gpx {
             file_name: "2026-11-09.gpx".into(),
-            camera_minus_utc_s: 9 * 3600
+            camera_minus_utc_s: 9 * 3600,
+            clock: Some(ClockSource::Setting),
         },
         "named for the nearer fix"
     );
-    let early = located(locate(&both, &clock, false, Some("2026:11:08 23:59:30")));
+    let early = located(locate(
+        &both,
+        Some(&clock),
+        false,
+        Some("2026:11:08 23:59:30"),
+    ));
     assert!(
         matches!(&early.source, GeoSource::Gpx { file_name, .. } if file_name == "2026-11-08.gpx"),
         "{early:?}"

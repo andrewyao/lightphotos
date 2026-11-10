@@ -108,7 +108,8 @@ fn a_run_locates_each_photo_in_its_sidecar_and_leaves_the_files_alone() {
         tag.source,
         GeoSource::Gpx {
             file_name: "day.gpx".into(),
-            camera_minus_utc_s: 9 * 3600
+            camera_minus_utc_s: 9 * 3600,
+            clock: Some(crate::geotag::ClockSource::Setting),
         }
     );
     for p in &paths[1..] {
@@ -444,7 +445,7 @@ mod icloud_days {
                 crate::command::ICloudGeotagParams {
                     first: date(8),
                     last: date(10),
-                    camera_minus_utc_s: None,
+                    camera_minus_utc_s: Some(9 * 3600),
                 },
             ))
             .unwrap();

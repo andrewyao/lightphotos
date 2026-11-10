@@ -5,9 +5,13 @@
 //! A camera stamps `DateTimeOriginal` on its own clock, in local time with no
 //! zone, while a GPX track is in UTC. A [`ClockModel`] says how far the
 //! camera's clock ran from UTC, and when: measured against the camera by
-//! LightRemote, taken from the phone's time zone, or given by the user.
-//! [`locate`] turns a photo's wall time into a UTC instant with it and reads
-//! the position there off the [`Track`].
+//! LightRemote, else the camera's time zone setting as the user gave it
+//! ([`CameraZone`]). [`locate`] turns a photo's wall time into a UTC instant
+//! with it and reads the position there off the [`Track`].
+//!
+//! Nothing but its owner changes a camera's clock, so a measurement holds
+//! until the next one, across files and days. The first one also reaches
+//! back to photos taken before it.
 //!
 //! The rules match LightRemote's `geotag.py`, which hands the same track to
 //! exiftool: a photo between two fixes at most [`MAX_INTERPOLATE_S`] apart
@@ -20,8 +24,10 @@
 //! touches a photo file.
 
 mod gpx;
+mod zone;
 
 pub use gpx::{GpxError, LR_NS, MAX_GPX_BYTES};
+pub use zone::{disagreement, CameraZone, DISAGREEMENT_S, ZONES};
 
 use serde::{Deserialize, Serialize};
 
@@ -65,8 +71,6 @@ pub struct Track {
     files: Vec<String>,
     /// LightRemote's camera clock measurements, sorted.
     camera_clock: Vec<ClockPeriod>,
-    /// The phone's UTC offset from each change on, sorted.
-    utc_offsets: Vec<ClockPeriod>,
 }
 
 /// A track point and the file it came from.
@@ -77,15 +81,14 @@ struct Fix {
 }
 
 impl Track {
-    /// Several files' tracks as one: every fix, clock measurement and zone
-    /// change, in time order. Where two files have a fix at the same second,
+    /// Several files' tracks as one: every fix and clock measurement, in
+    /// time order. Where two files have a fix at the same second,
     /// the earlier file's is kept. `None` for no tracks.
     pub fn merge(tracks: impl IntoIterator<Item = Track>) -> Option<Track> {
         let mut merged = Track {
             points: Vec::new(),
             files: Vec::new(),
             camera_clock: Vec::new(),
-            utc_offsets: Vec::new(),
         };
         for track in tracks {
             let base = merged.files.len();
@@ -95,7 +98,6 @@ impl Track {
                 ..f
             }));
             merged.camera_clock.extend(track.camera_clock);
-            merged.utc_offsets.extend(track.utc_offsets);
         }
         if merged.points.is_empty() {
             return None;
@@ -112,20 +114,11 @@ impl Track {
         self.camera_clock
             .sort_by_key(|c| (c.from, c.camera_minus_utc_s));
         self.camera_clock.dedup();
-        self.utc_offsets
-            .sort_by_key(|c| (c.from, c.camera_minus_utc_s));
-        self.utc_offsets.dedup();
     }
 
     /// The names of the files this track joins, in the order given.
     pub fn file_names(&self) -> &[String] {
         &self.files
-    }
-
-    /// Whether the file carries any LightRemote clock data, so the user
-    /// need not be asked for the camera's offset.
-    pub fn knows_the_clock(&self) -> bool {
-        !self.camera_clock.is_empty() || !self.utc_offsets.is_empty()
     }
 
     /// The position at `utc`, by the rules in the module docs, and the
@@ -197,26 +190,28 @@ pub enum ClockModel {
     /// LightRemote compared the camera's clock with UTC. Covers its zone,
     /// its DST setting and its drift together.
     Measured(Vec<ClockPeriod>),
-    /// The phone's time zone, assuming the camera was set to it.
-    PhoneZone(Vec<ClockPeriod>),
-    /// One offset the user gave, for the whole track.
-    Manual { camera_minus_utc_s: i64 },
+    /// The camera's time zone setting, as the user gave it: one offset for
+    /// the whole track.
+    Setting { camera_minus_utc_s: i64 },
 }
 
 impl ClockModel {
-    /// The best model `track` supports: measured, else the phone's zone,
-    /// else `manual`. `None` when the track has no clock data and no
-    /// offset was given. An out-of-range `manual` counts as none.
-    pub fn select(track: &Track, manual: Option<i64>) -> Option<ClockModel> {
+    /// LightRemote's measurements when `track` has any, else `setting`.
+    /// `None` when it has neither. An out-of-range `setting` counts as none.
+    pub fn select(track: &Track, setting: Option<i64>) -> Option<ClockModel> {
         if !track.camera_clock.is_empty() {
             return Some(ClockModel::Measured(clock_periods(&track.camera_clock)));
         }
-        if !track.utc_offsets.is_empty() {
-            return Some(ClockModel::PhoneZone(track.utc_offsets.clone()));
-        }
-        manual
+        setting
             .filter(|s| s.abs() <= MAX_CLOCK_ERROR_S)
-            .map(|camera_minus_utc_s| ClockModel::Manual { camera_minus_utc_s })
+            .map(|camera_minus_utc_s| ClockModel::Setting { camera_minus_utc_s })
+    }
+
+    pub fn source(&self) -> ClockSource {
+        match self {
+            ClockModel::Measured(_) => ClockSource::Measured,
+            ClockModel::Setting { .. } => ClockSource::Setting,
+        }
     }
 
     /// The one camera offset that puts wall time `wall` (camera clock
@@ -224,15 +219,15 @@ impl ClockModel {
     /// The first period reaches back before its start, so photos taken
     /// before the first measurement still match where the track has them.
     fn resolve(&self, track: &Track, wall: i64) -> Resolution {
-        let manual;
+        let setting;
         let periods: &[ClockPeriod] = match self {
-            ClockModel::Measured(p) | ClockModel::PhoneZone(p) => p,
-            ClockModel::Manual { camera_minus_utc_s } => {
-                manual = ClockPeriod {
+            ClockModel::Measured(p) => p,
+            ClockModel::Setting { camera_minus_utc_s } => {
+                setting = ClockPeriod {
                     from: i64::MIN,
                     camera_minus_utc_s: *camera_minus_utc_s,
                 };
-                std::slice::from_ref(&manual)
+                std::slice::from_ref(&setting)
             }
         };
         let mut found = std::collections::BTreeSet::new();
@@ -312,7 +307,21 @@ pub enum GeoSource {
         file_name: String,
         /// The camera clock offset the match used.
         camera_minus_utc_s: i64,
+        /// Where that offset came from. Records written before this was
+        /// kept have none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clock: Option<ClockSource>,
     },
+}
+
+/// Where the camera clock offset a match used came from.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClockSource {
+    /// LightRemote's measurement of the camera's clock.
+    Measured,
+    /// The camera's time zone setting the user gave.
+    Setting,
 }
 
 impl GeoTag {
@@ -340,16 +349,20 @@ pub enum MatchOutcome {
     Ambiguous,
     OutsideTrack,
     NoCaptureTime,
+    /// The track has no clock measurement and the camera no time zone
+    /// setting.
+    NoClock,
     /// The file has its own GPS, which wins.
     AlreadyHasGps,
 }
 
-/// One photo against `track`. `capture_local` is its `DateTimeOriginal`,
-/// `YYYY:MM:DD HH:MM:SS` on the camera's clock. The location's source names
-/// the file holding the nearest fix used.
+/// One photo against `track`, with its camera's clock, if known.
+/// `capture_local` is its `DateTimeOriginal`, `YYYY:MM:DD HH:MM:SS` on the
+/// camera's clock. The location's source names the file holding the nearest
+/// fix used and the clock offset.
 pub fn locate(
     track: &Track,
-    clock: &ClockModel,
+    clock: Option<&ClockModel>,
     has_gps: bool,
     capture_local: Option<&str>,
 ) -> MatchOutcome {
@@ -358,6 +371,9 @@ pub fn locate(
     }
     let Some(wall) = capture_local.and_then(wall_seconds) else {
         return MatchOutcome::NoCaptureTime;
+    };
+    let Some(clock) = clock else {
+        return MatchOutcome::NoClock;
     };
     let offset = match clock.resolve(track, wall) {
         Resolution::Offset(o) => o,
@@ -377,6 +393,7 @@ pub fn locate(
         source: GeoSource::Gpx {
             file_name: file_name.to_string(),
             camera_minus_utc_s: offset,
+            clock: Some(clock.source()),
         },
     })
 }

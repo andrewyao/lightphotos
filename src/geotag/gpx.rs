@@ -8,7 +8,8 @@ use super::{ClockPeriod, Fix, Track, TrackPoint};
 
 /// The GPX 1.1 namespace. Elements in any other namespace are ignored.
 const GPX_NS: &str = "http://www.topografix.com/GPX/1/1";
-/// LightRemote's extensions: camera clock measurements and phone time zones.
+/// LightRemote's extensions. Only its camera clock measurements are read;
+/// its phone time zones say nothing about the camera's clock.
 pub const LR_NS: &str = "https://lightremote.app/gpx/1";
 
 /// A day at one fix a second is about 15 MB of GPX. Past this the file is
@@ -67,7 +68,6 @@ impl Track {
 
         let mut points = Vec::new();
         let mut camera_clock = Vec::new();
-        let mut utc_offsets = Vec::new();
         for node in root.descendants().filter(roxmltree::Node::is_element) {
             if is(node, GPX_NS, "trkpt") {
                 points.extend(point(node)?.map(|point| Fix { point, file: 0 }));
@@ -75,13 +75,6 @@ impl Track {
                 camera_clock.push(ClockPeriod {
                     from: time(attr(node, "measuredAt")?)?,
                     camera_minus_utc_s: offset(int(attr(node, "cameraMinusUtcSeconds")?)?)?,
-                });
-            } else if is(node, LR_NS, "utcOffset") {
-                let minutes = int(attr(node, "minutes")?)?;
-                check_zone(minutes)?;
-                utc_offsets.push(ClockPeriod {
-                    from: time(attr(node, "from")?)?,
-                    camera_minus_utc_s: minutes * 60,
                 });
             }
         }
@@ -92,7 +85,6 @@ impl Track {
             points,
             files: vec![file_name.to_string()],
             camera_clock,
-            utc_offsets,
         };
         track.normalize();
         Ok(track)
@@ -116,17 +108,6 @@ fn int(s: &str) -> Result<i64, GpxError> {
     s.trim()
         .parse()
         .map_err(|_| GpxError::Malformed(format!("{s:?} is not a whole number")))
-}
-
-/// UTC offsets run from -12:00 to +14:00; a day either side is room for any
-/// zone and refuses a number that would overflow later arithmetic.
-fn check_zone(minutes: i64) -> Result<(), GpxError> {
-    match minutes.abs() <= 24 * 60 {
-        true => Ok(()),
-        false => Err(GpxError::Malformed(format!(
-            "{minutes} minutes is not a UTC offset"
-        ))),
-    }
 }
 
 fn offset(seconds: i64) -> Result<i64, GpxError> {

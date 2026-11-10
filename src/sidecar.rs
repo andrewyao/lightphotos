@@ -661,6 +661,7 @@ mod tests {
             source: crate::geotag::GeoSource::Gpx {
                 file_name: "2026-11-08.gpx".into(),
                 camera_minus_utc_s: 32400,
+                clock: Some(crate::geotag::ClockSource::Measured),
             },
         }
     }
@@ -682,7 +683,15 @@ mod tests {
     fn a_single_file_gpx_location_from_an_earlier_build_still_reads() {
         let bytes = br#"{"rating":3,"location":{"lat":35.65,"lon":139.7,"alt":40.0,"source":{"kind":"gpx","file_name":"2026-11-08.gpx","camera_minus_utc_s":32400}}}"#;
         let rec = parse_record(bytes, || None).unwrap();
-        assert_eq!(rec.location, Some(sample_location()));
+        let want = GeoTag {
+            source: crate::geotag::GeoSource::Gpx {
+                file_name: "2026-11-08.gpx".into(),
+                camera_minus_utc_s: 32400,
+                clock: None,
+            },
+            ..sample_location()
+        };
+        assert_eq!(rec.location, Some(want));
         assert!(rec.unknown.is_empty());
     }
 

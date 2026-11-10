@@ -1836,6 +1836,7 @@ mod tests {
             source: crate::geotag::GeoSource::Gpx {
                 file_name: "day.gpx".into(),
                 camera_minus_utc_s: 0,
+                clock: None,
             },
         };
         cat.update(&p, Patch::Location(Some(tag.clone())));

@@ -336,6 +336,7 @@ mod tests {
             source: GeoSource::Gpx {
                 file_name: "2026-11-08.gpx".into(),
                 camera_minus_utc_s: 32400,
+                clock: None,
             },
         };
         let location = |groups: Vec<InfoGroup>| {

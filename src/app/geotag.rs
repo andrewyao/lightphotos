@@ -75,7 +75,7 @@ impl GeotagTally {
             MatchOutcome::AlreadyHasGps => &mut self.had_gps,
             MatchOutcome::OutsideTrack => &mut self.outside,
             MatchOutcome::Ambiguous => &mut self.ambiguous,
-            MatchOutcome::NoCaptureTime => &mut self.no_time,
+            MatchOutcome::NoCaptureTime | MatchOutcome::NoClock => &mut self.no_time,
         };
         *n += 1;
     }
@@ -301,7 +301,7 @@ impl App {
                         let stamp = image_decode::capture_stamp(&path);
                         crate::geotag::locate(
                             &track,
-                            &clock,
+                            Some(&clock),
                             has_gps,
                             stamp.as_ref().map(|s| s.local.as_str()),
                         )
