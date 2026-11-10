@@ -317,7 +317,8 @@ cap and a byte cap (`jobs/cache_limits.rs`):
 **The job-lifetime rule.** A job that writes a sidecar finishes across a
 folder change (doc comment on `App::finish_folder_jobs`, `app/mod.rs`):
 
-- Auto Tone, Remove CA, scoring, GPX geotagging and bulk delete keep running.
+- Auto Tone, Remove CA, scoring, GPX geotagging (from the photos it began
+  with, after any iCloud download) and bulk delete keep running.
 - Each result goes to its own photo's sidecar, found by the photo's full
   path (`save_patch`, `FolderStore::patch_uncached`). It never goes through
   the folder store's cache, which is keyed by file name.

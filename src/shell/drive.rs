@@ -35,7 +35,9 @@
 //! With no photo or folder after the flags, the run starts on the home page.
 //! Settings start empty, so that is a first launch. Catalogs go under
 //! `--catalog-dir <dir>`, or under the run's scratch settings directory,
-//! never `~/Pictures`.
+//! never `~/Pictures`. `--icloud-gpx-dir <dir>` stands a folder in for
+//! LightRemote's iCloud GPX folder; a day there that never downloads is
+//! given up on after 8 s, inside `idle`'s 30.
 //!
 //! Keys cannot take the `WindowEvent::KeyboardInput` road: winit's `KeyEvent`
 //! has a private field, so nothing outside winit can build one. The driver
@@ -83,6 +85,8 @@ pub(crate) struct Args {
     /// Where the run keeps its catalogs, in place of `~/Pictures/LightPhotos`.
     /// Without one they go under the run's scratch settings directory.
     catalog_dir: Option<PathBuf>,
+    /// Stands in for LightRemote's iCloud GPX folder.
+    icloud_gpx_dir: Option<PathBuf>,
 }
 
 impl Args {
@@ -99,6 +103,7 @@ impl Args {
         let mut out_dir = None;
         let mut target = None;
         let mut catalog_dir = None;
+        let mut icloud_gpx_dir = None;
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -110,6 +115,9 @@ impl Args {
                 }
                 "--catalog-dir" => {
                     catalog_dir = Some(args.next().ok_or("--catalog-dir needs a directory")?);
+                }
+                "--icloud-gpx-dir" => {
+                    icloud_gpx_dir = Some(args.next().ok_or("--icloud-gpx-dir needs a directory")?);
                 }
                 _ if target.is_none() => target = Some(arg),
                 _ => return Err(format!("unexpected argument: {arg}")),
@@ -131,6 +139,7 @@ impl Args {
             out_dir,
             target,
             catalog_dir: catalog_dir.map(PathBuf::from),
+            icloud_gpx_dir: icloud_gpx_dir.map(PathBuf::from),
         }))
     }
 }
@@ -482,6 +491,9 @@ pub(crate) fn run(args: Args) -> i32 {
             .clone()
             .unwrap_or_else(|| config_dir.join("catalogs")),
     );
+    if let Some(dir) = args.icloud_gpx_dir.clone() {
+        crate::app::override_icloud_dir(dir);
+    }
     crate::shell::dialog::cancel_all_pickers();
     crate::i18n::init();
 
@@ -1107,6 +1119,11 @@ quit
             .unwrap();
         assert_eq!(parsed.catalog_dir, Some(dir.clone()));
         assert!(args(&["--drive", &s, "--catalog-dir"]).is_err());
+        let parsed = args(&["--drive", &s, "--icloud-gpx-dir", &d])
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.icloud_gpx_dir, Some(dir.clone()));
+        assert!(args(&["--drive", &s, "--icloud-gpx-dir"]).is_err());
 
         assert!(args(&["--drive"]).is_err());
         let parsed = args(&["--drive", &s]).unwrap().unwrap();

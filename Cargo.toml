@@ -105,8 +105,9 @@ image-webp = "0.2"
 # and `kamadak-exif` reads "TIFF and some RAW image formats based on it".
 kamadak-exif = "0.6.1"
 # Local wall-clock fields for a file's modified time. Already in the tree via
-# rawler and trash; `wasmbind` reads the browser's time zone.
-chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind"] }
+# rawler and trash; `wasmbind` reads the browser's time zone. `serde` reads
+# `geotag.from_icloud`'s dates.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind", "serde"] }
 # Reads GPX tracks for geotagging: a read-only DOM with no dependencies.
 roxmltree = "0.21"
 

@@ -848,6 +848,76 @@ pub struct Strings {
     pub gpx_locations_cleared: fn(usize) -> String,
     pub info_location_source: &'static str,
     pub info_from_gpx: fn(&str) -> String,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
+    )]
+    pub geotag_from_icloud: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
+    )]
+    pub geotag_from_icloud_tip: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
+    )]
+    pub icloud_title: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
+    )]
+    pub icloud_prompt: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
+    )]
+    pub icloud_from: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
+    )]
+    pub icloud_to: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
+    )]
+    pub icloud_reading_dates: &'static str,
+    pub icloud_range_invalid: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
+    )]
+    pub icloud_days: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
+    )]
+    pub icloud_day_on_mac: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
+    )]
+    pub icloud_day_in_icloud: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
+    )]
+    pub icloud_day_missing: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
+    )]
+    pub icloud_adjacent_hint: &'static str,
+    pub icloud_unavailable: &'static str,
+    pub icloud_downloading: fn(usize) -> String,
+    /// First and last day, `YYYY-MM-DD`.
+    pub icloud_no_tracks: fn(&str, &str) -> String,
+    pub geotag_days_missing: fn(&str) -> String,
+    pub geotag_days_not_downloaded: fn(&str) -> String,
+    pub geotag_days_downloaded: fn(&str) -> String,
+    /// File name, then why.
+    pub geotag_file_skipped: fn(&str, &str) -> String,
     pub touch_up_limit: &'static str,
     pub mask_limit: &'static str,
     pub masks: &'static str,

@@ -248,6 +248,89 @@ pub(super) fn geotag_offset_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutpu
     }
 }
 
+/// "Geotag from iCloud…": a From and a To date, defaulting to the folder's
+/// capture dates, over a list of the picked days and whether LightRemote's
+/// track for each is on this Mac, in iCloud or missing.
+#[cfg(target_os = "macos")]
+pub(super) fn geotag_icloud_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
+    use crate::app::DayState;
+    let Some(view) = app.icloud_form() else {
+        return;
+    };
+    let t = t();
+    let (mut from, mut to) = (view.from.to_string(), view.to.to_string());
+    let resp = form::dialog(ui.ctx(), "geotag_icloud", form::DIALOG_WIDTH, |ui| {
+        form::title(ui, t.icloud_title);
+        ui.label(t.icloud_prompt);
+        let form = Form::new(ui, &[t.icloud_from, t.icloud_to, "0000-00-00"]);
+        let mut changed = false;
+        form.section(ui, "", |ui| {
+            for (label, text) in [(t.icloud_from, &mut from), (t.icloud_to, &mut to)] {
+                form.row(ui, label, |ui| {
+                    let field = egui::TextEdit::singleline(text)
+                        .hint_text("2026-11-08")
+                        .char_limit(10)
+                        .desired_width(f32::INFINITY);
+                    changed |= ui.add(field).changed();
+                });
+            }
+            if view.reading_dates {
+                form::hint(ui, t.icloud_reading_dates);
+            } else if view.days.is_none() {
+                form::error(ui, t.icloud_range_invalid);
+            }
+        });
+        if changed {
+            out.actions.push(UiAction::SetICloudDates {
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
+        if let Some(days) = view.days {
+            let row = ui.text_style_height(&egui::TextStyle::Body);
+            egui::ScrollArea::vertical()
+                .max_height(row * ICLOUD_ROWS)
+                .show(ui, |ui| {
+                    form.section(ui, t.icloud_days, |ui| {
+                        for d in days {
+                            let state = match d.state {
+                                DayState::OnMac => t.icloud_day_on_mac,
+                                DayState::InICloud => t.icloud_day_in_icloud,
+                                DayState::Missing => t.icloud_day_missing,
+                            };
+                            form.row(ui, &crate::app::day(d.date), |ui| match d.state {
+                                DayState::Missing => form::error(ui, state),
+                                _ => {
+                                    ui.label(state);
+                                }
+                            });
+                        }
+                    });
+                });
+            form::hint(ui, t.icloud_adjacent_hint);
+        }
+        let buttons = [
+            Button::new(t.cancel, Role::Cancel),
+            Button {
+                enabled: view.days.is_some(),
+                ..Button::new(t.geotag_run, Role::Primary)
+            },
+        ];
+        match form::footer(ui, &buttons) {
+            Some(Role::Cancel) => out.actions.push(UiAction::CancelICloud),
+            Some(_) => out.actions.push(UiAction::CommitICloud),
+            None => {}
+        }
+    });
+    if resp.should_close() {
+        out.actions.push(UiAction::CancelICloud);
+    }
+}
+
+/// How many day rows the iCloud form shows before it scrolls.
+#[cfg(target_os = "macos")]
+const ICLOUD_ROWS: f32 = 10.0;
+
 /// Names a new browser catalog, in the preset prompt's shape. Native New
 /// Catalog… is a save dialog instead.
 #[cfg(target_arch = "wasm32")]

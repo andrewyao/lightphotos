@@ -845,6 +845,17 @@ fn all_photos_menu(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 {
                     out.actions.push(UiAction::GeotagFromGpx);
                 }
+                #[cfg(target_os = "macos")]
+                if ui
+                    .add_enabled(
+                        !app.geotag_running(),
+                        egui::Button::new(t.geotag_from_icloud),
+                    )
+                    .on_hover_text(t.geotag_from_icloud_tip)
+                    .clicked()
+                {
+                    out.actions.push(UiAction::GeotagFromICloud);
+                }
                 if ui
                     .button(t.clear_gpx_locations)
                     .on_hover_text(t.clear_gpx_locations_tip)

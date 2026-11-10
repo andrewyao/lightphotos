@@ -85,6 +85,8 @@ pub enum Command {
     Export(ExportParams),
     #[serde(rename = "geotag.from_gpx")]
     GeotagFromGpx(GeotagParams),
+    #[serde(rename = "geotag.from_icloud")]
+    GeotagFromICloud(ICloudGeotagParams),
     #[serde(rename = "geotag.clear")]
     ClearGeotags,
     #[serde(rename = "edit.undo")]
@@ -581,6 +583,7 @@ fn apply_to_record(
         | Command::AddPresetFolder(_)
         | Command::Export(_)
         | Command::GeotagFromGpx(_)
+        | Command::GeotagFromICloud(_)
         | Command::ClearGeotags
         | Command::Undo
         | Command::Redo => return Err(CommandError::NeedsApp),
@@ -932,6 +935,21 @@ pub struct GeotagParams {
     pub camera_minus_utc_s: Option<i64>,
 }
 
+/// Locate the open folder's photos on LightRemote's GPX tracks for a range
+/// of days, read from its iCloud Drive folder.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ICloudGeotagParams {
+    /// The first day, `YYYY-MM-DD`.
+    pub first: chrono::NaiveDate,
+    /// The last day, on or after `first` and at most 365 days later.
+    pub last: chrono::NaiveDate,
+    /// As in [`GeotagParams`]: needed only when the tracks carry no
+    /// LightRemote clock data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_minus_utc_s: Option<i64>,
+}
+
 /// What a caller gets back when a command runs.
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Outcome {
@@ -955,6 +973,7 @@ pub enum Blocker {
     TouchUp,
     PresetName,
     GeotagOffset,
+    GeotagICloud,
     Settings,
 }
 
@@ -1108,6 +1127,7 @@ impl Command {
             AddPresetFolder(_) => "preset.add_folder",
             Export(_) => "export",
             GeotagFromGpx(_) => "geotag.from_gpx",
+            GeotagFromICloud(_) => "geotag.from_icloud",
             ClearGeotags => "geotag.clear",
             Undo => "edit.undo",
             Redo => "edit.redo",
@@ -1121,7 +1141,8 @@ impl Command {
         match self {
             Rate(_) | Flag(_) | Label(_) | Rotate(_) | Score(_) | Develop(_) | Reset(_)
             | AutoTone(_) | Monochrome(_) | Crop(_) | AddMask(_) | SetMask(_) | ClearMasks(_)
-            | PasteSettings(_) | Preset(_) | GeotagFromGpx(_) | ClearGeotags | Undo | Redo => true,
+            | PasteSettings(_) | Preset(_) | GeotagFromGpx(_) | GeotagFromICloud(_)
+            | ClearGeotags | Undo | Redo => true,
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
             | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | CopySettings(_)
             | SavePreset(_) | AddPresetFolder(_) | Export(_) => false,
@@ -1147,8 +1168,8 @@ impl Command {
             Export(p) => Some(&p.photos),
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
             | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | CopySettings(_)
-            | SavePreset(_) | AddPresetFolder(_) | GeotagFromGpx(_) | ClearGeotags | Undo
-            | Redo => None,
+            | SavePreset(_) | AddPresetFolder(_) | GeotagFromGpx(_) | GeotagFromICloud(_)
+            | ClearGeotags | Undo | Redo => None,
         }
     }
 
@@ -1251,6 +1272,13 @@ impl Command {
                  time, and keep each location in the photo's sidecar; the photo files are \
                  not changed. A photo whose file has GPS keeps its own. A GPX file without \
                  LightRemote clock data needs `camera_minus_utc_s`. Desktop only.",
+                false,
+            ),
+            GeotagFromICloud(_) => (
+                "Like geotag.from_gpx, with LightRemote's GPX tracks for the days `first` to \
+                 `last` (YYYY-MM-DD), plus the day either side, from its iCloud Drive folder. \
+                 Days still in iCloud are downloaded first, waiting up to a minute; a day \
+                 with no track is reported, not an error. macOS only.",
                 false,
             ),
             ClearGeotags => (
@@ -1386,6 +1414,11 @@ impl Command {
             Command::GeotagFromGpx(GeotagParams {
                 gpx: PathBuf::from("/Users/me/Pictures/Trip/2026-11-08.gpx"),
                 camera_minus_utc_s: Some(32400),
+            }),
+            Command::GeotagFromICloud(ICloudGeotagParams {
+                first: chrono::NaiveDate::from_ymd_opt(2026, 11, 7).unwrap_or_default(),
+                last: chrono::NaiveDate::from_ymd_opt(2026, 11, 9).unwrap_or_default(),
+                camera_minus_utc_s: None,
             }),
             Command::ClearGeotags,
             Command::Undo,

@@ -53,6 +53,19 @@ pub enum UiAction {
     CommitGeotagOffset,
     #[cfg(not(target_arch = "wasm32"))]
     CancelGeotagOffset,
+    /// Open "Geotag from iCloud…".
+    #[cfg(target_os = "macos")]
+    GeotagFromICloud,
+    /// Its From and To fields, as typed.
+    #[cfg(target_os = "macos")]
+    SetICloudDates {
+        from: String,
+        to: String,
+    },
+    #[cfg(target_os = "macos")]
+    CommitICloud,
+    #[cfg(target_os = "macos")]
+    CancelICloud,
     /// Show this page of the group's tiles.
     ComparePage(usize),
     /// Native only, as is the row that sends it.
@@ -520,6 +533,8 @@ fn dialogs(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     preset_name_modal(ui, app, out);
     #[cfg(not(target_arch = "wasm32"))]
     modals::geotag_offset_modal(ui, app, out);
+    #[cfg(target_os = "macos")]
+    modals::geotag_icloud_modal(ui, app, out);
     #[cfg(target_arch = "wasm32")]
     modals::catalog_name_modal(ui, app, out);
     help_modal(ui, app, out);

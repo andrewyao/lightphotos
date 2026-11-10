@@ -125,6 +125,8 @@ impl App {
             Blocker::PresetName
         } else if self.geotag_prompt_open() {
             Blocker::GeotagOffset
+        } else if self.icloud_form_open() {
+            Blocker::GeotagICloud
         } else if self.show_settings {
             Blocker::Settings
         } else {
@@ -462,7 +464,22 @@ impl App {
             }
             #[cfg(not(target_arch = "wasm32"))]
             Command::GeotagFromGpx(p) => {
-                let photos = self.start_geotag(&p.gpx, p.camera_minus_utc_s)?;
+                let photos =
+                    self.start_geotag(super::geotag::GpxSource::File(p.gpx), p.camera_minus_utc_s)?;
+                Ok(Outcome {
+                    photos,
+                    pending: true,
+                })
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Command::GeotagFromICloud(p) => {
+                let photos = self.start_geotag(
+                    super::geotag::GpxSource::ICloud {
+                        first: p.first,
+                        last: p.last,
+                    },
+                    p.camera_minus_utc_s,
+                )?;
                 Ok(Outcome {
                     photos,
                     pending: true,
@@ -471,9 +488,11 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             Command::ClearGeotags => done(self.clear_geotags()),
             #[cfg(target_arch = "wasm32")]
-            Command::GeotagFromGpx(_) | Command::ClearGeotags => Err(CommandError::Failed {
-                reason: "geotagging from a GPX file runs only in the desktop app".into(),
-            }),
+            Command::GeotagFromGpx(_) | Command::GeotagFromICloud(_) | Command::ClearGeotags => {
+                Err(CommandError::Failed {
+                    reason: "geotagging from a GPX file runs only in the desktop app".into(),
+                })
+            }
             Command::Undo => done(self.undo_edit()),
             Command::Redo => done(self.redo_edit()),
         }
