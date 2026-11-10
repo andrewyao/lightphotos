@@ -12,6 +12,7 @@ use super::loupe::{
 };
 use super::*;
 use crate::decode::image_decode::{Flash, ImageMetadata, WhiteBalance};
+use crate::geotag::{GeoSource, GeoTag};
 
 /// One heading and its rows of (label, value). Rows exist only for fields
 /// the photo has. `link` is a map URL, shown under the location rows.
@@ -23,11 +24,23 @@ pub(super) struct InfoGroup {
 
 /// The groups to show for `path`, with missing fields and empty groups left
 /// out. `meta` is `None` until the background read lands, when only the name
-/// is known.
-fn info_groups(path: &Path, meta: Option<&ImageMetadata>) -> Vec<InfoGroup> {
+/// is known. `stored` is the location LightPhotos keeps for the photo,
+/// shown with where it came from when the file has no GPS of its own.
+fn info_groups(
+    path: &Path,
+    meta: Option<&ImageMetadata>,
+    stored: Option<&GeoTag>,
+) -> Vec<InfoGroup> {
     let t = t();
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
     let m = |f: fn(&ImageMetadata) -> Option<String>| meta.and_then(f);
+    let (gps, source) = match meta.and_then(|m| m.gps) {
+        Some(gps) => (Some(gps), None),
+        None => match stored.and_then(|s| Some((s.gps()?, s))) {
+            Some((gps, s)) => (Some(gps), Some(source_text(&s.source))),
+            None => (None, None),
+        },
+    };
     let groups = [
         (
             t.info_file,
@@ -73,18 +86,13 @@ fn info_groups(path: &Path, meta: Option<&ImageMetadata>) -> Vec<InfoGroup> {
         (
             t.info_location,
             vec![
-                (
-                    t.info_latitude,
-                    m(|m| m.gps.map(|g| format_latitude(g.lat))),
-                ),
-                (
-                    t.info_longitude,
-                    m(|m| m.gps.map(|g| format_longitude(g.lon))),
-                ),
+                (t.info_latitude, gps.map(|g| format_latitude(g.lat))),
+                (t.info_longitude, gps.map(|g| format_longitude(g.lon))),
                 (
                     t.info_altitude,
-                    m(|m| m.gps.and_then(|g| g.alt).map(format_altitude)),
+                    gps.and_then(|g| g.alt).map(format_altitude),
                 ),
+                (t.info_location_source, source),
             ],
         ),
     ];
@@ -96,11 +104,17 @@ fn info_groups(path: &Path, meta: Option<&ImageMetadata>) -> Vec<InfoGroup> {
                 .filter_map(|(label, value)| Some((label, value?)))
                 .collect();
             let link = (title == t.info_location)
-                .then(|| meta.and_then(|m| m.gps).map(|gps| maps_url(&gps)))
+                .then(|| gps.map(|gps| maps_url(&gps)))
                 .flatten();
             (!rows.is_empty()).then_some(InfoGroup { title, rows, link })
         })
         .collect()
+}
+
+fn source_text(source: &GeoSource) -> String {
+    match source {
+        GeoSource::Gpx { file_name, .. } => (t().info_from_gpx)(file_name),
+    }
 }
 
 /// File size and format, the ones the photo has, on one line. `None` until
@@ -176,7 +190,7 @@ fn draw_info_page(ui: &mut egui::Ui, app: &App) {
             );
         });
     }
-    for group in &info_groups(&path, meta) {
+    for group in &info_groups(&path, meta, app.stored_location(&path)) {
         form.section(ui, group.title, |ui| {
             for (label, value) in &group.rows {
                 form.row(ui, label, |ui| {
@@ -203,7 +217,7 @@ mod tests {
 
     #[test]
     fn before_metadata_arrives_only_the_file_name_shows() {
-        let groups = info_groups(Path::new("/p/IMG_1.JPG"), None);
+        let groups = info_groups(Path::new("/p/IMG_1.JPG"), None, None);
         assert_eq!(titles(&groups), [t().info_file]);
         assert_eq!(groups[0].rows, [(t().info_name, "IMG_1.JPG".to_string())]);
     }
@@ -237,7 +251,7 @@ mod tests {
             source_size: Some((6000, 4000)),
             ..Default::default()
         };
-        let groups = info_groups(Path::new("/p/IMG_1.JPG"), Some(&meta));
+        let groups = info_groups(Path::new("/p/IMG_1.JPG"), Some(&meta), None);
         assert_eq!(
             groups[0].rows,
             [
@@ -254,7 +268,7 @@ mod tests {
             flash: Some(Flash::DidNotFire),
             ..Default::default()
         };
-        let groups = info_groups(Path::new("a.jpg"), Some(&meta));
+        let groups = info_groups(Path::new("a.jpg"), Some(&meta), None);
         assert_eq!(titles(&groups), [t().info_file, t().info_exposure]);
         assert_eq!(
             groups[1].rows,
@@ -275,7 +289,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let groups = info_groups(Path::new("a.jpg"), Some(&with_alt));
+        let groups = info_groups(Path::new("a.jpg"), Some(&with_alt), None);
         let location = groups
             .iter()
             .find(|g| g.title == t().info_location)
@@ -301,7 +315,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let groups = info_groups(Path::new("a.jpg"), Some(&no_alt));
+        let groups = info_groups(Path::new("a.jpg"), Some(&no_alt), None);
         let location = groups
             .iter()
             .find(|g| g.title == t().info_location)
@@ -311,5 +325,60 @@ mod tests {
             2,
             "no altitude row without an altitude"
         );
+    }
+
+    #[test]
+    fn a_stored_location_shows_with_its_source_unless_the_file_has_gps() {
+        let stored = GeoTag {
+            lat: 35.5,
+            lon: 139.25,
+            alt: None,
+            source: GeoSource::Gpx {
+                file_name: "2026-11-08.gpx".into(),
+                camera_minus_utc_s: 32400,
+            },
+        };
+        let location = |groups: Vec<InfoGroup>| {
+            groups
+                .into_iter()
+                .find(|g| g.title == t().info_location)
+                .map(|g| (g.rows, g.link))
+        };
+        let no_gps = ImageMetadata::default();
+        let (rows, link) = location(info_groups(
+            Path::new("a.jpg"),
+            Some(&no_gps),
+            Some(&stored),
+        ))
+        .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (t().info_latitude, "35.50000\u{b0} N".to_string()),
+                (t().info_longitude, "139.25000\u{b0} E".to_string()),
+                (
+                    t().info_location_source,
+                    "GPX \u{b7} 2026-11-08.gpx".to_string()
+                ),
+            ]
+        );
+        assert!(link.is_some_and(|l| l.contains("35.500000,139.250000")));
+
+        let file_gps = ImageMetadata {
+            gps: Some(Gps {
+                lat: 1.0,
+                lon: 2.0,
+                alt: None,
+            }),
+            ..Default::default()
+        };
+        let (rows, _) = location(info_groups(
+            Path::new("a.jpg"),
+            Some(&file_gps),
+            Some(&stored),
+        ))
+        .unwrap();
+        assert_eq!(rows.len(), 2, "the file's GPS wins, with no source row");
+        assert!(rows[0].1.starts_with("1.0"), "{rows:?}");
     }
 }

@@ -123,6 +123,8 @@ impl App {
             Blocker::TouchUp
         } else if self.preset_name_edit.is_some() {
             Blocker::PresetName
+        } else if self.geotag_prompt_open() {
+            Blocker::GeotagOffset
         } else if self.show_settings {
             Blocker::Settings
         } else {
@@ -458,6 +460,20 @@ impl App {
                     pending,
                 })
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            Command::GeotagFromGpx(p) => {
+                let photos = self.start_geotag(&p.gpx, p.camera_minus_utc_s)?;
+                Ok(Outcome {
+                    photos,
+                    pending: true,
+                })
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Command::ClearGeotags => done(self.clear_geotags()),
+            #[cfg(target_arch = "wasm32")]
+            Command::GeotagFromGpx(_) | Command::ClearGeotags => Err(CommandError::Failed {
+                reason: "geotagging from a GPX file runs only in the desktop app".into(),
+            }),
             Command::Undo => done(self.undo_edit()),
             Command::Redo => done(self.redo_edit()),
         }

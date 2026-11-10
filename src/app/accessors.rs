@@ -11,6 +11,12 @@ impl App {
         self.mode
     }
 
+    /// The location LightPhotos keeps for `path`, such as one from a GPX
+    /// track. The file's own GPS, in its metadata, wins over it.
+    pub(crate) fn stored_location(&self, path: &Path) -> Option<&crate::geotag::GeoTag> {
+        self.folder_store.location(path)
+    }
+
     /// The group whose collapsed stack is the cell at `pos`. `None` for a
     /// single, and for any cell of an expanded stack, which acts as a single
     /// photo.

@@ -456,6 +456,12 @@ pub(crate) struct App {
     score_pool: Option<crate::jobs::score::ScorePool>,
     /// The photos a "Score photos" run has left. `None` when none is running.
     score_job: Option<crate::jobs::score::ScoreJob>,
+    /// The running "Geotag from GPX" match, if any.
+    #[cfg(not(target_arch = "wasm32"))]
+    geotag_job: Option<geotag::GeotagJob>,
+    /// The camera UTC offset prompt, open over a GPX file with no clock data.
+    #[cfg(not(target_arch = "wasm32"))]
+    geotag_prompt: Option<geotag::GeotagPrompt>,
     /// The export form, its settings and the exports it started.
     exports: export::Exports,
     /// The running version and the newest release known, for the update cue.
@@ -813,6 +819,8 @@ mod faces;
 mod folders;
 mod fonts;
 mod fullscreen;
+#[cfg(not(target_arch = "wasm32"))]
+mod geotag;
 mod slideshow;
 pub(crate) use slideshow::SlideshowSettings;
 mod group_compare;
@@ -932,6 +940,10 @@ impl App {
             loader: None,
             score_pool: None,
             score_job: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            geotag_job: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            geotag_prompt: None,
             exports: export::Exports::new(),
             update: {
                 let mut update = crate::update::UpdateState::new();
@@ -1346,9 +1358,10 @@ impl App {
     /// store they write to is replaced or closed.
     ///
     /// The rule: a job that writes a sidecar finishes across a folder change.
-    /// Auto Tone, Remove Chromatic Aberration, scoring and bulk delete keep
-    /// running, and each result lands in its own photo's sidecar, found by
-    /// the photo's full path (`save_patch`, `FolderStore::patch_uncached`).
+    /// Auto Tone, Remove Chromatic Aberration, scoring, GPX geotagging and
+    /// bulk delete keep running, and each result lands in its own photo's
+    /// sidecar, found by the photo's full path (`save_patch`,
+    /// `FolderStore::patch_uncached`).
     /// The folder store's cache is keyed by file name, so no such job may
     /// write through it for a photo it does not hold. What a job cannot
     /// carry over is its undo step, since the folder change clears the
@@ -1358,6 +1371,22 @@ impl App {
         self.autotone.leave_folder();
         self.optics.leave_folder();
         self.save_edit();
+    }
+
+    /// The browser has no GPX geotagging yet (see `geotag`).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn pump_geotag(&mut self) -> bool {
+        false
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn geotag_running(&self) -> bool {
+        false
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn geotag_prompt_open(&self) -> bool {
+        false
     }
 
     /// Leave the grid with nothing selected and no anchor.
@@ -1624,6 +1653,16 @@ impl App {
                 ui::UiAction::ToggleStack(pos) => self.toggle_stack(pos),
                 ui::UiAction::ToggleLabel(label) => self.toggle_label(label),
                 ui::UiAction::ScoreAll => self.score_all(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::GeotagFromGpx => self.geotag_dialog(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::ClearGeotags => self.run_ui(crate::command::Command::ClearGeotags),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::SetGeotagOffsetText(text) => self.set_geotag_offset_text(text),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::CommitGeotagOffset => self.commit_geotag_prompt(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::CancelGeotagOffset => self.cancel_geotag_prompt(),
                 ui::UiAction::ComparePage(page) => self.set_compare_page(page),
                 ui::UiAction::SetTileFidelity(f) => self.set_tile_fidelity(f),
                 ui::UiAction::PickGroupTile { path, how } => self.pick_group_tile(path, how),

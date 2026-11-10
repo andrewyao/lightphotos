@@ -331,14 +331,36 @@ fn wall_seconds(local: &str) -> Option<i64> {
         .map(|t| t.and_utc().timestamp())
 }
 
-/// A UTC offset as camera-minus-UTC seconds, from an EXIF offset such as
-/// `+09:00`. For prefilling the offset the user is asked for.
-pub fn offset_seconds(exif_offset: &str) -> Option<i64> {
-    exif_offset
-        .trim()
-        .parse::<chrono::FixedOffset>()
-        .ok()
-        .map(|o| i64::from(o.local_minus_utc()))
+/// A UTC offset as camera-minus-UTC seconds, from text a person or EXIF
+/// wrote: `+09:00`, `-5:30`, `+0530`, `9` or `-8`. Within a day either way.
+pub fn parse_utc_offset(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (sign, rest) = match text
+        .strip_prefix('-')
+        .or_else(|| text.strip_prefix('\u{2212}'))
+    {
+        Some(rest) => (-1, rest),
+        None => (1, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let digits = |s: &str| !s.is_empty() && s.len() <= 2 && s.bytes().all(|b| b.is_ascii_digit());
+    let (h, m) = match rest.split_once(':') {
+        Some((h, m)) if digits(h) && m.len() == 2 && digits(m) => (h, m),
+        Some(_) => return None,
+        None if rest.len() == 4 && rest.bytes().all(|b| b.is_ascii_digit()) => {
+            (rest.get(..2)?, rest.get(2..)?)
+        }
+        None if digits(rest) => (rest, "0"),
+        None => return None,
+    };
+    let (h, m): (i64, i64) = (h.parse().ok()?, m.parse().ok()?);
+    (h <= 24 && m < 60).then_some(sign * (h * 3600 + m * 60))
+}
+
+/// `seconds` east of UTC as `+HH:MM`, rounded down to the minute.
+pub fn format_utc_offset(seconds: i64) -> String {
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let minutes = seconds.unsigned_abs() / 60;
+    format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 #[cfg(test)]

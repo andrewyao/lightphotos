@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::develop::{Adjustments, DetectTarget, Mask, RasterId, TouchUp};
+use crate::geotag::GeoTag;
 use crate::persist::groups::{Group, GroupId, GroupWrite, Groups};
 use crate::sidecar::{ColorLabel, Flag, ImageRecord, StoredScore};
 
@@ -80,6 +81,12 @@ pub(crate) enum Patch {
     Rotation { rotation: u8, at: u64 },
     /// The quality score.
     Score(StoredScore),
+    /// Where the photo was taken; `None` clears it.
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "the browser has no GPX geotagging yet")
+    )]
+    Location(Option<GeoTag>),
     /// The edit time, as tests set it.
     #[cfg(test)]
     Edited(u64),
@@ -168,6 +175,10 @@ impl Patch {
             }
             Patch::Rotation { rotation, at } => rec.edit(*at, |rec| rec.rotation = *rotation),
             Patch::Score(score) => rec.score = Some(score.clone()),
+            Patch::Location(location) => {
+                rec.location = location.clone();
+                rec.unknown.forget("location");
+            }
             #[cfg(test)]
             Patch::Edited(secs) => rec.edited = Some(*secs),
             #[cfg(test)]

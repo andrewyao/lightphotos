@@ -36,7 +36,9 @@ mod update;
 #[cfg(any(target_arch = "wasm32", test))]
 mod web;
 
-use lightphotos::{command, decode, develop, export, hash, paths, scoring, sidecar, worker_pool};
+use lightphotos::{
+    command, decode, develop, export, geotag, hash, paths, scoring, sidecar, worker_pool,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
@@ -599,7 +601,7 @@ impl App {
 
         self.poll_face_quality();
         let vision_pending = self.request_face_quality();
-        let scoring = self.pump_scoring();
+        let scoring = self.pump_scoring() || self.pump_geotag();
 
         // Segmentation starts from user actions, so it has no `request_*` call.
         self.poll_selection_mask();

@@ -75,6 +75,18 @@ pub fn pick_preset_folder() -> Option<PathBuf> {
         .pick_folder()
 }
 
+/// The OS file picker for one GPX track. `None` when the user cancelled.
+/// Blocks until the dialog closes, so call it only on the main thread.
+pub fn pick_gpx_file() -> Option<PathBuf> {
+    if headless("GPX") {
+        return None;
+    }
+    rfd::FileDialog::new()
+        .set_title(crate::i18n::t().gpx_picker_title)
+        .add_filter(crate::i18n::t().gpx_filter_name, &["gpx", "GPX"])
+        .pick_file()
+}
+
 /// Show the OS file picker for Lightroom presets. Empty when the user
 /// cancelled. Blocks until the dialog closes, so call it only on the main
 /// thread.

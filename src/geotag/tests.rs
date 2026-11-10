@@ -333,8 +333,33 @@ fn a_geotag_serializes_with_its_source_tagged_by_kind() {
 }
 
 #[test]
-fn an_exif_offset_reads_as_camera_minus_utc_seconds() {
-    assert_eq!(offset_seconds("+09:00"), Some(32400));
-    assert_eq!(offset_seconds("-05:30"), Some(-19800));
-    assert_eq!(offset_seconds("bogus"), None);
+fn a_utc_offset_reads_the_ways_people_and_exif_write_it() {
+    for (text, seconds) in [
+        ("+09:00", 32400),
+        ("-05:30", -19800),
+        (" +0530 ", 19800),
+        ("9", 32400),
+        ("-8", -28800),
+        ("\u{2212}3:00", -10800),
+        ("+00:00", 0),
+    ] {
+        assert_eq!(parse_utc_offset(text), Some(seconds), "{text}");
+    }
+    for bad in [
+        "",
+        "+",
+        "bogus",
+        "+9:5",
+        "+25:00",
+        "+09:60",
+        "+123",
+        "+09:00:00",
+        "++9",
+        "\u{0669}",
+    ] {
+        assert_eq!(parse_utc_offset(bad), None, "{bad}");
+    }
+    assert_eq!(format_utc_offset(-19800), "-05:30");
+    assert_eq!(format_utc_offset(32400), "+09:00");
+    assert_eq!(parse_utc_offset(&format_utc_offset(-12600)), Some(-12600));
 }

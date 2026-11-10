@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::develop::{Adjustments, Detections, Mask, MaskShape, TouchUp, MAX_MASKS};
+use crate::geotag::GeoTag;
 use crate::scoring::quality::QualityScore;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -111,6 +112,16 @@ pub struct ImageRecord {
     /// sort. `None` while the photo has no edits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edited: Option<u64>,
+    /// Where the photo was taken, as LightPhotos found it, such as on a GPX
+    /// track. A fact about the photo, not an edit, and never written into
+    /// the photo file. The file's own GPS wins over it. One this build
+    /// can't read, from a later source, stays in `unknown` as it came.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "readable_location"
+    )]
+    pub location: Option<GeoTag>,
     /// Top-level fields this build doesn't know, from a later one. Filled by
     /// [`parse_record`] rather than serde (a flattened map would buffer the
     /// whole record, which `RawValue` in the masks can't read back), and
@@ -130,7 +141,7 @@ pub struct UnknownFields(std::collections::BTreeMap<String, Box<RawValue>>);
 
 impl UnknownFields {
     /// The fields `ImageRecord` reads. A test keeps this honest.
-    const KNOWN: [&'static str; 10] = [
+    const KNOWN: [&'static str; 11] = [
         "rating",
         "flag",
         "label",
@@ -141,6 +152,7 @@ impl UnknownFields {
         "rotation",
         "score",
         "edited",
+        "location",
     ];
 
     pub fn is_empty(&self) -> bool {
@@ -163,7 +175,12 @@ impl UnknownFields {
             ) -> Result<UnknownFields, A::Error> {
                 let mut unknown = UnknownFields::default();
                 while let Some(key) = map.next_key::<String>()? {
-                    if UnknownFields::KNOWN.contains(&key.as_str()) {
+                    if key == "location" {
+                        let raw: Box<RawValue> = map.next_value()?;
+                        if readable_geotag(&raw).is_none() {
+                            unknown.0.insert(key, raw);
+                        }
+                    } else if UnknownFields::KNOWN.contains(&key.as_str()) {
                         map.next_value::<serde::de::IgnoredAny>()?;
                     } else {
                         unknown.0.insert(key, map.next_value()?);
@@ -175,6 +192,31 @@ impl UnknownFields {
         let mut de = serde_json::Deserializer::from_slice(bytes);
         serde::Deserializer::deserialize_map(&mut de, Visitor).unwrap_or_default()
     }
+}
+
+impl UnknownFields {
+    /// Forget a field this build has since set itself, so it isn't written
+    /// twice.
+    pub fn forget(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+}
+
+/// A location this build reads: a known source and a position on the globe.
+fn readable_geotag(raw: &RawValue) -> Option<GeoTag> {
+    serde_json::from_str::<GeoTag>(raw.get())
+        .ok()
+        .filter(|tag| tag.gps().is_some())
+}
+
+/// A sidecar's location, or `None` for one this build can't read, which
+/// [`UnknownFields::of`] keeps instead.
+fn readable_location<'de, D>(deserializer: D) -> Result<Option<GeoTag>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    Ok(readable_geotag(&raw))
 }
 
 impl PartialEq for UnknownFields {
@@ -375,6 +417,7 @@ impl ImageRecord {
             && self.detections.is_empty()
             && self.score.is_none()
             && self.edited.is_none()
+            && self.location.is_none()
             && self.unknown.is_empty();
         debug_assert_eq!(
             empty,
@@ -609,6 +652,47 @@ pub fn delete_record(photo: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::scoring::quality::{Basis, Deduction, Penalty};
+
+    fn sample_location() -> GeoTag {
+        GeoTag {
+            lat: 35.65,
+            lon: 139.7,
+            alt: Some(40.0),
+            source: crate::geotag::GeoSource::Gpx {
+                file_name: "2026-11-08.gpx".into(),
+                camera_minus_utc_s: 32400,
+            },
+        }
+    }
+
+    #[test]
+    fn a_location_round_trips_and_alone_keeps_the_sidecar() {
+        let rec = ImageRecord {
+            location: Some(sample_location()),
+            ..Default::default()
+        };
+        assert!(!rec.is_empty());
+        let bytes = serde_json::to_vec(&rec).unwrap();
+        assert_eq!(parse_record(&bytes, || None).unwrap(), rec);
+    }
+
+    #[test]
+    fn a_location_this_build_cant_read_is_kept_as_it_came() {
+        for location in [
+            r#"{"lat":1,"lon":2,"source":{"kind":"xmp_sidecar","path":"a.xmp"}}"#,
+            r#"{"lat":100,"lon":2,"source":{"kind":"gpx","file_name":"a","camera_minus_utc_s":0}}"#,
+            r#""somewhere""#,
+        ] {
+            let bytes = format!(r#"{{"rating":2,"location":{location}}}"#);
+            let rec = parse_record(bytes.as_bytes(), || None).unwrap();
+            assert_eq!(rec.rating, Some(2), "{location}");
+            assert_eq!(rec.location, None, "{location}");
+            let written: serde_json::Value =
+                serde_json::from_slice(&serde_json::to_vec(&rec).unwrap()).unwrap();
+            let kept: serde_json::Value = serde_json::from_str(location).unwrap();
+            assert_eq!(written["location"], kept, "{location}");
+        }
+    }
 
     fn sample_score() -> QualityScore {
         QualityScore {
@@ -1099,6 +1183,7 @@ mod tests {
             edits: 1,
         });
         rec.edited = Some(1);
+        rec.location = Some(sample_location());
         let bytes = serde_json::to_vec(&rec).unwrap();
 
         let written: serde_json::Map<String, serde_json::Value> =

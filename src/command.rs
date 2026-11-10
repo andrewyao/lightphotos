@@ -83,6 +83,10 @@ pub enum Command {
     AddPresetFolder(PresetFolderParams),
     #[serde(rename = "export")]
     Export(ExportParams),
+    #[serde(rename = "geotag.from_gpx")]
+    GeotagFromGpx(GeotagParams),
+    #[serde(rename = "geotag.clear")]
+    ClearGeotags,
     #[serde(rename = "edit.undo")]
     Undo,
     #[serde(rename = "edit.redo")]
@@ -576,6 +580,8 @@ fn apply_to_record(
         | Command::SavePreset(_)
         | Command::AddPresetFolder(_)
         | Command::Export(_)
+        | Command::GeotagFromGpx(_)
+        | Command::ClearGeotags
         | Command::Undo
         | Command::Redo => return Err(CommandError::NeedsApp),
     }
@@ -913,6 +919,19 @@ pub struct ExportParams {
     pub settings: Option<ExportSettings>,
 }
 
+/// Locate the open folder's photos on a GPX track.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GeotagParams {
+    /// The GPX file.
+    pub gpx: PathBuf,
+    /// Seconds the camera's clock ran ahead of UTC: its UTC offset, such as
+    /// 32400 for +09:00. Used only when the GPX file carries no LightRemote
+    /// clock data, which it needs then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_minus_utc_s: Option<i64>,
+}
+
 /// What a caller gets back when a command runs.
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Outcome {
@@ -935,6 +954,7 @@ pub enum Blocker {
     WbPicker,
     TouchUp,
     PresetName,
+    GeotagOffset,
     Settings,
 }
 
@@ -1087,6 +1107,8 @@ impl Command {
             SavePreset(_) => "preset.save",
             AddPresetFolder(_) => "preset.add_folder",
             Export(_) => "export",
+            GeotagFromGpx(_) => "geotag.from_gpx",
+            ClearGeotags => "geotag.clear",
             Undo => "edit.undo",
             Redo => "edit.redo",
         }
@@ -1099,7 +1121,7 @@ impl Command {
         match self {
             Rate(_) | Flag(_) | Label(_) | Rotate(_) | Score(_) | Develop(_) | Reset(_)
             | AutoTone(_) | Monochrome(_) | Crop(_) | AddMask(_) | SetMask(_) | ClearMasks(_)
-            | PasteSettings(_) | Preset(_) | Undo | Redo => true,
+            | PasteSettings(_) | Preset(_) | GeotagFromGpx(_) | ClearGeotags | Undo | Redo => true,
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
             | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | CopySettings(_)
             | SavePreset(_) | AddPresetFolder(_) | Export(_) => false,
@@ -1125,7 +1147,8 @@ impl Command {
             Export(p) => Some(&p.photos),
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
             | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | CopySettings(_)
-            | SavePreset(_) | AddPresetFolder(_) | Undo | Redo => None,
+            | SavePreset(_) | AddPresetFolder(_) | GeotagFromGpx(_) | ClearGeotags | Undo
+            | Redo => None,
         }
     }
 
@@ -1221,6 +1244,17 @@ impl Command {
             ),
             Export(_) => (
                 "Export with the form's settings, or with `settings` for this run.",
+                false,
+            ),
+            GeotagFromGpx(_) => (
+                "Locate every photo in the open folder on the GPX track at `gpx`, by capture \
+                 time, and keep each location in the photo's sidecar; the photo files are \
+                 not changed. A photo whose file has GPS keeps its own. A GPX file without \
+                 LightRemote clock data needs `camera_minus_utc_s`. Desktop only.",
+                false,
+            ),
+            ClearGeotags => (
+                "Remove the GPX locations from the open folder's photos.",
                 false,
             ),
             Undo => (
@@ -1349,6 +1383,11 @@ impl Command {
                 path: PathBuf::from("/Users/me/Presets"),
             }),
             Command::Export(ExportParams::default()),
+            Command::GeotagFromGpx(GeotagParams {
+                gpx: PathBuf::from("/Users/me/Pictures/Trip/2026-11-08.gpx"),
+                camera_minus_utc_s: Some(32400),
+            }),
+            Command::ClearGeotags,
             Command::Undo,
             Command::Redo,
         ]

@@ -957,6 +957,7 @@ impl App {
             || self.bulk_delete.is_some()
             || self.autotone.is_running()
             || self.score_progress().is_some()
+            || self.geotag_running()
             || self.folder_store.backlog() > 0
             || self.catalog.backlog() > 0
     }

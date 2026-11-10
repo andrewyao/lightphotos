@@ -747,6 +747,11 @@ impl FolderStore {
         self.update(path, Patch::Edited(secs));
     }
 
+    /// The location LightPhotos found for the photo, if any.
+    pub fn location(&self, path: &Path) -> Option<&crate::geotag::GeoTag> {
+        self.record(path)?.location.as_ref()
+    }
+
     /// The stored score and whether the photo was edited after it was taken.
     pub fn score(&self, path: &Path) -> Option<(&StoredScore, bool)> {
         let rec = self.record(path)?;
@@ -1814,6 +1819,40 @@ mod tests {
         let (stored, stale) = reloaded.score(&p).expect("the score survives a reload");
         assert_eq!(stored.score, sample_score());
         assert!(!stale, "nothing was edited since");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_location_is_kept_beside_the_rating_and_cleared_without_touching_it() {
+        let dir = temp_folder("folder-store-test");
+        let p = dir.join("photo.jpg");
+        let mut cat = FolderStore::with_dir(dir.clone());
+        cat.set(&p, 3);
+        let tag = crate::geotag::GeoTag {
+            lat: 35.0,
+            lon: 139.0,
+            alt: None,
+            source: crate::geotag::GeoSource::Gpx {
+                file_name: "day.gpx".into(),
+                camera_minus_utc_s: 0,
+            },
+        };
+        cat.update(&p, Patch::Location(Some(tag.clone())));
+        flush(&mut cat);
+        let reloaded = FolderStore::with_dir(dir.clone());
+        assert_eq!(reloaded.location(&p), Some(&tag));
+        assert_eq!(reloaded.get(&p), Some(3));
+
+        cat.update(&p, Patch::Location(None));
+        flush(&mut cat);
+        let reloaded = FolderStore::with_dir(dir.clone());
+        assert_eq!(reloaded.location(&p), None);
+        assert_eq!(
+            reloaded.get(&p),
+            Some(3),
+            "clearing the location keeps the rating"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

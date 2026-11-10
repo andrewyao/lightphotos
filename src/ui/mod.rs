@@ -40,6 +40,19 @@ pub enum UiAction {
     ToggleLabel(crate::sidecar::ColorLabel),
     /// Score every photo in the grid, group members included.
     ScoreAll,
+    /// Pick a GPX file and locate the folder's photos on it.
+    #[cfg(not(target_arch = "wasm32"))]
+    GeotagFromGpx,
+    /// Forget the folder's GPX locations.
+    #[cfg(not(target_arch = "wasm32"))]
+    ClearGeotags,
+    /// The camera UTC offset prompt's text, as typed.
+    #[cfg(not(target_arch = "wasm32"))]
+    SetGeotagOffsetText(String),
+    #[cfg(not(target_arch = "wasm32"))]
+    CommitGeotagOffset,
+    #[cfg(not(target_arch = "wasm32"))]
+    CancelGeotagOffset,
     /// Show this page of the group's tiles.
     ComparePage(usize),
     /// Native only, as is the row that sends it.
@@ -505,6 +518,8 @@ fn dialogs(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     delete_group_modal(ui, app, out);
     delete_preset_modal(ui, app, out);
     preset_name_modal(ui, app, out);
+    #[cfg(not(target_arch = "wasm32"))]
+    modals::geotag_offset_modal(ui, app, out);
     #[cfg(target_arch = "wasm32")]
     modals::catalog_name_modal(ui, app, out);
     help_modal(ui, app, out);

@@ -23,8 +23,8 @@ pub(super) const EXPORT_REFUSED: &str = "an agent can export only into the folde
                                          has open, a folder inside it, or the export form's \
                                          own folder";
 
-const USER_ONLY: &str = "an agent can't make, open or switch catalogs, or save presets or add \
-                         preset folders; the user does that in the app";
+const USER_ONLY: &str = "an agent can't make, open or switch catalogs, save presets, add \
+                         preset folders or geotag from a GPX file; the user does that in the app";
 
 const NO_SCORING: &str = "scoring runs only in the macOS app, which has Apple's Vision \
                           framework";
@@ -374,6 +374,7 @@ impl App {
             | Command::OpenCatalog(_)
             | Command::SwitchCatalog(_)
             | Command::AddPresetFolder(_)
+            | Command::GeotagFromGpx(_)
             | Command::SavePreset(_) => Some(USER_ONLY),
             #[cfg(target_arch = "wasm32")]
             Command::OpenFolder(_) => Some(BROWSER_PICKS),
@@ -409,6 +410,7 @@ impl App {
             | Command::OpenCatalog(_)
             | Command::SwitchCatalog(_)
             | Command::AddPresetFolder(_)
+            | Command::GeotagFromGpx(_)
             | Command::SavePreset(_) => {}
             Command::OpenFolder(p) => {
                 let real = resolve(&p.path).filter(|real| {
@@ -476,6 +478,7 @@ impl App {
             | Command::CopySettings(_)
             | Command::PasteSettings(_)
             | Command::Preset(_)
+            | Command::ClearGeotags
             | Command::Undo
             | Command::Redo => {}
         }

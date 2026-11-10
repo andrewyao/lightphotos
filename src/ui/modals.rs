@@ -188,6 +188,66 @@ pub(super) fn preset_name_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput)
     }
 }
 
+/// Asks the camera's UTC offset for a GPX file with no clock data, in the
+/// preset prompt's shape. The field starts with a guess (`App::offset_guess`).
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn geotag_offset_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
+    let Some((text, valid)) = app.geotag_prompt() else {
+        return;
+    };
+    let t = t();
+    let mut text = text.to_string();
+    let resp = form::dialog(ui.ctx(), "geotag_offset", form::DIALOG_WIDTH, |ui| {
+        form::title(ui, t.geotag_offset_title);
+        ui.label(t.geotag_offset_prompt);
+        let form = Form::new(ui, &[t.geotag_offset_label]);
+        let mut field = None;
+        form.section(ui, "", |ui| {
+            form.row(ui, t.geotag_offset_label, |ui| {
+                field = Some(
+                    ui.add(
+                        egui::TextEdit::singleline(&mut text)
+                            .hint_text("+09:00")
+                            .char_limit(8)
+                            .desired_width(f32::INFINITY),
+                    ),
+                );
+                if !valid {
+                    form::error(ui, t.geotag_offset_invalid);
+                }
+            });
+        });
+        let mut entered = false;
+        if let Some(field) = field {
+            if field.changed() {
+                out.actions
+                    .push(UiAction::SetGeotagOffsetText(text.clone()));
+            }
+            // As in `preset_name_modal`: read Enter before asking for focus.
+            entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if !entered && !field.has_focus() {
+                field.request_focus();
+            }
+        }
+        let buttons = [
+            Button::new(t.cancel, Role::Cancel),
+            Button {
+                enabled: valid,
+                ..Button::new(t.geotag_run, Role::Primary)
+            },
+        ];
+        match form::footer(ui, &buttons) {
+            Some(Role::Cancel) => out.actions.push(UiAction::CancelGeotagOffset),
+            Some(_) => out.actions.push(UiAction::CommitGeotagOffset),
+            None if entered => out.actions.push(UiAction::CommitGeotagOffset),
+            None => {}
+        }
+    });
+    if resp.should_close() {
+        out.actions.push(UiAction::CancelGeotagOffset);
+    }
+}
+
 /// Names a new browser catalog, in the preset prompt's shape. Native New
 /// Catalog… is a save dialog instead.
 #[cfg(target_arch = "wasm32")]
