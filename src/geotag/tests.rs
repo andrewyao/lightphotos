@@ -46,14 +46,14 @@ fn gpx(
 }
 
 fn track(points: &[(i64, f64, f64, Option<f64>)]) -> Track {
-    Track::parse(gpx(points, &[], &[]).as_bytes()).unwrap()
+    Track::parse("day.gpx", gpx(points, &[], &[]).as_bytes()).unwrap()
 }
 
 fn at_utc(track: &Track, utc: i64) -> MatchOutcome {
     let clock = ClockModel::Manual {
         camera_minus_utc_s: 0,
     };
-    locate(track, &clock, "day.gpx", false, Some(&wall(utc)))
+    locate(track, &clock, false, Some(&wall(utc)))
 }
 
 fn located(o: MatchOutcome) -> GeoTag {
@@ -92,11 +92,11 @@ fn the_clock_matching_contract_holds_case_by_case() {
             .collect();
         let clock: Vec<_> = case.clock.iter().map(|(t, s)| (t.as_str(), *s)).collect();
         let zones: Vec<_> = case.offsets.iter().map(|(t, m)| (t.as_str(), *m)).collect();
-        let track = Track::parse(gpx(&points, &clock, &zones).as_bytes()).unwrap();
+        let track = Track::parse("day.gpx", gpx(&points, &clock, &zones).as_bytes()).unwrap();
         assert_eq!(track.camera_clock.len(), case.clock.len(), "{}", case.name);
         let model = ClockModel::select(&track, None).unwrap();
         let stamp = case.wall.replace('-', ":").replace('T', " ");
-        let outcome = locate(&track, &model, "2026-11-08.gpx", false, Some(&stamp));
+        let outcome = locate(&track, &model, false, Some(&stamp));
         let offset = match &outcome {
             MatchOutcome::Located(GeoTag {
                 source:
@@ -158,23 +158,17 @@ fn interpolation_takes_the_short_way_across_the_antimeridian() {
 fn a_manual_offset_shifts_the_wall_time_to_utc() {
     let t = track(&[(T0, 10.0, 20.0, None)]);
     let tokyo = ClockModel::select(&t, Some(9 * 3600)).unwrap();
-    let tag = located(locate(
-        &t,
-        &tokyo,
-        "d.gpx",
-        false,
-        Some(&wall(T0 + 9 * 3600)),
-    ));
+    let tag = located(locate(&t, &tokyo, false, Some(&wall(T0 + 9 * 3600))));
     assert_eq!(
         tag.source,
         GeoSource::Gpx {
-            file_name: "d.gpx".into(),
+            file_name: "day.gpx".into(),
             camera_minus_utc_s: 9 * 3600
         }
     );
     let utc = ClockModel::select(&t, Some(0)).unwrap();
     assert_eq!(
-        locate(&t, &utc, "d.gpx", false, Some(&wall(T0 + 9 * 3600))),
+        locate(&t, &utc, false, Some(&wall(T0 + 9 * 3600))),
         MatchOutcome::OutsideTrack
     );
 }
@@ -183,13 +177,13 @@ fn a_manual_offset_shifts_the_wall_time_to_utc() {
 fn the_clock_model_prefers_measurement_then_the_phone_zone_then_the_user() {
     let p = [(T0, 1.0, 2.0, None)];
     let at = iso(T0);
-    let both = Track::parse(gpx(&p, &[(&at, 5)], &[(&at, 60)]).as_bytes()).unwrap();
+    let both = Track::parse("day.gpx", gpx(&p, &[(&at, 5)], &[(&at, 60)]).as_bytes()).unwrap();
     assert!(both.knows_the_clock());
     assert!(matches!(
         ClockModel::select(&both, Some(0)),
         Some(ClockModel::Measured(_))
     ));
-    let zone = Track::parse(gpx(&p, &[], &[(&at, 60)]).as_bytes()).unwrap();
+    let zone = Track::parse("day.gpx", gpx(&p, &[], &[(&at, 60)]).as_bytes()).unwrap();
     assert_eq!(
         ClockModel::select(&zone, None),
         Some(ClockModel::PhoneZone(vec![ClockPeriod {
@@ -210,7 +204,7 @@ fn file_gps_wins_and_a_missing_or_garbled_capture_time_is_reported() {
         camera_minus_utc_s: 0,
     };
     assert_eq!(
-        locate(&t, &clock, "d", true, Some(&wall(T0))),
+        locate(&t, &clock, true, Some(&wall(T0))),
         MatchOutcome::AlreadyHasGps
     );
     for bad in [
@@ -221,7 +215,7 @@ fn file_gps_wins_and_a_missing_or_garbled_capture_time_is_reported() {
         Some("2025:11:08 08:00:0é"),
     ] {
         assert_eq!(
-            locate(&t, &clock, "d", false, bad),
+            locate(&t, &clock, false, bad),
             MatchOutcome::NoCaptureTime,
             "{bad:?}"
         );
@@ -231,7 +225,7 @@ fn file_gps_wins_and_a_missing_or_garbled_capture_time_is_reported() {
         camera_minus_utc_s: MAX_CLOCK_ERROR_S,
     };
     assert_eq!(
-        locate(&t, &far, "d", false, Some("0001:01:01 00:00:00")),
+        locate(&t, &far, false, Some("0001:01:01 00:00:00")),
         MatchOutcome::OutsideTrack
     );
 }
@@ -283,16 +277,16 @@ fn malformed_gpx_is_an_error_not_a_panic() {
         ),
     ];
     for (text, expect) in cases {
-        let err = Track::parse(text.as_bytes()).unwrap_err();
+        let err = Track::parse("day.gpx", text.as_bytes()).unwrap_err();
         assert!(expect(&err), "{text:?} gave {err:?}");
     }
     assert!(matches!(
-        Track::parse(&[0xff, 0xfe]),
+        Track::parse("day.gpx", &[0xff, 0xfe]),
         Err(GpxError::NotXml(_))
     ));
     let huge = vec![b' '; MAX_GPX_BYTES + 1];
     assert!(matches!(
-        Track::parse(&huge),
+        Track::parse("day.gpx", &huge),
         Err(GpxError::TooLarge { .. })
     ));
 }
@@ -305,10 +299,10 @@ fn points_are_sorted_and_a_repeated_second_keeps_the_first() {
         (T0 + 60, 3.0, 3.0, None),
     ]);
     assert_eq!(
-        t.points.iter().map(|p| p.utc).collect::<Vec<_>>(),
+        t.points.iter().map(|p| p.point.utc).collect::<Vec<_>>(),
         [T0, T0 + 60]
     );
-    assert_eq!(t.points[1].lat, 2.0);
+    assert_eq!(t.points[1].point.lat, 2.0);
 }
 
 #[test]
@@ -362,4 +356,72 @@ fn a_utc_offset_reads_the_ways_people_and_exif_write_it() {
     assert_eq!(format_utc_offset(-19800), "-05:30");
     assert_eq!(format_utc_offset(32400), "+09:00");
     assert_eq!(parse_utc_offset(&format_utc_offset(-12600)), Some(-12600));
+}
+
+#[test]
+fn two_days_merge_so_a_photo_at_midnight_lies_between_their_fixes() {
+    // 2026-11-08T14:55:00Z, five minutes before midnight at +09:00.
+    let t = 1_794_149_700;
+    let at = iso(t - 3600);
+    let day = |name: &str, points: &[(i64, f64, f64, Option<f64>)]| {
+        Track::parse(name, gpx(points, &[], &[(&at, 540)]).as_bytes()).unwrap()
+    };
+    let before = day(
+        "2026-11-08.gpx",
+        &[(t - 60, 35.0, 139.0, None), (t, 35.0, 139.0, None)],
+    );
+    let after = day(
+        "2026-11-09.gpx",
+        &[(t + 600, 35.6, 139.6, None), (t + 660, 35.6, 139.6, None)],
+    );
+    // 00:00:10 on the 9th by the camera: 310 s past the last fix of the 8th,
+    // 290 s before the first of the 9th.
+    let photo = "2026:11:09 00:00:10";
+    let alone = ClockModel::select(&before, None).unwrap();
+    assert_eq!(
+        locate(&before, &alone, false, Some(photo)),
+        MatchOutcome::OutsideTrack,
+        "the 8th alone is too far"
+    );
+
+    let both = Track::merge([before, after]).unwrap();
+    assert_eq!(both.file_names(), ["2026-11-08.gpx", "2026-11-09.gpx"]);
+    let clock = ClockModel::select(&both, None).unwrap();
+    let tag = located(locate(&both, &clock, false, Some(photo)));
+    assert!(
+        (tag.lat - 35.31).abs() < 1e-9,
+        "on the line between days: {tag:?}"
+    );
+    assert_eq!(
+        tag.source,
+        GeoSource::Gpx {
+            file_name: "2026-11-09.gpx".into(),
+            camera_minus_utc_s: 9 * 3600
+        },
+        "named for the nearer fix"
+    );
+    let early = located(locate(&both, &clock, false, Some("2026:11:08 23:59:30")));
+    assert!(
+        matches!(&early.source, GeoSource::Gpx { file_name, .. } if file_name == "2026-11-08.gpx"),
+        "{early:?}"
+    );
+}
+
+#[test]
+fn merging_keeps_the_first_file_at_a_shared_second_and_needs_a_track() {
+    let a = Track::parse("a.gpx", gpx(&[(T0, 1.0, 1.0, None)], &[], &[]).as_bytes()).unwrap();
+    let b = Track::parse(
+        "b.gpx",
+        gpx(&[(T0, 2.0, 2.0, None), (T0 + 1, 2.0, 2.0, None)], &[], &[]).as_bytes(),
+    )
+    .unwrap();
+    let both = Track::merge([a, b]).unwrap();
+    assert_eq!(
+        both.points
+            .iter()
+            .map(|f| (f.point.utc, f.point.lat, f.file))
+            .collect::<Vec<_>>(),
+        [(T0, 1.0, 0), (T0 + 1, 2.0, 1)]
+    );
+    assert_eq!(Track::merge(Vec::new()), None);
 }

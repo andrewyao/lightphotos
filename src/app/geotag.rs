@@ -116,10 +116,6 @@ impl App {
         let track = read_track(gpx).map_err(|e| StartError::Failed((t.geotag_read_failed)(&e)))?;
         let clock =
             crate::geotag::ClockModel::select(&track, offset).ok_or(StartError::NeedsOffset)?;
-        let gpx_name = gpx
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
 
         let (tx, results) = std::sync::mpsc::channel();
         let total = paths.len();
@@ -135,7 +131,6 @@ impl App {
                         crate::geotag::locate(
                             &track,
                             &clock,
-                            &gpx_name,
                             has_gps,
                             stamp.as_ref().map(|s| s.local.as_str()),
                         )
@@ -296,7 +291,11 @@ fn read_track(path: &Path) -> Result<crate::geotag::Track, String> {
     file.take(crate::geotag::MAX_GPX_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    crate::geotag::Track::parse(&bytes).map_err(|e| e.to_string())
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    crate::geotag::Track::parse(&name, &bytes).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

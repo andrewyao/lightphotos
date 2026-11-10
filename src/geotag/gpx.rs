@@ -4,7 +4,7 @@
 //! picked it, so everything in it is checked here and nothing past this
 //! module re-checks it.
 
-use super::{ClockPeriod, Track, TrackPoint};
+use super::{ClockPeriod, Fix, Track, TrackPoint};
 
 /// The GPX 1.1 namespace. Elements in any other namespace are ignored.
 const GPX_NS: &str = "http://www.topografix.com/GPX/1/1";
@@ -49,11 +49,12 @@ impl std::fmt::Display for GpxError {
 impl std::error::Error for GpxError {}
 
 impl Track {
-    /// Parse GPX bytes. Track points are sorted by time, and of several at
-    /// one second the first in the file is kept. A point with no time or
+    /// Parse the GPX file `file_name`, which names the file in each
+    /// location it gives. Track points are sorted by time, and of several
+    /// at one second the first in the file is kept. A point with no time or
     /// no position is skipped; a time or a LightRemote extension that is
     /// there but doesn't parse is an error.
-    pub fn parse(bytes: &[u8]) -> Result<Track, GpxError> {
+    pub fn parse(file_name: &str, bytes: &[u8]) -> Result<Track, GpxError> {
         if bytes.len() > MAX_GPX_BYTES {
             return Err(GpxError::TooLarge { bytes: bytes.len() });
         }
@@ -69,7 +70,7 @@ impl Track {
         let mut utc_offsets = Vec::new();
         for node in root.descendants().filter(roxmltree::Node::is_element) {
             if is(node, GPX_NS, "trkpt") {
-                points.extend(point(node)?);
+                points.extend(point(node)?.map(|point| Fix { point, file: 0 }));
             } else if is(node, LR_NS, "cameraClock") {
                 camera_clock.push(ClockPeriod {
                     from: time(attr(node, "measuredAt")?)?,
@@ -87,17 +88,14 @@ impl Track {
         if points.is_empty() {
             return Err(GpxError::NoPoints);
         }
-        points.sort_by_key(|p: &TrackPoint| p.utc);
-        points.dedup_by_key(|p| p.utc);
-        camera_clock.sort_by_key(|c| (c.from, c.camera_minus_utc_s));
-        camera_clock.dedup();
-        utc_offsets.sort_by_key(|c| (c.from, c.camera_minus_utc_s));
-        utc_offsets.dedup();
-        Ok(Track {
+        let mut track = Track {
             points,
+            files: vec![file_name.to_string()],
             camera_clock,
             utc_offsets,
-        })
+        };
+        track.normalize();
+        Ok(track)
     }
 }
 

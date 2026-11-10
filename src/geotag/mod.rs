@@ -55,44 +55,104 @@ pub struct ClockPeriod {
     pub camera_minus_utc_s: i64,
 }
 
-/// A parsed GPX file: [`Track::parse`] builds it.
+/// One or more parsed GPX files: [`Track::parse`] builds one and
+/// [`Track::merge`] joins several.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Track {
     /// Sorted by time, one per second, never empty.
-    points: Vec<TrackPoint>,
+    points: Vec<Fix>,
+    /// The files the points came from, by name; [`Fix::file`] indexes it.
+    files: Vec<String>,
     /// LightRemote's camera clock measurements, sorted.
     camera_clock: Vec<ClockPeriod>,
     /// The phone's UTC offset from each change on, sorted.
     utc_offsets: Vec<ClockPeriod>,
 }
 
+/// A track point and the file it came from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fix {
+    point: TrackPoint,
+    file: usize,
+}
+
 impl Track {
+    /// Several files' tracks as one: every fix, clock measurement and zone
+    /// change, in time order. Where two files have a fix at the same second,
+    /// the earlier file's is kept. `None` for no tracks.
+    pub fn merge(tracks: impl IntoIterator<Item = Track>) -> Option<Track> {
+        let mut merged = Track {
+            points: Vec::new(),
+            files: Vec::new(),
+            camera_clock: Vec::new(),
+            utc_offsets: Vec::new(),
+        };
+        for track in tracks {
+            let base = merged.files.len();
+            merged.files.extend(track.files);
+            merged.points.extend(track.points.into_iter().map(|f| Fix {
+                file: f.file.saturating_add(base),
+                ..f
+            }));
+            merged.camera_clock.extend(track.camera_clock);
+            merged.utc_offsets.extend(track.utc_offsets);
+        }
+        if merged.points.is_empty() {
+            return None;
+        }
+        merged.normalize();
+        Some(merged)
+    }
+
+    /// Sort everything by time; of several fixes at one second keep the
+    /// first, and drop repeated clock entries.
+    fn normalize(&mut self) {
+        self.points.sort_by_key(|f| f.point.utc);
+        self.points.dedup_by_key(|f| f.point.utc);
+        self.camera_clock
+            .sort_by_key(|c| (c.from, c.camera_minus_utc_s));
+        self.camera_clock.dedup();
+        self.utc_offsets
+            .sort_by_key(|c| (c.from, c.camera_minus_utc_s));
+        self.utc_offsets.dedup();
+    }
+
+    /// The names of the files this track joins, in the order given.
+    pub fn file_names(&self) -> &[String] {
+        &self.files
+    }
+
     /// Whether the file carries any LightRemote clock data, so the user
     /// need not be asked for the camera's offset.
     pub fn knows_the_clock(&self) -> bool {
         !self.camera_clock.is_empty() || !self.utc_offsets.is_empty()
     }
 
-    /// The position at `utc`, by the rules in the module docs.
-    pub fn position_at(&self, utc: i64) -> Option<Gps> {
-        let i = self.points.partition_point(|p| p.utc < utc);
+    /// The position at `utc`, by the rules in the module docs, and the
+    /// name of the file holding the nearest fix it used.
+    fn position_at(&self, utc: i64) -> Option<(Gps, &str)> {
+        let i = self.points.partition_point(|f| f.point.utc < utc);
         let next = self.points.get(i);
         let prev = i.checked_sub(1).and_then(|j| self.points.get(j));
-        if let Some(n) = next.filter(|n| n.utc == utc) {
-            return Some(fix(n));
-        }
-        if let (Some(a), Some(b)) = (prev, next) {
-            if b.utc.saturating_sub(a.utc) <= MAX_INTERPOLATE_S {
-                return Some(between(a, b, utc));
-            }
-        }
-        [prev, next]
-            .into_iter()
-            .flatten()
-            .map(|p| (p.utc.abs_diff(utc), p))
-            .filter(|(gap, _)| *gap <= MAX_GAP_S as u64)
-            .min_by_key(|(gap, _)| *gap)
-            .map(|(_, p)| fix(p))
+        let gap = |f: &Fix| f.point.utc.abs_diff(utc);
+        let (gps, nearest) = if let Some(n) = next.filter(|n| n.point.utc == utc) {
+            (fix(&n.point), n)
+        } else if let Some((a, b)) = prev
+            .zip(next)
+            .filter(|(a, b)| b.point.utc.saturating_sub(a.point.utc) <= MAX_INTERPOLATE_S)
+        {
+            let nearest = if gap(b) < gap(a) { b } else { a };
+            (between(&a.point, &b.point, utc), nearest)
+        } else {
+            let nearest = [prev, next]
+                .into_iter()
+                .flatten()
+                .filter(|f| gap(f) <= MAX_GAP_S as u64)
+                .min_by_key(|f| gap(f))?;
+            (fix(&nearest.point), nearest)
+        };
+        let file = self.files.get(nearest.file).map_or("", String::as_str);
+        Some((gps, file))
     }
 
     fn covers(&self, utc: i64) -> bool {
@@ -285,12 +345,11 @@ pub enum MatchOutcome {
 }
 
 /// One photo against `track`. `capture_local` is its `DateTimeOriginal`,
-/// `YYYY:MM:DD HH:MM:SS` on the camera's clock; `gpx_name` is recorded as
-/// the location's source.
+/// `YYYY:MM:DD HH:MM:SS` on the camera's clock. The location's source names
+/// the file holding the nearest fix used.
 pub fn locate(
     track: &Track,
     clock: &ClockModel,
-    gpx_name: &str,
     has_gps: bool,
     capture_local: Option<&str>,
 ) -> MatchOutcome {
@@ -305,7 +364,7 @@ pub fn locate(
         Resolution::Ambiguous => return MatchOutcome::Ambiguous,
         Resolution::Outside => return MatchOutcome::OutsideTrack,
     };
-    let Some(gps) = wall
+    let Some((gps, file_name)) = wall
         .checked_sub(offset)
         .and_then(|utc| track.position_at(utc))
     else {
@@ -316,7 +375,7 @@ pub fn locate(
         lon: gps.lon,
         alt: gps.alt,
         source: GeoSource::Gpx {
-            file_name: gpx_name.to_string(),
+            file_name: file_name.to_string(),
             camera_minus_utc_s: offset,
         },
     })

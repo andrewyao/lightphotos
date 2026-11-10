@@ -676,6 +676,16 @@ mod tests {
         assert_eq!(parse_record(&bytes, || None).unwrap(), rec);
     }
 
+    /// A record exactly as the first GPX build wrote it, before a location
+    /// could come from several files.
+    #[test]
+    fn a_single_file_gpx_location_from_an_earlier_build_still_reads() {
+        let bytes = br#"{"rating":3,"location":{"lat":35.65,"lon":139.7,"alt":40.0,"source":{"kind":"gpx","file_name":"2026-11-08.gpx","camera_minus_utc_s":32400}}}"#;
+        let rec = parse_record(bytes, || None).unwrap();
+        assert_eq!(rec.location, Some(sample_location()));
+        assert!(rec.unknown.is_empty());
+    }
+
     #[test]
     fn a_location_this_build_cant_read_is_kept_as_it_came() {
         for location in [
