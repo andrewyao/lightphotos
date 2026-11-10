@@ -1,0 +1,9 @@
+[
+  {"name":"clock corrected during day","points":["2026-11-08T09:00:00Z","2026-11-08T12:00:00Z"],"clock":[["2026-11-08T08:00:00Z",3600],["2026-11-08T11:00:00Z",0]],"offsets":[],"wall":"2026-11-08T10:00:00","expectedOffset":3600},
+  {"name":"after clock correction","points":["2026-11-08T09:00:00Z","2026-11-08T12:00:00Z"],"clock":[["2026-11-08T08:00:00Z",3600],["2026-11-08T11:00:00Z",0]],"offsets":[],"wall":"2026-11-08T12:00:00","expectedOffset":0},
+  {"name":"camera date differs near midnight","points":["2026-11-08T23:58:00Z"],"clock":[["2026-11-08T23:55:00Z",3600]],"offsets":[],"wall":"2026-11-09T00:58:00","expectedOffset":3600},
+  {"name":"repeated wall time is ambiguous","points":["2026-11-08T09:30:00Z","2026-11-08T10:30:00Z"],"clock":[["2026-11-08T08:00:00Z",3600],["2026-11-08T10:00:00Z",0]],"offsets":[],"wall":"2026-11-08T10:30:00","expectedOffset":null},
+  {"name":"DST repeated hour without measurement","points":["2026-11-01T08:30:00Z","2026-11-01T09:30:00Z"],"clock":[],"offsets":[["2026-11-01T07:00:00Z",-420],["2026-11-01T09:00:00Z",-480]],"wall":"2026-11-01T01:30:00","expectedOffset":null},
+  {"name":"upper median suppresses small measurement noise","points":["2026-11-08T12:00:00Z"],"clock":[["2026-11-08T08:00:00Z",3],["2026-11-08T09:00:00Z",4],["2026-11-08T10:00:00Z",3],["2026-11-08T11:00:00Z",4]],"offsets":[],"wall":"2026-11-08T12:00:04","expectedOffset":4},
+  {"name":"long unknown GPS gap stays unmatched","points":["2026-11-08T08:00:00Z","2026-11-08T12:00:00Z"],"clock":[["2026-11-08T08:00:00Z",0]],"offsets":[],"wall":"2026-11-08T10:00:00","expectedOffset":null}
+]

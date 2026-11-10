@@ -25,6 +25,7 @@ pub mod control_auth;
 pub mod decode;
 pub mod develop;
 pub mod export;
+pub mod geotag;
 pub mod hash;
 pub mod paths;
 pub mod scoring;
