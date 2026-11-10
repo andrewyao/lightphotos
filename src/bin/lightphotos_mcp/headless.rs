@@ -240,6 +240,7 @@ impl Folder {
             &masks,
             rec.rotation,
             &output,
+            rec.location.as_ref().and_then(|l| l.gps()),
         )
         .map_err(|e| format!("cannot render {}: {e}", file_name(&path)))?;
         Ok(vec![

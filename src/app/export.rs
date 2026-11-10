@@ -693,6 +693,10 @@ impl App {
                 }
             },
             rot: self.rotations.get(&src).copied().unwrap_or(0),
+            location: self
+                .folder_store
+                .location(&src)
+                .and_then(crate::geotag::GeoTag::gps),
             src,
             dest,
             output: output.clone(),

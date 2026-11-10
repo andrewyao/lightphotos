@@ -560,6 +560,7 @@ impl Run {
                 masks: crate::develop::MaskInput::none(),
                 rot: 0,
                 output: crate::export::Output::FULL,
+                location: None,
             });
         }
 

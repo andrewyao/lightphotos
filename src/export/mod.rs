@@ -602,6 +602,9 @@ pub struct ExportJob {
     pub masks: crate::develop::MaskInput,
     pub rot: u8,
     pub output: Output,
+    /// The location the photo's sidecar keeps, written when the file has
+    /// none and the output keeps location.
+    pub location: Option<image_decode::Gps>,
 }
 
 /// What an export produced.
@@ -710,6 +713,7 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
         &masks,
         job.rot,
         &job.output,
+        job.location,
     )?;
     match &job.dest {
         ExportDest::Folder(dest) => {
@@ -758,6 +762,7 @@ pub fn export_file(
     masks: &MaskSet,
     rot: u8,
     output: &Output,
+    location: Option<image_decode::Gps>,
 ) -> Result<Vec<u8>, String> {
     let img = image_decode::decode_for_export(src, decode_px(output.max_px, adj.crop))?;
     render(
@@ -767,7 +772,7 @@ pub fn export_file(
         masks,
         rot,
         output,
-        &SourceMeta::read_path(src),
+        &SourceMeta::read_path(src).with_location(location),
     )
 }
 
@@ -815,6 +820,7 @@ mod tests {
             masks: crate::develop::MaskInput::none(),
             rot: 0,
             output: Output::FULL,
+            location: None,
         };
 
         let exporter = Exporter::with_runner(panics_on_bad);
@@ -890,6 +896,7 @@ mod tests {
                 max_px: 50,
                 ..Output::FULL
             },
+            location: None,
         })
         .unwrap();
 
@@ -960,7 +967,7 @@ mod tests {
         };
         assert_eq!(decode_px(200, adj.crop), 1602, "about half the source");
 
-        let jpeg = export_file(&src, &adj, &[], &MaskSet::default(), 1, &output).unwrap();
+        let jpeg = export_file(&src, &adj, &[], &MaskSet::default(), 1, &output, None).unwrap();
         std::fs::write(dir.join("out.jpg"), &jpeg).unwrap();
         let out = image_decode::decode(&dir.join("out.jpg"), u32::MAX).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1373,6 +1380,54 @@ mod tests {
         }
     }
 
+    /// A location the sidecar keeps lands in the exported JPEG's GPS block,
+    /// read back by the exif crate and by the app's own metadata reader.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_exported_jpeg_carries_the_stored_location() {
+        use exif::{In, Tag, Value};
+        let gps = image_decode::Gps {
+            lat: 35.658_581,
+            lon: -139.745_433,
+            alt: Some(40.25),
+        };
+        let output = Output {
+            keep: Keep {
+                location: true,
+                identity: false,
+            },
+            ..Output::FULL
+        };
+        let jpeg = render(
+            &gradient(16, 12),
+            &Adjustments::default(),
+            &[],
+            &MaskSet::default(),
+            0,
+            &output,
+            &SourceMeta::default().with_location(Some(gps)),
+        )
+        .unwrap();
+        let read = exif::Reader::new()
+            .read_from_container(&mut std::io::Cursor::new(&jpeg))
+            .unwrap();
+        let ascii = |tag| match &read.get_field(tag, In::PRIMARY).unwrap().value {
+            Value::Ascii(v) => String::from_utf8_lossy(&v[0]).into_owned(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(ascii(Tag::GPSLatitudeRef), "N");
+        assert_eq!(ascii(Tag::GPSLongitudeRef), "W");
+
+        let dir = scratch_dir("geotag");
+        let file = dir.join("located.jpg");
+        std::fs::write(&file, &jpeg).unwrap();
+        let back = image_decode::read_metadata(&file).gps.unwrap();
+        assert!((back.lat - gps.lat).abs() < 1e-6, "{back:?}");
+        assert!((back.lon - gps.lon).abs() < 1e-6, "{back:?}");
+        assert!((back.alt.unwrap() - 40.25).abs() < 1e-6, "{back:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A 16-bit TIFF export waits, before it decodes anything, while
     /// another holds the gate.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1401,6 +1456,7 @@ mod tests {
                 format: ExportFormat::Tiff16,
                 ..Output::FULL
             },
+            location: None,
         };
         let held = TIFF16_GATE.lock().unwrap();
         let (done_tx, done_rx) = channel();

@@ -9,7 +9,7 @@
 
 use exif::{Context, Field, In, Tag, Value};
 
-use crate::decode::image_decode::CaptureStamp;
+use crate::decode::image_decode::{CaptureStamp, Gps};
 
 /// The sensitive parts of a photo's metadata an export keeps. Both off by
 /// default, so sharing a photo shares neither where it was taken nor whose
@@ -56,6 +56,9 @@ pub struct SourceMeta {
     /// The capture time, read by the platform's own reader, for sources
     /// whose EXIF the `exif` crate cannot open (CR3, RAF on macOS).
     stamp: Option<CaptureStamp>,
+    /// Where LightPhotos found the photo was taken, such as on a GPX track.
+    /// Written when the file has no position of its own.
+    location: Option<Gps>,
 }
 
 impl SourceMeta {
@@ -70,7 +73,11 @@ impl SourceMeta {
             true => None,
             false => crate::decode::image_decode::capture_stamp(path),
         };
-        SourceMeta { exif, stamp }
+        SourceMeta {
+            exif,
+            stamp,
+            location: None,
+        }
     }
 
     /// [`SourceMeta::read_path`] for a source already in memory.
@@ -81,7 +88,23 @@ impl SourceMeta {
             true => None,
             false => crate::decode::image_decode::capture_stamp_from_bytes(bytes),
         };
-        SourceMeta { exif, stamp }
+        SourceMeta {
+            exif,
+            stamp,
+            location: None,
+        }
+    }
+
+    /// With the location the photo's sidecar keeps.
+    pub fn with_location(self, location: Option<Gps>) -> SourceMeta {
+        SourceMeta { location, ..self }
+    }
+
+    /// Whether the file records its own position.
+    fn has_own_position(&self) -> bool {
+        self.exif
+            .as_ref()
+            .is_some_and(|e| e.get_field(Tag::GPSLatitude, In::PRIMARY).is_some())
     }
 
     /// When the photo was taken, by the camera's clock.
@@ -103,7 +126,11 @@ impl SourceMeta {
 impl SourceMeta {
     /// A source known by its parts, for this crate's tests.
     pub(crate) fn from_parts(exif: Option<exif::Exif>, stamp: Option<CaptureStamp>) -> SourceMeta {
-        SourceMeta { exif, stamp }
+        SourceMeta {
+            exif,
+            stamp,
+            location: None,
+        }
     }
 }
 
@@ -180,7 +207,8 @@ const ALWAYS_TAGS: [Tag; 49] = [
 ];
 
 /// The EXIF fields an export of `src` at `width` x `height` carries.
-/// `copyright`, when not blank, replaces the source's own.
+/// `copyright`, when not blank, replaces the source's own. With location
+/// kept, the file's own position goes in, else the one LightPhotos keeps.
 pub fn fields(
     src: &SourceMeta,
     keep: Keep,
@@ -194,6 +222,10 @@ pub fn fields(
         value,
     };
     let own_copyright = copyright_line(copyright).map(|c| field(Tag::Copyright, c));
+    // A source GPS block with no position, beside ours, would muddle it.
+    let own_location = src
+        .location
+        .filter(|_| keep.location && !src.has_own_position());
 
     let mut out: Vec<Field> = src
         .exif
@@ -205,7 +237,7 @@ pub fn fields(
         .filter(|f| {
             ALWAYS_TAGS.contains(&f.tag)
                 || (keep.identity && IDENTIFYING_TAGS.contains(&f.tag))
-                || (keep.location && f.tag.context() == Context::Gps)
+                || (keep.location && own_location.is_none() && f.tag.context() == Context::Gps)
         })
         .cloned()
         .filter_map(|mut f| {
@@ -216,6 +248,7 @@ pub fn fields(
         })
         .collect();
     out.extend(own_copyright);
+    out.extend(own_location.iter().flat_map(gps_fields));
 
     let has = |out: &[Field], tag| out.iter().any(|f: &Field| f.tag == tag);
     if !has(&out, Tag::DateTimeOriginal) {
@@ -223,6 +256,53 @@ pub fn fields(
         out.extend(capture_date(src));
     }
     out.extend(technical(width, height));
+    out
+}
+
+/// `gps` as an EXIF GPS block: degrees and decimal minutes, to a millionth
+/// of a minute (about 2 mm), and the altitude to a centimeter.
+fn gps_fields(gps: &Gps) -> Vec<Field> {
+    let field = |tag, value| Field {
+        tag,
+        ifd_num: In::PRIMARY,
+        value,
+    };
+    let ascii = |s: &str| Value::Ascii(vec![s.as_bytes().to_vec()]);
+    let rational = |num: u32, denom: u32| exif::Rational { num, denom };
+    let dm = |deg: f64| {
+        let micro_minutes = (deg.abs() * 60e6).round();
+        let whole = (micro_minutes / 60e6).floor();
+        let rest = micro_minutes - whole * 60e6;
+        Value::Rational(vec![
+            rational(whole as u32, 1),
+            rational(rest as u32, 1_000_000),
+            rational(0, 1),
+        ])
+    };
+    let mut out = vec![
+        field(Tag::GPSVersionID, Value::Byte(vec![2, 3, 0, 0])),
+        field(
+            Tag::GPSLatitudeRef,
+            ascii(if gps.lat < 0.0 { "S" } else { "N" }),
+        ),
+        field(Tag::GPSLatitude, dm(gps.lat)),
+        field(
+            Tag::GPSLongitudeRef,
+            ascii(if gps.lon < 0.0 { "W" } else { "E" }),
+        ),
+        field(Tag::GPSLongitude, dm(gps.lon)),
+    ];
+    if let Some(alt) = gps.alt.filter(|a| a.is_finite()) {
+        let cm = (alt.abs() * 100.0).round().min(f64::from(u32::MAX));
+        out.push(field(
+            Tag::GPSAltitudeRef,
+            Value::Byte(vec![u8::from(alt < 0.0)]),
+        ));
+        out.push(field(
+            Tag::GPSAltitude,
+            Value::Rational(vec![rational(cm as u32, 100)]),
+        ));
+    }
     out
 }
 
@@ -389,6 +469,89 @@ mod tests {
         ];
         let blob = block(&fields).unwrap().unwrap();
         SourceMeta::from_parts(Some(exif::Reader::new().read_raw(blob).unwrap()), None)
+    }
+
+    #[test]
+    fn a_kept_location_goes_in_only_when_the_file_has_no_position() {
+        let gpx = Gps {
+            lat: -33.5,
+            lon: 151.25,
+            alt: Some(-12.5),
+        };
+        let keep = Keep {
+            location: true,
+            identity: false,
+        };
+        let gps_tags = |fields: &[Field]| -> Vec<Tag> {
+            fields
+                .iter()
+                .filter(|f| f.tag.context() == Context::Gps)
+                .map(|f| f.tag)
+                .collect()
+        };
+
+        let bare = SourceMeta::default().with_location(Some(gpx));
+        assert!(
+            gps_tags(&fields(&bare, Keep::NONE, "", 1, 1)).is_empty(),
+            "location stays out unless kept"
+        );
+        let out = fields(&bare, keep, "", 1, 1);
+        assert_eq!(text(&out, Tag::GPSLatitudeRef).as_deref(), Some("S"));
+        assert_eq!(text(&out, Tag::GPSLongitudeRef).as_deref(), Some("E"));
+        assert_eq!(
+            text(&out, Tag::GPSLatitude).as_deref(),
+            Some("Rational([Rational(33/1), Rational(30000000/1000000), Rational(0/1)])")
+        );
+        assert_eq!(
+            text(&out, Tag::GPSLongitude).as_deref(),
+            Some("Rational([Rational(151/1), Rational(15000000/1000000), Rational(0/1)])")
+        );
+        assert_eq!(
+            text(&out, Tag::GPSAltitudeRef).as_deref(),
+            Some("Byte([1])")
+        );
+        assert_eq!(
+            text(&out, Tag::GPSAltitude).as_deref(),
+            Some("Rational([Rational(1250/100)])")
+        );
+
+        // The source's block holds only a ref, no position: ours replaces it
+        // whole rather than sit beside it.
+        let refs_only = source().with_location(Some(gpx));
+        let out = fields(&refs_only, keep, "", 1, 1);
+        assert_eq!(text(&out, Tag::GPSLatitudeRef).as_deref(), Some("S"));
+        assert_eq!(
+            gps_tags(&out)
+                .iter()
+                .filter(|t| **t == Tag::GPSLatitudeRef)
+                .count(),
+            1
+        );
+
+        // A file with its own position keeps it.
+        let ascii = |s: &str| Value::Ascii(vec![s.as_bytes().to_vec()]);
+        let own = [
+            Field {
+                tag: Tag::GPSLatitudeRef,
+                ifd_num: In::PRIMARY,
+                value: ascii("N"),
+            },
+            Field {
+                tag: Tag::GPSLatitude,
+                ifd_num: In::PRIMARY,
+                value: Value::Rational(vec![
+                    exif::Rational { num: 10, denom: 1 },
+                    exif::Rational { num: 0, denom: 1 },
+                    exif::Rational { num: 0, denom: 1 },
+                ]),
+            },
+        ];
+        let blob = block(&own).unwrap().unwrap();
+        let src = SourceMeta::from_parts(exif::Reader::new().read_raw(blob).ok(), None)
+            .with_location(Some(gpx));
+        let out = fields(&src, keep, "", 1, 1);
+        assert_eq!(text(&out, Tag::GPSLatitudeRef).as_deref(), Some("N"));
+        assert!(!gps_tags(&out).contains(&Tag::GPSAltitude));
     }
 
     fn tags(fields: &[Field]) -> Vec<Tag> {
