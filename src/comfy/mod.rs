@@ -6,6 +6,7 @@
 //! only; the browser build renders finished fills but can't make them.
 
 pub mod client;
+pub mod download;
 pub mod features;
 pub mod workflow;
 
