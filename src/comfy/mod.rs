@@ -5,5 +5,9 @@
 //! the model files each needs, and the downloader for those files. Native
 //! only; the browser build renders finished fills but can't make them.
 
+pub mod client;
 pub mod features;
 pub mod workflow;
+
+#[cfg(test)]
+mod test_server;
