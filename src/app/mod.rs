@@ -510,6 +510,9 @@ pub(crate) struct App {
     /// The detections and coverage loads in flight or in memory. See
     /// `app/coverage.rs`.
     pub(crate) coverage: coverage::CoverageStore,
+    /// The shown photo's fill patches, loading or loaded, for the Loupe.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) patches: fill::PatchStore,
     /// The detected mask's coverage the Loupe tints right now, with its
     /// invert, so a frame that changes neither uploads nothing.
     mask_overlay: Option<(crate::develop::RasterId, bool)>,
@@ -967,6 +970,8 @@ impl App {
             masks: HashMap::new(),
             detections: HashMap::new(),
             coverage: coverage::CoverageStore::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            patches: fill::PatchStore::new(),
             mask_overlay: None,
             tool: LoupeTool::None,
             // Clamped up to TOUCHUP_MIN_PIXELS once an image is loaded.

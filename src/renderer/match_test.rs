@@ -11,6 +11,7 @@ use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat}
 use crate::develop::color::hue_rgb;
 use crate::develop::color::BandShift;
 use crate::develop::curve::Curve;
+use crate::develop::fill::{Fill, FillSet, Patch};
 use crate::develop::image_ops::{bake_edited_probe, Retouch};
 use crate::develop::{
     Adjustments, BaseProbe, CaScale, ColorAxis, ColorGrade, ColorMixer, Coverage, Crop,
@@ -25,6 +26,7 @@ const H: u32 = 64;
 struct Case {
     name: String,
     adj: Adjustments,
+    fills: FillSet,
     touchups: Vec<TouchUp>,
     masks: Vec<Mask>,
 }
@@ -143,6 +145,7 @@ fn test_coverage() -> Arc<Coverage> {
 
 fn cases() -> Vec<Case> {
     let case = |name: String, adj: Adjustments| Case {
+        fills: FillSet::default(),
         name,
         adj,
         touchups: Vec::new(),
@@ -230,12 +233,14 @@ fn cases() -> Vec<Case> {
         },
     ));
     out.push(Case {
+        fills: FillSet::default(),
         name: "touchup".into(),
         adj: Adjustments::default(),
         touchups: vec![touchup],
         masks: Vec::new(),
     });
     out.push(Case {
+        fills: FillSet::default(),
         name: "touchup_opaque".into(),
         adj: Adjustments::default(),
         touchups: vec![TouchUp {
@@ -272,12 +277,14 @@ fn cases() -> Vec<Case> {
         },
     };
     out.push(Case {
+        fills: FillSet::default(),
         name: "mask_linear".into(),
         adj: Adjustments::default(),
         touchups: Vec::new(),
         masks: vec![sky.clone()],
     });
     out.push(Case {
+        fills: FillSet::default(),
         name: "mask_radial_inverted".into(),
         adj: Adjustments {
             exposure: 0.4,
@@ -289,6 +296,7 @@ fn cases() -> Vec<Case> {
     });
     spot.invert = false;
     out.push(Case {
+        fills: FillSet::default(),
         name: "masks+crop+straighten".into(),
         adj: Adjustments {
             straighten: 7.0,
@@ -309,6 +317,7 @@ fn cases() -> Vec<Case> {
         ..Default::default()
     };
     out.push(Case {
+        fills: FillSet::default(),
         name: "mask_raster".into(),
         adj: Adjustments::default(),
         touchups: Vec::new(),
@@ -316,6 +325,7 @@ fn cases() -> Vec<Case> {
     });
     subject.invert = true;
     out.push(Case {
+        fills: FillSet::default(),
         name: "mask_raster_inverted".into(),
         adj: Adjustments {
             exposure: 0.3,
@@ -328,6 +338,7 @@ fn cases() -> Vec<Case> {
     // A turned canvas reads UVs past 0..1 at the corners, which exercises
     // the edge clamp on both sides.
     out.push(Case {
+        fills: FillSet::default(),
         name: "mask_raster+crop+straighten".into(),
         adj: Adjustments {
             straighten: 7.0,
@@ -361,6 +372,7 @@ fn cases() -> Vec<Case> {
         },
     };
     out.push(Case {
+        fills: FillSet::default(),
         name: "mask_brush".into(),
         adj: Adjustments::default(),
         touchups: Vec::new(),
@@ -368,6 +380,7 @@ fn cases() -> Vec<Case> {
     });
     brush.invert = true;
     out.push(Case {
+        fills: FillSet::default(),
         name: "mask_brush_inverted".into(),
         adj: Adjustments {
             exposure: -0.2,
@@ -378,6 +391,7 @@ fn cases() -> Vec<Case> {
     });
     brush.invert = false;
     out.push(Case {
+        fills: FillSet::default(),
         name: "mask_brush+crop+straighten".into(),
         adj: Adjustments {
             straighten: 7.0,
@@ -396,6 +410,7 @@ fn cases() -> Vec<Case> {
         .into(),
     };
     out.push(Case {
+        fills: FillSet::default(),
         name: "brush_erase".into(),
         adj: Adjustments::default(),
         touchups: Vec::new(),
@@ -465,12 +480,14 @@ fn cases() -> Vec<Case> {
         ..Default::default()
     };
     out.push(Case {
+        fills: FillSet::default(),
         name: "texture+touchup".into(),
         adj: presence(100.0, 0.0, 0.0),
         touchups: vec![touchup],
         masks: Vec::new(),
     });
     out.push(Case {
+        fills: FillSet::default(),
         name: "clarity+touchup".into(),
         adj: presence(0.0, 100.0, 0.0),
         touchups: vec![touchup],
@@ -518,6 +535,7 @@ fn cases() -> Vec<Case> {
         ));
     }
     out.push(Case {
+        fills: FillSet::default(),
         name: "sharpen+touchup".into(),
         adj: Adjustments {
             sharpening: sharp(120.0, 2.0, 60.0, 0.0),
@@ -656,6 +674,7 @@ fn cases() -> Vec<Case> {
     };
     everything.curve.rgb = Curve::STRONG_CONTRAST;
     out.push(Case {
+        fills: FillSet::default(),
         name: "everything".into(),
         adj: everything,
         touchups: vec![touchup],
@@ -664,6 +683,7 @@ fn cases() -> Vec<Case> {
     // The colour tools on top of everything else, but without CA, which
     // `mixer+ca` covers with its own bound.
     out.push(Case {
+        fills: FillSet::default(),
         name: "everything_color".into(),
         adj: Adjustments {
             mixer,
@@ -675,6 +695,7 @@ fn cases() -> Vec<Case> {
         masks: Vec::new(),
     });
     out.push(Case {
+        fills: FillSet::default(),
         name: "everything_mono".into(),
         adj: Adjustments {
             mixer,
@@ -687,7 +708,93 @@ fn cases() -> Vec<Case> {
         touchups: vec![touchup],
         masks: Vec::new(),
     });
+    let fill = |name: &str, fills: FillSet, adj: Adjustments, touchups: Vec<TouchUp>| Case {
+        name: name.into(),
+        adj,
+        fills,
+        touchups,
+        masks: Vec::new(),
+    };
+    let identity = Adjustments::default();
+    out.push(fill("fill", test_fills(true), identity, Vec::new()));
+    out.push(fill(
+        "fill+exposure",
+        test_fills(true),
+        Adjustments {
+            exposure: 1.0,
+            ..identity
+        },
+        Vec::new(),
+    ));
+    // The spot sits inside the soft fill, so it heals filled pixels.
+    out.push(fill("fill+spot", test_fills(true), identity, vec![touchup]));
+    out.push(fill(
+        "fill+presence",
+        test_fills(true),
+        Adjustments {
+            clarity: 60.0,
+            texture: 40.0,
+            sharpening: Sharpening {
+                amount: 80.0,
+                ..Default::default()
+            },
+            ..identity
+        },
+        Vec::new(),
+    ));
+    // Turned, every read falls between texels, where a hard rect edge can
+    // land on either side of a float's last bit: the soft fill only.
+    out.push(fill(
+        "fill+straighten",
+        test_fills(false),
+        Adjustments {
+            straighten: 7.0,
+            crop: straighten_crop,
+            denoise: 40.0,
+            ..identity
+        },
+        Vec::new(),
+    ));
     out
+}
+
+/// The fills the matrix draws: a soft-edged patch at 13x9, so no pixel
+/// lands on a texel centre, and with `hard` a solid 1x1 patch over the
+/// bottom-right corner on top of it, its rect touching the photo's edges.
+/// Neither rect's edge crosses a pixel centre of the 96x64 charts.
+fn test_fills(hard: bool) -> FillSet {
+    let (w, h) = (13u32, 9u32);
+    let mut rgba = Vec::new();
+    for i in 0..w * h {
+        let (x, y) = (
+            (i % w) as f32 / (w - 1) as f32,
+            (i / w) as f32 / (h - 1) as f32,
+        );
+        let d = ((x - 0.5) * 2.0).hypot((y - 0.5) * 2.0);
+        let alpha = ((1.0 - d).clamp(0.0, 1.0) * 2.0).min(1.0);
+        rgba.extend([
+            (x * 255.0) as u8,
+            200,
+            (y * 255.0) as u8,
+            (alpha * 255.0).round() as u8,
+        ]);
+    }
+    let soft = Arc::new(Patch::new(w, h, rgba).expect("a whole patch"));
+    let solid = Arc::new(Patch::new(1, 1, vec![250, 120, 10, 255]).expect("one texel"));
+    let mut fills = vec![(soft, [0.2, 0.15, 0.7, 0.8])];
+    if hard {
+        fills.push((solid, [0.6, 0.7, 1.0, 1.0]));
+    }
+    let records: Vec<Fill> = fills
+        .iter()
+        .map(|(p, bbox)| Fill::new(*bbox, vec![p.id()], String::new()).expect("a rect in 0..1"))
+        .collect();
+    FillSet::new(&records, |id| {
+        fills
+            .iter()
+            .find(|(p, _)| p.id() == id)
+            .map(|(p, _)| Arc::clone(p))
+    })
 }
 
 /// The most any channel of a case may differ, in 8-bit steps. Measured on an
@@ -725,23 +832,31 @@ fn measure(r: &mut Renderer, fixture: &Fixture, case: &Case, probe: BaseProbe) -
                 h as f32,
                 case.touchups.len(),
                 case.masks.len(),
+                case.fills.len(),
             )
         },
         &case.adj.curve,
     );
     let gpu_touchups: Vec<GpuTouchUp> = case.touchups.iter().map(GpuTouchUp::from).collect();
     r.set_touchups(&gpu_touchups);
+    r.set_fills(&case.fills);
     let masks = MaskSet::new(&case.masks, |_| Some(test_coverage()));
     r.set_masks(&masks.on_photo(w as f32 / h as f32));
     assert!(r.render(None, None, None), "{}: render failed", case.name);
     let gpu = r.read_offscreen_blocking().expect("offscreen readback");
     assert_eq!((gpu.width, gpu.height), (w, h));
 
-    let retouch = Retouch {
-        touchups: &case.touchups,
-        ..Retouch::NONE
-    };
-    let (cw, ch, cpu) = bake_edited_probe(&fixture.img, &case.adj, retouch, &masks, 0, probe);
+    let (cw, ch, cpu) = bake_edited_probe(
+        &fixture.img,
+        &case.adj,
+        Retouch {
+            fills: &case.fills,
+            touchups: &case.touchups,
+        },
+        &masks,
+        0,
+        probe,
+    );
     let crop = case.adj.crop.unwrap_or(Crop {
         left: 0.0,
         top: 0.0,
@@ -861,6 +976,53 @@ fn loupe_shader_matches_cpu_bake() {
     report(diffs);
 }
 
+/// A fill's patch decodes through a different table for each pixel format,
+/// so the fill cases run again on the ramps as half floats: toned, and
+/// linear RAW through the RAW shader.
+#[test]
+fn loupe_fills_match_cpu_bake_on_half_float_photos() {
+    let Some(mut r) = headless(W, H) else {
+        return;
+    };
+    let half_ramps = |pixel_format| {
+        let mut rgba = Vec::with_capacity((W * H * 8) as usize);
+        for y in 0..H {
+            for x in 0..W {
+                for c in ramp(x, y).into_iter().chain([1.0]) {
+                    rgba.extend(half::f16::from_f32(c).to_le_bytes());
+                }
+            }
+        }
+        DecodedImage::new_tracked(DecodedImageFields {
+            width: W,
+            height: H,
+            rgba,
+            pixel_format,
+        })
+    };
+    let fixtures = [
+        Fixture {
+            name: "toned",
+            img: half_ramps(PixelFormat::TonedF16),
+        },
+        Fixture {
+            name: "raw",
+            img: half_ramps(PixelFormat::LinearF16),
+        },
+    ];
+    let cases: Vec<Case> = cases()
+        .into_iter()
+        .filter(|c| c.name == "identity" || c.name.starts_with("fill"))
+        .collect();
+    assert_eq!(cases.len(), 6);
+    let diffs = fixtures
+        .iter()
+        .flat_map(|f| cases.iter().map(move |c| (f, c)))
+        .map(|(f, c)| measure(&mut r, f, c, BaseProbe::Off))
+        .collect();
+    report(diffs);
+}
+
 /// The GPU base layer, read through `baseAt`, against `BaseLayer`, read
 /// through `at_uv`, for every field and the 8x detail view.
 #[test]
@@ -870,9 +1032,19 @@ fn loupe_base_layer_matches_cpu_base() {
     };
     let cases: Vec<Case> = cases()
         .into_iter()
-        .filter(|c| ["identity", "ca", "touchup", "straighten", "everything"].contains(&&*c.name))
+        .filter(|c| {
+            [
+                "identity",
+                "ca",
+                "touchup",
+                "straighten",
+                "everything",
+                "fill",
+            ]
+            .contains(&&*c.name)
+        })
         .collect();
-    assert_eq!(cases.len(), 5);
+    assert_eq!(cases.len(), 6);
     let probes = [
         BaseProbe::Mid,
         BaseProbe::Wide,
@@ -910,6 +1082,7 @@ fn loupe_grain_matches_cpu_bake_at_full_strength() {
         }),
     };
     let grain = |amount, size, roughness| Case {
+        fills: FillSet::default(),
         name: format!("grain {amount}/{size}/{roughness}"),
         adj: Adjustments {
             grain: Grain {
@@ -965,6 +1138,7 @@ fn loupe_presence_matches_cpu_bake_on_a_large_frame() {
         }),
     };
     let presence = |name: &str, texture, clarity, dehaze| Case {
+        fills: FillSet::default(),
         name: name.into(),
         adj: Adjustments {
             texture,
@@ -1024,6 +1198,7 @@ fn loupe_sharpening_matches_cpu_bake_at_full_size() {
         bottom: 0.55,
     });
     let sharp = |name: &str, amount, radius, detail, masking| Case {
+        fills: FillSet::default(),
         name: name.into(),
         adj: Adjustments {
             sharpening: Sharpening {
@@ -1086,7 +1261,7 @@ fn only_the_spots_and_the_ca_scales_rebuild_the_base_layer() {
     let push = |r: &mut Renderer, adj: &Adjustments, spots: &[GpuTouchUp]| {
         let gpu = GpuAdjust {
             base_on: 1.0,
-            ..GpuAdjust::for_image(adj, W as f32, H as f32, spots.len(), 0)
+            ..GpuAdjust::for_image(adj, W as f32, H as f32, spots.len(), 0, 0)
         };
         r.set_adjustments(gpu, &adj.curve);
         r.set_touchups(spots);
@@ -1136,7 +1311,7 @@ fn each_layer_builds_only_for_its_reader() {
     r.set_image(&fixtures[0].img);
     let mut push = |adj: Adjustments| {
         r.set_adjustments(
-            GpuAdjust::for_image(&adj, W as f32, H as f32, 0, 0),
+            GpuAdjust::for_image(&adj, W as f32, H as f32, 0, 0, 0),
             &adj.curve,
         );
         r.set_touchups(&[]);
@@ -1203,7 +1378,7 @@ fn frame_time_with_and_without_a_base_rebuild() {
             let gpu = GpuAdjust {
                 base_on: 1.0,
                 fine_on: 1.0,
-                ..GpuAdjust::for_image(&adj, w as f32, h as f32, 0, 0)
+                ..GpuAdjust::for_image(&adj, w as f32, h as f32, 0, 0, 0)
             };
             r.set_adjustments(gpu, &adj.curve);
             r.set_touchups(&[]);
@@ -1220,7 +1395,7 @@ fn frame_time_with_and_without_a_base_rebuild() {
         GpuAdjust {
             base_on: 1.0,
             fine_on: 1.0,
-            ..GpuAdjust::for_image(&Adjustments::default(), w as f32, h as f32, 0, 0)
+            ..GpuAdjust::for_image(&Adjustments::default(), w as f32, h as f32, 0, 0, 0)
         },
         &Adjustments::default().curve,
     );

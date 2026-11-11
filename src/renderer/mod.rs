@@ -14,6 +14,7 @@ use winit::window::Window;
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::curve::ToneCurve;
+use crate::develop::fill::{self, FillSet, GpuFill, MAX_FILLS};
 use crate::develop::{BaseProbe, GpuAdjust, GpuCurve, GpuMask, GpuTouchUp, Grid, PhotoMasks};
 
 /// A storage binding can't be empty, so the coverage buffer starts at one
@@ -29,13 +30,61 @@ fn coverage_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
     })
 }
 
-/// Group 3 for the image passes: touch-ups at 0, masks at 4, coverage at 5.
+/// The fill table's size: `FillTable` in loupe_common.wgsl, a 256-entry
+/// decode table and then `MAX_FILLS` [`GpuFill`]s.
+const FILL_LUT_BYTES: u64 = 256 * 4;
+const FILL_TABLE_BYTES: u64 = FILL_LUT_BYTES + (MAX_FILLS * std::mem::size_of::<GpuFill>()) as u64;
+
+/// A texture holding `atlas`, which is never empty.
+fn fill_atlas_view(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    atlas: &fill::Atlas,
+) -> wgpu::TextureView {
+    let size = wgpu::Extent3d {
+        width: atlas.width,
+        height: atlas.height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("fill_atlas"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        // Not sRGB: the shader decodes the bytes through the fill table.
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &atlas.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(atlas.width.saturating_mul(4)),
+            rows_per_image: Some(atlas.height),
+        },
+        size,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Group 3 for the image passes: touch-ups at 0, masks at 4, coverage at
+/// 5, the fill table at 6 and the fill atlas at 7.
 fn touch_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     touch_buf: &wgpu::Buffer,
     mask_buf: &wgpu::Buffer,
     coverage_buf: &wgpu::Buffer,
+    fill_buf: &wgpu::Buffer,
+    fill_atlas: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("touch_bg"),
@@ -52,6 +101,14 @@ fn touch_bind_group(
             wgpu::BindGroupEntry {
                 binding: 5,
                 resource: coverage_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: fill_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(fill_atlas),
             },
         ],
     })
@@ -85,7 +142,9 @@ struct BaseInputs {
     ca_red: f32,
     ca_blue: f32,
     touch_count: u32,
-    /// Bumped by `set_touchups` when the spots change.
+    fill_count: u32,
+    /// Bumped by `set_touchups` when the spots change, and by `set_fills`
+    /// and `set_image` when what a fill draws does.
     touch_gen: u64,
     /// The inputs came from the compare view's edited half (`adj_bind_b`),
     /// which the passes then bind. The layer follows the edited photo;
@@ -104,6 +163,7 @@ impl BaseInputs {
             ca_red: a.ca_red,
             ca_blue: a.ca_blue,
             touch_count: a._pad0 as u32,
+            fill_count: a.fill_count as u32,
             touch_gen,
             from_b,
             wanted: [
@@ -242,6 +302,15 @@ pub struct Renderer {
     /// changes no coverage uploads none.
     coverage_buf: wgpu::Buffer,
     coverage_key: u64,
+    /// The fill table: the decode table for the image's pixel format, then
+    /// one `GpuFill` per fill. See `set_fills`.
+    fill_buf: wgpu::Buffer,
+    /// Every chosen patch of the shown photo; one clear texel when none.
+    fill_atlas: wgpu::TextureView,
+    /// The `FillSet::key` of the last upload, so a slider tick uploads none.
+    fill_key: u64,
+    /// How many fills the table holds, which caps the uniform's count.
+    fill_count: usize,
     touch_bind_layout: wgpu::BindGroupLayout,
     touch_bind: wgpu::BindGroup,
 
@@ -566,20 +635,39 @@ impl Renderer {
             }),
         });
 
+        let storage_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
         let touch_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("touch_bgl"),
             // Masks at 4 and their coverage at 5, clear of the overlay's 1
             // to 3 in the same group.
-            entries: &[0, 4, 5].map(|binding| wgpu::BindGroupLayoutEntry {
-                binding,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            // The fill table at 6 and the fill atlas at 7. That makes four
+            // storage buffers and four sampled textures in the fragment
+            // stage, inside WebGPU's defaults of 8 and 16.
+            entries: &[
+                storage_entry(0),
+                storage_entry(4),
+                storage_entry(5),
+                storage_entry(6),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
                 },
-                count: None,
-            }),
+            ],
         });
 
         // Overlay bindings start at 1 so they never overlap the touch-up
@@ -910,12 +998,26 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let coverage_buf = coverage_buffer(&device, MIN_COVERAGE_BUF);
+        let fill_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fills"),
+            size: FILL_TABLE_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &fill_buf,
+            0,
+            bytemuck::cast_slice(&fill::from_comfy_lut(PixelFormat::Srgb8)),
+        );
+        let fill_atlas = fill_atlas_view(&device, &queue, &FillSet::default().atlas(max_dim));
         let touch_bind = touch_bind_group(
             &device,
             &touch_bind_layout,
             &touch_buf,
             &mask_buf,
             &coverage_buf,
+            &fill_buf,
+            &fill_atlas,
         );
 
         let overlay_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -950,6 +1052,10 @@ impl Renderer {
             mask_buf,
             coverage_buf,
             coverage_key: 0,
+            fill_buf,
+            fill_atlas,
+            fill_key: 0,
+            fill_count: 0,
             touch_bind_layout,
             touch_bind,
             overlay_pipeline,
@@ -1197,7 +1303,10 @@ impl Renderer {
                 &self.mip_pipeline_linear,
             ),
         };
-        self.image_pixel_format = img.pixel_format;
+        if self.image_pixel_format != img.pixel_format {
+            self.image_pixel_format = img.pixel_format;
+            self.write_fill_lut();
+        }
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("image"),
@@ -1765,6 +1874,8 @@ impl Renderer {
                 &self.touch_buf,
                 &self.mask_buf,
                 &self.coverage_buf,
+                &self.fill_buf,
+                &self.fill_atlas,
             );
         }
         let fits = bytes
@@ -1772,6 +1883,52 @@ impl Renderer {
             .unwrap_or(bytes);
         self.queue.write_buffer(&self.coverage_buf, 0, fits);
         self.coverage_key = key;
+    }
+
+    /// Uploads the fills: every patch into one atlas texture and each
+    /// fill's rect into the fill table. Called with the masks on every
+    /// slider change, so nothing uploads unless the set differs from the
+    /// last. The uniform's `fill_count` says how many the shader draws;
+    /// pass it [`fill_count`](Self::fill_count), never more. The base and
+    /// fine layers average the filled photo, so a change rebuilds them.
+    pub fn set_fills(&mut self, fills: &FillSet) {
+        let key = fills.key();
+        if key == self.fill_key {
+            return;
+        }
+        let atlas = fills.atlas(self.max_dim);
+        let rows = fills.gpu_fills(&atlas);
+        let rows = rows.get(..MAX_FILLS).unwrap_or(&rows);
+        if !rows.is_empty() {
+            self.queue
+                .write_buffer(&self.fill_buf, FILL_LUT_BYTES, bytemuck::cast_slice(rows));
+        }
+        self.fill_atlas = fill_atlas_view(&self.device, &self.queue, &atlas);
+        self.touch_bind = touch_bind_group(
+            &self.device,
+            &self.touch_bind_layout,
+            &self.touch_buf,
+            &self.mask_buf,
+            &self.coverage_buf,
+            &self.fill_buf,
+            &self.fill_atlas,
+        );
+        self.fill_count = rows.len();
+        self.fill_key = key;
+        self.base_wanted.touch_gen += 1;
+    }
+
+    /// How many fills the last [`set_fills`](Self::set_fills) uploaded.
+    pub fn fill_count(&self) -> usize {
+        self.fill_count
+    }
+
+    /// Writes the table that decodes a patch byte for the shown image's
+    /// pixel format, ahead of the fills in the fill table.
+    fn write_fill_lut(&self) {
+        let lut = fill::from_comfy_lut(self.image_pixel_format);
+        self.queue
+            .write_buffer(&self.fill_buf, 0, bytemuck::cast_slice(&lut));
     }
 
     /// Render the image pass, then the egui pass, in one submission.

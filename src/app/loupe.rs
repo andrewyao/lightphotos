@@ -478,6 +478,7 @@ impl App {
         let mut gpu_before = self.gpu_adjust(&before);
         gpu_before._pad0 = 0.0;
         gpu_before.mask_count = 0.0;
+        gpu_before.fill_count = 0.0;
         let gpu_after = self.gpu_adjust(&after);
         if let Some(r) = &mut self.renderer {
             r.set_transform(scale, offset, rot);

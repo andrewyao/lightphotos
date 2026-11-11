@@ -59,11 +59,11 @@ fn overlap(x: u32, i: u32, cells: u32, size: u32) -> u32 {
     return min((x + 1u) * cells, (i + 1u) * size) - max(x * cells, i * size);
 }
 
-// The pre-tone pixel at texel `(x, y)`'s center: CA removed, touch-ups
-// blended, no denoise.
+// The pre-tone pixel at texel `(x, y)`'s center: CA removed, fills and
+// touch-ups blended, no denoise.
 fn preAt(x: u32, y: u32) -> vec3<f32> {
     let uv = (vec2<f32>(f32(x), f32(y)) + vec2<f32>(0.5)) / vec2<f32>(pass_info.src);
-    return applyTouchups(uv, sampleSrcLevel(uv).rgb);
+    return applyTouchups(uv, applyFills(uv, sampleSrcLevel(uv).rgb));
 }
 
 // (luma, luma, darkest channel) of the cell's mean: the blur inputs.

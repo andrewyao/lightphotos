@@ -79,9 +79,26 @@ struct Adjust {
     grade_wheels: array<vec4<f32>, 4>,
     // How many entries of `masks` apply; 0 for none. See `localTone`.
     mask_count: f32,
-    _mpad0: f32,
+    // How many entries of `fill_table.fills` draw; 0 for none. See `applyFills`.
+    fill_count: f32,
     _mpad1: f32,
     _mpad2: f32,
+};
+
+// Must match `GpuFill` in develop/fill.rs.
+struct Fill {
+    // Source UV (u0, v0, u1, v1).
+    bbox: vec4<f32>,
+    // The patch's (x, y, width, height) in `fill_atlas` texels.
+    rect: vec4<f32>,
+};
+
+// Written by `Renderer::set_fills` and `Renderer::write_fill_lut`.
+struct FillTable {
+    // `fill::from_comfy_lut` for the image's pixel format: a patch byte to
+    // linear source light.
+    lut: array<f32, 256>,
+    fills: array<Fill, 16>,
 };
 
 struct TouchUp {
@@ -141,6 +158,10 @@ struct LocalTone {
 // a texture array: coverages differ in size, and the manual bilinear below
 // is what CPU parity needs anyway.
 @group(3) @binding(5) var<storage, read> coverage: array<u32>;
+// Generative fills: their rects and decode table at 6, and at 7 every
+// chosen patch in one Rgba8Unorm atlas, read only with `textureLoad`.
+@group(3) @binding(6) var<storage, read> fill_table: FillTable;
+@group(3) @binding(7) var fill_atlas: texture_2d<f32>;
 
 // A straightened-canvas UV to the source texture's UV: the canvas offset from
 // the center, turned in pixel space. The crop is in canvas UV; sampling,
@@ -184,6 +205,48 @@ fn sampleSrcLevel(uv: vec2<f32>) -> vec4<f32> {
     let r = textureSampleLevel(tex, samp, caUv(uv, adj.ca_red), 0.0).r;
     let b = textureSampleLevel(tex, samp, caUv(uv, adj.ca_blue), 0.0).b;
     return vec4<f32>(r, g.g, b, g.a);
+}
+
+// Texel `(x, y)` of fill `f`'s patch, clamped to it: linear rgb and alpha.
+fn fillTexel(f: Fill, p: vec2<i32>) -> vec4<f32> {
+    let hi = vec2<i32>(f.rect.zw) - vec2<i32>(1);
+    let at = vec2<i32>(f.rect.xy) + clamp(p, vec2<i32>(0), hi);
+    let c = textureLoad(fill_atlas, at, 0);
+    let i = vec3<u32>(c.rgb * 255.0 + vec3<f32>(0.5));
+    return vec4<f32>(fill_table.lut[i.r], fill_table.lut[i.g], fill_table.lut[i.b], c.a);
+}
+
+// Draw each generative fill over `rgb`, the pixel at source `uv`: inside a
+// fill's rect, its patch read bilinearly (the four texels around
+// `t * size - 0.5`, each decoded to linear light first) and mixed by its
+// alpha. Must match `Compositor::apply` in develop/fill.rs.
+fn applyFills(uv: vec2<f32>, rgb: vec3<f32>) -> vec3<f32> {
+    var out = rgb;
+    let n = min(u32(adj.fill_count), 16u);
+    for (var i = 0u; i < n; i = i + 1u) {
+        let f = fill_table.fills[i];
+        // A patch that didn't fit the atlas arrives with size 0.
+        if (f.rect.z < 1.0 || f.rect.w < 1.0) {
+            continue;
+        }
+        if (uv.x < f.bbox.x || uv.x > f.bbox.z || uv.y < f.bbox.y || uv.y > f.bbox.w) {
+            continue;
+        }
+        let t = (uv - f.bbox.xy) / (f.bbox.zw - f.bbox.xy);
+        let p = t * f.rect.zw - vec2<f32>(0.5);
+        let fl = floor(p);
+        let w = p - fl;
+        let i0 = vec2<i32>(fl);
+        let a = fillTexel(f, i0);
+        let b = fillTexel(f, i0 + vec2<i32>(1, 0));
+        let c = fillTexel(f, i0 + vec2<i32>(0, 1));
+        let d = fillTexel(f, i0 + vec2<i32>(1, 1));
+        let top = a * (1.0 - w.x) + b * w.x;
+        let bottom = c * (1.0 - w.x) + d * w.x;
+        let s = top * (1.0 - w.y) + bottom * w.y;
+        out = out * (1.0 - s.a) + s.rgb * s.a;
+    }
+    return out;
 }
 
 // Blend each spot-heal patch over `rgb`, the pixel at source `uv`. The CPU
@@ -347,7 +410,7 @@ fn sharpenAdjust(uv: vec2<f32>, pre: vec3<f32>, out: vec3<f32>) -> vec3<f32> {
     // rather than add it. Denoise already read mip 0.
     var center = pre;
     if (adj.denoise == 0.0) {
-        center = applyTouchups(uv, sampleSrcLevel(uv).rgb);
+        center = applyTouchups(uv, applyFills(uv, sampleSrcLevel(uv).rgb));
     }
     var sum = vec3<f32>(0.0);
     var wsum = 0.0;
@@ -355,7 +418,7 @@ fn sharpenAdjust(uv: vec2<f32>, pre: vec3<f32>, out: vec3<f32>) -> vec3<f32> {
     for (var dy = -2; dy <= 2; dy = dy + 1) {
         for (var dx = -2; dx <= 2; dx = dx + 1) {
             let tapUv = uv + vec2<f32>(f32(dx), f32(dy)) * step;
-            let tap = applyTouchups(tapUv, sampleSrcLevel(tapUv).rgb);
+            let tap = applyTouchups(tapUv, applyFills(tapUv, sampleSrcLevel(tapUv).rgb));
             let w = sharpenWeight(dx * dx + dy * dy);
             sum = sum + w * tap;
             wsum = wsum + w;
@@ -830,8 +893,9 @@ fn developLinear(uv: vec2<f32>, texel: vec3<f32>, l: LocalTone) -> vec3<f32> {
         rgb = sum / wsum;
     }
 
-    // Spot healing, after denoise to match the CPU export path.
-    rgb = applyTouchups(uv, rgb);
+    // Fills, then spot healing so a spot can fix a fill; both after denoise
+    // to match the CPU export path.
+    rgb = applyTouchups(uv, applyFills(uv, rgb));
     // The probe shows the base layer itself, so nothing reads it after.
     if (adj.base_probe > 0.0) {
         rgb = baseProbe(uv, rgb, adj.base_probe);

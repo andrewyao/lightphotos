@@ -628,6 +628,11 @@ impl App {
             self.pushed_masks = self.current_masks().len();
         }
         let adj = self.current_adjustments();
+        // Before the uniform, which counts the fills the renderer holds.
+        let fills = self.current_fill_set();
+        if let Some(r) = &mut self.renderer {
+            r.set_fills(&fills);
+        }
         let gpu = self.gpu_adjust(&adj);
         let gpu_touchups: Vec<GpuTouchUp> = self
             .current_touchups()
@@ -653,6 +658,7 @@ impl App {
             h,
             self.current_touchups().len(),
             self.current_masks().len(),
+            self.renderer.as_ref().map_or(0, |r| r.fill_count()),
         )
     }
 

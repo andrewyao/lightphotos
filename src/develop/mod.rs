@@ -1164,7 +1164,9 @@ pub struct GpuAdjust {
     pub grade: GradeOps,
     /// How many masks the shader reads from its mask buffer.
     pub mask_count: f32,
-    pub _mpad: [f32; 3],
+    /// How many fills the shader draws from its fill table.
+    pub fill_count: f32,
+    pub _mpad: [f32; 2],
 }
 
 impl Default for GpuAdjust {
@@ -1203,14 +1205,15 @@ impl Default for GpuAdjust {
             color: ColorOps::default(),
             grade: GradeOps::default(),
             mask_count: 0.0,
-            _mpad: [0.0; 3],
+            fill_count: 0.0,
+            _mpad: [0.0; 2],
         }
     }
 }
 
 impl GpuAdjust {
     /// The uniform for `adj` on a `width x height` image with `touchups`
-    /// spot-heals and `masks` masks. Denoise steps by whole texels, and the
+    /// spot-heals, `masks` masks and `fills` fills. Denoise steps by whole texels, and the
     /// shader reads the touch-up count from `_pad0`.
     pub fn for_image(
         adj: &Adjustments,
@@ -1218,12 +1221,14 @@ impl GpuAdjust {
         height: f32,
         touchups: usize,
         masks: usize,
+        fills: usize,
     ) -> Self {
         Self {
             texel_w: 1.0 / width,
             texel_h: 1.0 / height,
             _pad0: touchups as f32,
             mask_count: masks.min(MAX_MASKS) as f32,
+            fill_count: fills.min(fill::MAX_FILLS) as f32,
             sharpen: Sharpen::new(&adj.sharpening, width, height),
             effects: Effects::new(&adj.vignette, &adj.grain, adj.crop, width, height),
             ..Self::from(adj)

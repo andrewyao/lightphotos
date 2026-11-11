@@ -607,7 +607,8 @@ impl App {
         // Segmentation starts from user actions, so it has no `request_*` call.
         self.poll_selection_mask();
         self.poll_coverage();
-        let detecting = self.coverage.busy();
+        self.poll_fills();
+        let detecting = self.coverage.busy() || self.fills_loading();
         let scanning_presets = self.poll_preset_scans();
         self.poll_remove_ca();
 
