@@ -113,7 +113,7 @@ fn the_clock_matching_contract_holds_case_by_case() {
         let zones: Vec<_> = case.offsets.iter().map(|(t, m)| (t.as_str(), *m)).collect();
         let track = Track::parse("day.gpx", gpx(&points, &clock, &zones).as_bytes()).unwrap();
         assert_eq!(track.camera_clock.len(), case.clock.len(), "{}", case.name);
-        let model = ClockModel::select(&track, case.setting).unwrap();
+        let model = ClockModel::select(&track, case.setting, true).unwrap();
         let stamp = case.wall.replace('-', ":").replace('T', " ");
         let outcome = locate(&track, Some(&model), false, Some(&stamp));
         let offset = offset_of(&outcome).map(|(o, _)| o);
@@ -167,7 +167,7 @@ fn interpolation_takes_the_short_way_across_the_antimeridian() {
 #[test]
 fn the_camera_setting_shifts_the_wall_time_to_utc() {
     let t = track(&[(T0, 10.0, 20.0, None)]);
-    let tokyo = ClockModel::select(&t, Some(9 * 3600)).unwrap();
+    let tokyo = ClockModel::select(&t, Some(9 * 3600), true).unwrap();
     let tag = located(locate(&t, Some(&tokyo), false, Some(&wall(T0 + 9 * 3600))));
     assert_eq!(
         tag.source,
@@ -177,7 +177,7 @@ fn the_camera_setting_shifts_the_wall_time_to_utc() {
             clock: Some(ClockSource::Setting),
         }
     );
-    let utc = ClockModel::select(&t, Some(0)).unwrap();
+    let utc = ClockModel::select(&t, Some(0), true).unwrap();
     assert_eq!(
         locate(&t, Some(&utc), false, Some(&wall(T0 + 9 * 3600))),
         MatchOutcome::OutsideTrack
@@ -190,22 +190,31 @@ fn a_measurement_beats_the_setting_and_the_setting_serves_without_one() {
     let at = iso(T0 - 3600);
     let measured = Track::parse("day.gpx", gpx(&p, &[(&at, 3600)], &[]).as_bytes()).unwrap();
     // The setting says UTC; LightRemote measured the camera an hour ahead.
-    let model = ClockModel::select(&measured, Some(0)).unwrap();
+    let model = ClockModel::select(&measured, Some(0), true).unwrap();
     assert_eq!(model.source(), ClockSource::Measured);
     let photo = wall(T0 + 3600);
     assert_eq!(
         offset_of(&locate(&measured, Some(&model), false, Some(&photo))),
         Some((3600, Some(ClockSource::Measured)))
     );
+    // A camera LightRemote wasn't paired with keeps its own setting.
+    let other = ClockModel::select(&measured, Some(0), false).unwrap();
+    assert_eq!(
+        other,
+        ClockModel::Setting {
+            camera_minus_utc_s: 0
+        }
+    );
+    assert_eq!(ClockModel::select(&measured, None, false), None);
 
     let bare = track(&p);
-    let model = ClockModel::select(&bare, Some(3600)).unwrap();
+    let model = ClockModel::select(&bare, Some(3600), true).unwrap();
     assert_eq!(
         offset_of(&locate(&bare, Some(&model), false, Some(&photo))),
         Some((3600, Some(ClockSource::Setting)))
     );
-    assert_eq!(ClockModel::select(&bare, None), None);
-    assert_eq!(ClockModel::select(&bare, Some(i64::MAX)), None);
+    assert_eq!(ClockModel::select(&bare, None, true), None);
+    assert_eq!(ClockModel::select(&bare, Some(i64::MAX), true), None);
     assert_eq!(
         locate(&bare, None, false, Some(&photo)),
         MatchOutcome::NoClock
@@ -217,8 +226,8 @@ fn the_phone_time_zone_is_not_the_camera_clock() {
     let p = [(T0, 1.0, 2.0, None)];
     let at = iso(T0 - 3600);
     let zoned = Track::parse("day.gpx", gpx(&p, &[], &[(&at, 540)]).as_bytes()).unwrap();
-    assert_eq!(ClockModel::select(&zoned, None), None);
-    let model = ClockModel::select(&zoned, Some(3600)).unwrap();
+    assert_eq!(ClockModel::select(&zoned, None, true), None);
+    let model = ClockModel::select(&zoned, Some(3600), true).unwrap();
     assert_eq!(
         model,
         ClockModel::Setting {
@@ -250,7 +259,7 @@ fn a_measurement_on_day_one_covers_a_photo_on_day_four() {
     .unwrap();
     let both = Track::merge([first, fourth]).unwrap();
     // The setting is wrong by the DST hour; the measurement still holds.
-    let model = ClockModel::select(&both, Some(0)).unwrap();
+    let model = ClockModel::select(&both, Some(0), true).unwrap();
     let outcome = locate(&both, Some(&model), false, Some(&wall(T0 + 3 * day + 3604)));
     assert_eq!(
         offset_of(&outcome),
@@ -371,6 +380,30 @@ fn malformed_gpx_is_an_error_not_a_panic() {
 }
 
 #[test]
+fn a_gpx_1_0_track_reads_like_a_1_1_one() {
+    let v10 = gpx(&[(T0, 1.0, 2.0, Some(3.0))], &[], &[])
+        .replace("GPX/1/1", "GPX/1/0")
+        .replace("version=\"1.1\"", "version=\"1.0\"");
+    let t = Track::parse("old.gpx", v10.as_bytes()).unwrap();
+    assert_eq!(
+        t,
+        Track {
+            files: vec!["old.gpx".into()],
+            ..track(&[(T0, 1.0, 2.0, Some(3.0))])
+        }
+    );
+    let mixed = v10.replace(
+        "<trkpt ",
+        "<trkpt xmlns=\"http://www.topografix.com/GPX/1/1\" ",
+    );
+    assert_eq!(
+        Track::parse("mixed.gpx", mixed.as_bytes()).unwrap_err(),
+        GpxError::NoPoints,
+        "a 1.0 file's points are in its own namespace"
+    );
+}
+
+#[test]
 fn points_are_sorted_and_a_repeated_second_keeps_the_first() {
     let t = track(&[
         (T0 + 60, 2.0, 2.0, None),
@@ -469,7 +502,7 @@ fn two_days_merge_so_a_photo_at_midnight_lies_between_their_fixes() {
     // 00:00:10 on the 9th by the camera: 310 s past the last fix of the 8th,
     // 290 s before the first of the 9th.
     let photo = "2026:11:09 00:00:10";
-    let alone = ClockModel::select(&before, Some(9 * 3600)).unwrap();
+    let alone = ClockModel::select(&before, Some(9 * 3600), true).unwrap();
     assert_eq!(
         locate(&before, Some(&alone), false, Some(photo)),
         MatchOutcome::OutsideTrack,
@@ -478,7 +511,7 @@ fn two_days_merge_so_a_photo_at_midnight_lies_between_their_fixes() {
 
     let both = Track::merge([before, after]).unwrap();
     assert_eq!(both.file_names(), ["2026-11-08.gpx", "2026-11-09.gpx"]);
-    let clock = ClockModel::select(&both, Some(9 * 3600)).unwrap();
+    let clock = ClockModel::select(&both, Some(9 * 3600), true).unwrap();
     let tag = located(locate(&both, Some(&clock), false, Some(photo)));
     assert!(
         (tag.lat - 35.31).abs() < 1e-9,

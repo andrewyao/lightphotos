@@ -804,60 +804,60 @@ fn adjustment_pair(ui: &mut egui::Ui, app: &App, one: bool, out: &mut FrameOutpu
 fn all_photos_menu(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let any = app.visible_len() > 0;
-    let button = ui.add_enabled(any, egui::Button::new(actions_label(false)));
+    // The GPX entries reach into subfolders, so an empty folder can be the
+    // parent of the photos they act on.
+    let gpx = cfg!(not(target_arch = "wasm32")) && app.has_playlist();
+    let button = ui.add_enabled(any || gpx, egui::Button::new(actions_label(false)));
     egui::Popup::menu(&button).show(|ui| {
         // Every entry edits, so a read-only folder turns them all off.
         ui.add_enabled_ui(!app.read_only(), |ui| {
-            if app.scoring_available()
-                && ui
-                    .button(t.score_all)
-                    .on_hover_text(t.score_all_tip)
+            ui.add_enabled_ui(any, |ui| {
+                if app.scoring_available()
+                    && ui
+                        .button(t.score_all)
+                        .on_hover_text(t.score_all_tip)
+                        .clicked()
+                {
+                    out.actions.push(UiAction::ScoreAll);
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if ui
+                    .add_enabled(
+                        app.group_bursts_available(),
+                        egui::Button::new(t.group_all_bursts),
+                    )
+                    .on_hover_text(t.group_all_bursts_tip)
                     .clicked()
-            {
-                out.actions.push(UiAction::ScoreAll);
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            if ui
-                .add_enabled(
-                    app.group_bursts_available(),
-                    egui::Button::new(t.group_all_bursts),
-                )
-                .on_hover_text(t.group_all_bursts_tip)
-                .clicked()
-            {
-                out.actions.push(UiAction::GroupAllBursts);
-            }
-            if ui
-                .button(t.auto_adjust_all)
-                .on_hover_text(t.auto_adjust_all_tip)
-                .clicked()
-            {
-                out.actions
-                    .push(UiAction::RequestBulk(BulkKind::AutoToneAll));
-            }
+                {
+                    out.actions.push(UiAction::GroupAllBursts);
+                }
+                if ui
+                    .button(t.auto_adjust_all)
+                    .on_hover_text(t.auto_adjust_all_tip)
+                    .clicked()
+                {
+                    out.actions
+                        .push(UiAction::RequestBulk(BulkKind::AutoToneAll));
+                }
+            });
             #[cfg(not(target_arch = "wasm32"))]
             {
                 ui.separator();
                 if ui
-                    .add_enabled(!app.geotag_running(), egui::Button::new(t.geotag_from_gpx))
-                    .on_hover_text(t.geotag_from_gpx_tip)
+                    .add_enabled(
+                        !app.geotag_running(),
+                        egui::Button::new(t.import_gps_tracks),
+                    )
+                    .on_hover_text(t.import_gps_tracks_tip)
                     .clicked()
                 {
-                    out.actions.push(UiAction::GeotagFromGpx);
+                    out.actions.push(UiAction::ImportGpsTracks);
                 }
-                #[cfg(target_os = "macos")]
                 if ui
                     .add_enabled(
                         !app.geotag_running(),
-                        egui::Button::new(t.geotag_from_icloud),
+                        egui::Button::new(t.clear_gpx_locations),
                     )
-                    .on_hover_text(t.geotag_from_icloud_tip)
-                    .clicked()
-                {
-                    out.actions.push(UiAction::GeotagFromICloud);
-                }
-                if ui
-                    .button(t.clear_gpx_locations)
                     .on_hover_text(t.clear_gpx_locations_tip)
                     .clicked()
                 {

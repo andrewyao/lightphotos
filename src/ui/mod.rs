@@ -40,32 +40,25 @@ pub enum UiAction {
     ToggleLabel(crate::sidecar::ColorLabel),
     /// Score every photo in the grid, group members included.
     ScoreAll,
-    /// Pick a GPX file and locate the folder's photos on it.
+    /// "Import GPS Tracks…": pick GPX files or folders, then the dialog.
     #[cfg(not(target_arch = "wasm32"))]
-    GeotagFromGpx,
+    ImportGpsTracks,
+    /// The import dialog's own picker.
+    #[cfg(not(target_arch = "wasm32"))]
+    AddGpsTracks(crate::app::PickKind),
+    /// A camera row's clock, as chosen.
+    #[cfg(not(target_arch = "wasm32"))]
+    SetCameraClock {
+        row: usize,
+        clock: crate::app::CameraClock,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    CommitImport,
+    #[cfg(not(target_arch = "wasm32"))]
+    CancelImport,
     /// Forget the folder's GPX locations.
     #[cfg(not(target_arch = "wasm32"))]
     ClearGeotags,
-    /// The camera UTC offset prompt's text, as typed.
-    #[cfg(not(target_arch = "wasm32"))]
-    SetGeotagOffsetText(String),
-    #[cfg(not(target_arch = "wasm32"))]
-    CommitGeotagOffset,
-    #[cfg(not(target_arch = "wasm32"))]
-    CancelGeotagOffset,
-    /// Open "Geotag from iCloud…".
-    #[cfg(target_os = "macos")]
-    GeotagFromICloud,
-    /// Its From and To fields, as typed.
-    #[cfg(target_os = "macos")]
-    SetICloudDates {
-        from: String,
-        to: String,
-    },
-    #[cfg(target_os = "macos")]
-    CommitICloud,
-    #[cfg(target_os = "macos")]
-    CancelICloud,
     /// Show this page of the group's tiles.
     ComparePage(usize),
     /// Native only, as is the row that sends it.
@@ -532,9 +525,7 @@ fn dialogs(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     delete_preset_modal(ui, app, out);
     preset_name_modal(ui, app, out);
     #[cfg(not(target_arch = "wasm32"))]
-    modals::geotag_offset_modal(ui, app, out);
-    #[cfg(target_os = "macos")]
-    modals::geotag_icloud_modal(ui, app, out);
+    modals::gps_import_modal(ui, app, out);
     #[cfg(target_arch = "wasm32")]
     modals::catalog_name_modal(ui, app, out);
     help_modal(ui, app, out);

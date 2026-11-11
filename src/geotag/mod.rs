@@ -196,10 +196,12 @@ pub enum ClockModel {
 }
 
 impl ClockModel {
-    /// LightRemote's measurements when `track` has any, else `setting`.
-    /// `None` when it has neither. An out-of-range `setting` counts as none.
-    pub fn select(track: &Track, setting: Option<i64>) -> Option<ClockModel> {
-        if !track.camera_clock.is_empty() {
+    /// LightRemote's measurements when `track` has any and the camera is
+    /// the one LightRemote was `paired` with, else `setting`. The track
+    /// doesn't say which camera it measured, so the caller does. `None`
+    /// when there is neither. An out-of-range `setting` counts as none.
+    pub fn select(track: &Track, setting: Option<i64>, paired: bool) -> Option<ClockModel> {
+        if paired && !track.camera_clock.is_empty() {
             return Some(ClockModel::Measured(clock_periods(&track.camera_clock)));
         }
         setting

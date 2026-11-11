@@ -6,8 +6,13 @@
 
 use super::{ClockPeriod, Fix, Track, TrackPoint};
 
-/// The GPX 1.1 namespace. Elements in any other namespace are ignored.
-const GPX_NS: &str = "http://www.topografix.com/GPX/1/1";
+/// The GPX 1.1 and 1.0 namespaces, which lay a track out the same way. A
+/// file's points are in its root's namespace; elements in any other are
+/// ignored.
+const GPX_NS: [&str; 2] = [
+    "http://www.topografix.com/GPX/1/1",
+    "http://www.topografix.com/GPX/1/0",
+];
 /// LightRemote's extensions. Only its camera clock measurements are read;
 /// its phone time zones say nothing about the camera's clock.
 pub const LR_NS: &str = "https://lightremote.app/gpx/1";
@@ -62,15 +67,15 @@ impl Track {
         let text = std::str::from_utf8(bytes).map_err(|e| GpxError::NotXml(e.to_string()))?;
         let doc = roxmltree::Document::parse(text).map_err(|e| GpxError::NotXml(e.to_string()))?;
         let root = doc.root_element();
-        if !is(root, GPX_NS, "gpx") {
+        let Some(ns) = GPX_NS.into_iter().find(|ns| is(root, ns, "gpx")) else {
             return Err(GpxError::NotGpx);
-        }
+        };
 
         let mut points = Vec::new();
         let mut camera_clock = Vec::new();
         for node in root.descendants().filter(roxmltree::Node::is_element) {
-            if is(node, GPX_NS, "trkpt") {
-                points.extend(point(node)?.map(|point| Fix { point, file: 0 }));
+            if is(node, ns, "trkpt") {
+                points.extend(point(node, ns)?.map(|point| Fix { point, file: 0 }));
             } else if is(node, LR_NS, "cameraClock") {
                 camera_clock.push(ClockPeriod {
                     from: time(attr(node, "measuredAt")?)?,
@@ -135,14 +140,14 @@ fn coordinate(node: roxmltree::Node, name: &str, limit: f64) -> Option<f64> {
         .filter(|v| v.is_finite() && v.abs() <= limit)
 }
 
-fn child_text<'a>(node: roxmltree::Node<'a, '_>, name: &str) -> Option<&'a str> {
+fn child_text<'a>(node: roxmltree::Node<'a, '_>, ns: &str, name: &str) -> Option<&'a str> {
     node.children()
-        .find(|c| is(*c, GPX_NS, name))
+        .find(|c| is(*c, ns, name))
         .and_then(|c| c.text())
 }
 
-fn point(node: roxmltree::Node) -> Result<Option<TrackPoint>, GpxError> {
-    let Some(t) = child_text(node, "time") else {
+fn point(node: roxmltree::Node, ns: &str) -> Result<Option<TrackPoint>, GpxError> {
+    let Some(t) = child_text(node, ns, "time") else {
         return Ok(None);
     };
     let utc = time(t)?;
@@ -152,7 +157,7 @@ fn point(node: roxmltree::Node) -> Result<Option<TrackPoint>, GpxError> {
     ) else {
         return Ok(None);
     };
-    let ele = child_text(node, "ele")
+    let ele = child_text(node, ns, "ele")
         .and_then(|e| e.trim().parse::<f64>().ok())
         .filter(|e| e.is_finite());
     Ok(Some(TrackPoint { utc, lat, lon, ele }))

@@ -601,7 +601,8 @@ impl App {
 
         self.poll_face_quality();
         let vision_pending = self.request_face_quality();
-        let scoring = self.pump_scoring() || self.pump_geotag();
+        let scoring = self.pump_scoring();
+        let geotagging = self.pump_geotag();
 
         // Segmentation starts from user actions, so it has no `request_*` call.
         self.poll_selection_mask();
@@ -636,6 +637,7 @@ impl App {
                 || update_checking
                 || vision_pending
                 || scoring
+                || geotagging
                 || detecting
                 || scanning_presets
             {

@@ -75,16 +75,77 @@ pub fn pick_preset_folder() -> Option<PathBuf> {
         .pick_folder()
 }
 
-/// The OS file picker for one GPX track. `None` when the user cancelled.
-/// Blocks until the dialog closes, so call it only on the main thread.
-pub fn pick_gpx_file() -> Option<PathBuf> {
-    if headless("GPX") {
-        return None;
+/// What `--drive --gps-pick` answers the GPS-track picker with, in place of
+/// cancelling it.
+static GPS_PICKS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+
+/// Answer every GPS-track picker of a `--drive` run with `paths`. Set once,
+/// before the app starts.
+pub(crate) fn answer_gps_pickers(paths: Vec<PathBuf>) {
+    let _ = GPS_PICKS.set(paths);
+}
+
+/// The picker for GPX tracks: on macOS one panel that takes files and
+/// folders together, elsewhere the files or the folder `kind` names. Empty
+/// when the user cancelled. Blocks until it closes, so call it only on the
+/// main thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn pick_gps_tracks(kind: crate::app::PickKind) -> Vec<PathBuf> {
+    use crate::app::PickKind;
+    if HEADLESS.load(Ordering::Relaxed) {
+        let picks = GPS_PICKS.get().cloned().unwrap_or_default();
+        eprintln!("[drive] the GPS-track picker was asked for; answering {picks:?}");
+        return picks;
     }
-    rfd::FileDialog::new()
-        .set_title(crate::i18n::t().gpx_picker_title)
-        .add_filter(crate::i18n::t().gpx_filter_name, &["gpx", "GPX"])
-        .pick_file()
+    let t = crate::i18n::t();
+    let dialog = || {
+        rfd::FileDialog::new()
+            .set_title(t.gps_picker_title)
+            .add_filter(t.gpx_filter_name, &["gpx", "GPX"])
+    };
+    match kind {
+        #[cfg(target_os = "macos")]
+        PickKind::Any => pick_files_and_folders(t.gps_picker_title, &["gpx"]),
+        #[cfg(not(target_os = "macos"))]
+        PickKind::Any => dialog().pick_files().unwrap_or_default(),
+        PickKind::Files => dialog().pick_files().unwrap_or_default(),
+        PickKind::Folder => dialog().pick_folders().unwrap_or_default(),
+    }
+}
+
+/// NSOpenPanel taking files with `extensions` and folders together, several
+/// at once, which `rfd` can't ask for.
+#[cfg(target_os = "macos")]
+fn pick_files_and_folders(title: &str, extensions: &[&str]) -> Vec<PathBuf> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+    use objc2_foundation::{NSArray, NSString};
+    use objc2_uniform_type_identifiers::UTType;
+    let Some(mtm) = MainThreadMarker::new() else {
+        eprintln!("[lightphotos] the GPS-track picker needs the main thread");
+        return Vec::new();
+    };
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseFiles(true);
+    panel.setCanChooseDirectories(true);
+    panel.setAllowsMultipleSelection(true);
+    panel.setTitle(Some(&NSString::from_str(title)));
+    panel.setMessage(Some(&NSString::from_str(title)));
+    let types: Vec<_> = extensions
+        .iter()
+        .filter_map(|e| UTType::typeWithFilenameExtension(&NSString::from_str(e)))
+        .collect();
+    if !types.is_empty() {
+        panel.setAllowedContentTypes(&NSArray::from_retained_slice(&types));
+    }
+    if panel.runModal() != NSModalResponseOK {
+        return Vec::new();
+    }
+    panel
+        .URLs()
+        .iter()
+        .filter_map(|url| Some(PathBuf::from(url.path()?.to_string())))
+        .collect()
 }
 
 /// Show the OS file picker for Lightroom presets. Empty when the user

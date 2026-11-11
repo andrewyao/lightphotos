@@ -816,9 +816,7 @@ mod fullscreen;
 #[cfg(not(target_arch = "wasm32"))]
 mod geotag;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use geotag::override_icloud_dir;
-#[cfg(target_os = "macos")]
-pub(crate) use geotag::{day, DayState};
+pub(crate) use geotag::{camera_label, override_download_timeout, CameraClock, PickKind};
 mod slideshow;
 pub(crate) use slideshow::SlideshowSettings;
 mod group_compare;
@@ -1381,13 +1379,7 @@ impl App {
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn geotag_prompt_open(&self) -> bool {
-        false
-    }
-
-    /// iCloud tracks are macOS only (see `geotag`).
-    #[cfg(not(target_os = "macos"))]
-    fn icloud_form_open(&self) -> bool {
+    fn import_dialog_open(&self) -> bool {
         false
     }
 
@@ -1656,23 +1648,17 @@ impl App {
                 ui::UiAction::ToggleLabel(label) => self.toggle_label(label),
                 ui::UiAction::ScoreAll => self.score_all(),
                 #[cfg(not(target_arch = "wasm32"))]
-                ui::UiAction::GeotagFromGpx => self.geotag_dialog(),
+                ui::UiAction::ImportGpsTracks => self.import_gps_tracks(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::AddGpsTracks(kind) => self.add_gps_tracks(kind),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::SetCameraClock { row, clock } => self.set_camera_clock(row, clock),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::CommitImport => self.commit_import_dialog(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::CancelImport => self.cancel_import_dialog(),
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::ClearGeotags => self.run_ui(crate::command::Command::ClearGeotags),
-                #[cfg(not(target_arch = "wasm32"))]
-                ui::UiAction::SetGeotagOffsetText(text) => self.set_geotag_offset_text(text),
-                #[cfg(not(target_arch = "wasm32"))]
-                ui::UiAction::CommitGeotagOffset => self.commit_geotag_prompt(),
-                #[cfg(not(target_arch = "wasm32"))]
-                ui::UiAction::CancelGeotagOffset => self.cancel_geotag_prompt(),
-                #[cfg(target_os = "macos")]
-                ui::UiAction::GeotagFromICloud => self.open_icloud_form(),
-                #[cfg(target_os = "macos")]
-                ui::UiAction::SetICloudDates { from, to } => self.set_icloud_dates(from, to),
-                #[cfg(target_os = "macos")]
-                ui::UiAction::CommitICloud => self.commit_icloud_form(),
-                #[cfg(target_os = "macos")]
-                ui::UiAction::CancelICloud => self.cancel_icloud_form(),
                 ui::UiAction::ComparePage(page) => self.set_compare_page(page),
                 ui::UiAction::SetTileFidelity(f) => self.set_tile_fidelity(f),
                 ui::UiAction::PickGroupTile { path, how } => self.pick_group_tile(path, how),

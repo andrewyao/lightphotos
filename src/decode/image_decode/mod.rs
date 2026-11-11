@@ -22,17 +22,19 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{CGContext, CGImage};
 #[cfg(target_os = "macos")]
 use objc2_image_io::{
-    kCGImagePropertyExifDateTimeOriginal, kCGImagePropertyExifDictionary,
-    kCGImagePropertyExifExposureBiasValue, kCGImagePropertyExifExposureTime,
-    kCGImagePropertyExifFNumber, kCGImagePropertyExifFlash, kCGImagePropertyExifFocalLength,
-    kCGImagePropertyExifISOSpeedRatings, kCGImagePropertyExifLensModel,
-    kCGImagePropertyExifOffsetTime, kCGImagePropertyExifOffsetTimeOriginal,
-    kCGImagePropertyExifSubsecTimeOriginal, kCGImagePropertyExifWhiteBalance,
-    kCGImagePropertyGPSAltitude, kCGImagePropertyGPSAltitudeRef, kCGImagePropertyGPSDictionary,
-    kCGImagePropertyGPSLatitude, kCGImagePropertyGPSLatitudeRef, kCGImagePropertyGPSLongitude,
-    kCGImagePropertyGPSLongitudeRef, kCGImagePropertyOrientation, kCGImagePropertyPixelHeight,
-    kCGImagePropertyPixelWidth, kCGImagePropertyTIFFDateTime, kCGImagePropertyTIFFDictionary,
-    kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel, CGImageSource,
+    kCGImagePropertyExifAuxDictionary, kCGImagePropertyExifAuxSerialNumber,
+    kCGImagePropertyExifBodySerialNumber, kCGImagePropertyExifDateTimeOriginal,
+    kCGImagePropertyExifDictionary, kCGImagePropertyExifExposureBiasValue,
+    kCGImagePropertyExifExposureTime, kCGImagePropertyExifFNumber, kCGImagePropertyExifFlash,
+    kCGImagePropertyExifFocalLength, kCGImagePropertyExifISOSpeedRatings,
+    kCGImagePropertyExifLensModel, kCGImagePropertyExifOffsetTime,
+    kCGImagePropertyExifOffsetTimeOriginal, kCGImagePropertyExifSubsecTimeOriginal,
+    kCGImagePropertyExifWhiteBalance, kCGImagePropertyGPSAltitude, kCGImagePropertyGPSAltitudeRef,
+    kCGImagePropertyGPSDictionary, kCGImagePropertyGPSLatitude, kCGImagePropertyGPSLatitudeRef,
+    kCGImagePropertyGPSLongitude, kCGImagePropertyGPSLongitudeRef, kCGImagePropertyOrientation,
+    kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth, kCGImagePropertyTIFFDateTime,
+    kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel,
+    CGImageSource,
 };
 
 #[cfg(target_os = "macos")]
@@ -186,6 +188,9 @@ pub struct ImageMetadata {
     pub format: Option<String>,
     pub camera_make: Option<String>,
     pub camera_model: Option<String>,
+    /// EXIF `BodySerialNumber`, else the auxiliary `SerialNumber`. Many
+    /// cameras, Sony's among them, write neither.
+    pub camera_serial: Option<String>,
     pub lens_model: Option<String>,
     pub f_number: Option<f64>,
     pub exposure_time: Option<f64>,
@@ -714,6 +719,7 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
 
     if let Some(exif) = dict_dictionary(&props, key!(kCGImagePropertyExifDictionary)) {
         meta.lens_model = dict_string(exif, key!(kCGImagePropertyExifLensModel));
+        meta.camera_serial = dict_string(exif, key!(kCGImagePropertyExifBodySerialNumber));
         meta.f_number = dict_f64(exif, key!(kCGImagePropertyExifFNumber));
         meta.exposure_time = dict_f64(exif, key!(kCGImagePropertyExifExposureTime));
         meta.focal_length = dict_f64(exif, key!(kCGImagePropertyExifFocalLength));
@@ -723,6 +729,10 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
             .and_then(|v| Flash::from_exif(v as u32));
         meta.white_balance = dict_f64(exif, key!(kCGImagePropertyExifWhiteBalance))
             .and_then(|v| WhiteBalance::from_exif(v as u32));
+    }
+    if meta.camera_serial.is_none() {
+        meta.camera_serial = dict_dictionary(&props, key!(kCGImagePropertyExifAuxDictionary))
+            .and_then(|aux| dict_string(aux, key!(kCGImagePropertyExifAuxSerialNumber)));
     }
 
     if let Some(gps) = dict_dictionary(&props, key!(kCGImagePropertyGPSDictionary)) {

@@ -83,10 +83,8 @@ pub enum Command {
     AddPresetFolder(PresetFolderParams),
     #[serde(rename = "export")]
     Export(ExportParams),
-    #[serde(rename = "geotag.from_gpx")]
-    GeotagFromGpx(GeotagParams),
-    #[serde(rename = "geotag.from_icloud")]
-    GeotagFromICloud(ICloudGeotagParams),
+    #[serde(rename = "geotag.import")]
+    ImportGpsTracks(GeotagParams),
     #[serde(rename = "geotag.clear")]
     ClearGeotags,
     #[serde(rename = "edit.undo")]
@@ -582,8 +580,7 @@ fn apply_to_record(
         | Command::SavePreset(_)
         | Command::AddPresetFolder(_)
         | Command::Export(_)
-        | Command::GeotagFromGpx(_)
-        | Command::GeotagFromICloud(_)
+        | Command::ImportGpsTracks(_)
         | Command::ClearGeotags
         | Command::Undo
         | Command::Redo => return Err(CommandError::NeedsApp),
@@ -922,30 +919,17 @@ pub struct ExportParams {
     pub settings: Option<ExportSettings>,
 }
 
-/// Locate the open folder's photos on a GPX track.
+/// Locate the photos in the open folder and its subfolders on GPX tracks.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct GeotagParams {
-    /// The GPX file.
-    pub gpx: PathBuf,
-    /// Seconds the camera's clock ran ahead of UTC: its UTC offset, such as
-    /// 32400 for +09:00. Used only when the GPX file carries no LightRemote
-    /// clock data, which it needs then.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub camera_minus_utc_s: Option<i64>,
-}
-
-/// Locate the open folder's photos on LightRemote's GPX tracks for a range
-/// of days, read from its iCloud Drive folder.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ICloudGeotagParams {
-    /// The first day, `YYYY-MM-DD`.
-    pub first: chrono::NaiveDate,
-    /// The last day, on or after `first` and at most 365 days later.
-    pub last: chrono::NaiveDate,
-    /// As in [`GeotagParams`]: needed only when the tracks carry no
-    /// LightRemote clock data.
+    /// GPX files, and folders whose GPX files, to any depth, are read too.
+    pub paths: Vec<PathBuf>,
+    /// Seconds every camera's clock ran ahead of UTC: its time zone setting,
+    /// such as 32400 for +09:00, or 36000 for +09:00 with daylight saving
+    /// on. Without it, each camera takes the setting the import dialog last
+    /// remembered for it. LightRemote's clock measurements, where a track
+    /// has them, win over both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_minus_utc_s: Option<i64>,
 }
@@ -972,8 +956,7 @@ pub enum Blocker {
     WbPicker,
     TouchUp,
     PresetName,
-    GeotagOffset,
-    GeotagICloud,
+    GeotagImport,
     Settings,
 }
 
@@ -1126,8 +1109,7 @@ impl Command {
             SavePreset(_) => "preset.save",
             AddPresetFolder(_) => "preset.add_folder",
             Export(_) => "export",
-            GeotagFromGpx(_) => "geotag.from_gpx",
-            GeotagFromICloud(_) => "geotag.from_icloud",
+            ImportGpsTracks(_) => "geotag.import",
             ClearGeotags => "geotag.clear",
             Undo => "edit.undo",
             Redo => "edit.redo",
@@ -1141,8 +1123,9 @@ impl Command {
         match self {
             Rate(_) | Flag(_) | Label(_) | Rotate(_) | Score(_) | Develop(_) | Reset(_)
             | AutoTone(_) | Monochrome(_) | Crop(_) | AddMask(_) | SetMask(_) | ClearMasks(_)
-            | PasteSettings(_) | Preset(_) | GeotagFromGpx(_) | GeotagFromICloud(_)
-            | ClearGeotags | Undo | Redo => true,
+            | PasteSettings(_) | Preset(_) | ImportGpsTracks(_) | ClearGeotags | Undo | Redo => {
+                true
+            }
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
             | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | CopySettings(_)
             | SavePreset(_) | AddPresetFolder(_) | Export(_) => false,
@@ -1168,8 +1151,8 @@ impl Command {
             Export(p) => Some(&p.photos),
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
             | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | CopySettings(_)
-            | SavePreset(_) | AddPresetFolder(_) | GeotagFromGpx(_) | GeotagFromICloud(_)
-            | ClearGeotags | Undo | Redo => None,
+            | SavePreset(_) | AddPresetFolder(_) | ImportGpsTracks(_) | ClearGeotags | Undo
+            | Redo => None,
         }
     }
 
@@ -1267,22 +1250,18 @@ impl Command {
                 "Export with the form's settings, or with `settings` for this run.",
                 false,
             ),
-            GeotagFromGpx(_) => (
-                "Locate every photo in the open folder on the GPX track at `gpx`, by capture \
-                 time, and keep each location in the photo's sidecar; the photo files are \
-                 not changed. A photo whose file has GPS keeps its own. A GPX file without \
-                 LightRemote clock data needs `camera_minus_utc_s`. Desktop only.",
-                false,
-            ),
-            GeotagFromICloud(_) => (
-                "Like geotag.from_gpx, with LightRemote's GPX tracks for the days `first` to \
-                 `last` (YYYY-MM-DD), plus the day either side, from its iCloud Drive folder. \
-                 Days still in iCloud are downloaded first, waiting up to a minute; a day \
-                 with no track is reported, not an error. macOS only.",
+            ImportGpsTracks(_) => (
+                "Locate every photo in the open folder and its subfolders on the GPX tracks in `paths`, files or \
+                 folders read to any depth, joined into one track, by capture time, and keep \
+                 each location in the photo's sidecar; the photo files are not changed. A \
+                 photo whose file has GPS keeps its own. Files still in iCloud are downloaded \
+                 first, waiting up to a minute. Each photo's camera clock comes from \
+                 LightRemote's measurements in the tracks, else `camera_minus_utc_s`, else \
+                 its camera's remembered time zone. Desktop only.",
                 false,
             ),
             ClearGeotags => (
-                "Remove the GPX locations from the open folder's photos.",
+                "Remove the GPX locations from the photos in the open folder and its subfolders.",
                 false,
             ),
             Undo => (
@@ -1411,14 +1390,12 @@ impl Command {
                 path: PathBuf::from("/Users/me/Presets"),
             }),
             Command::Export(ExportParams::default()),
-            Command::GeotagFromGpx(GeotagParams {
-                gpx: PathBuf::from("/Users/me/Pictures/Trip/2026-11-08.gpx"),
+            Command::ImportGpsTracks(GeotagParams {
+                paths: vec![
+                    PathBuf::from("/Users/me/Pictures/Trip/2026-11-08.gpx"),
+                    PathBuf::from("/Users/me/Tracks"),
+                ],
                 camera_minus_utc_s: Some(32400),
-            }),
-            Command::GeotagFromICloud(ICloudGeotagParams {
-                first: chrono::NaiveDate::from_ymd_opt(2026, 11, 7).unwrap_or_default(),
-                last: chrono::NaiveDate::from_ymd_opt(2026, 11, 9).unwrap_or_default(),
-                camera_minus_utc_s: None,
             }),
             Command::ClearGeotags,
             Command::Undo,

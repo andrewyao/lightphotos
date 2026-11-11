@@ -191,7 +191,7 @@ enum JobResult {
     Preview(PathBuf, u32, Generation, Result<DecodedImage, String>),
     Full(PathBuf, Generation, Result<DecodedImage, String>),
     Thumb(PathBuf, u32, Result<Arc<DecodedImage>, String>),
-    Exif(PathBuf, ImageMetadata),
+    Exif(PathBuf, Box<ImageMetadata>),
     Meta(PathBuf, image_decode::SortMeta),
     /// `None` when the bake panicked.
     Baked(PathBuf, u32, u64, Option<BakedThumb>),
@@ -434,7 +434,7 @@ impl WebDecoder {
     /// Report metadata that needs no parse, such as the file facts of a
     /// file that could not be read.
     pub fn finish_exif(&self, path: PathBuf, meta: ImageMetadata) {
-        let _ = self.res_tx.send(JobResult::Exif(path, meta));
+        let _ = self.res_tx.send(JobResult::Exif(path, Box::new(meta)));
     }
 
     /// How many threads can decode, so a batch can size how much it keeps
@@ -619,7 +619,7 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
                 image_decode::read_metadata(&path)
             }))
             .unwrap_or_default();
-            JobResult::Exif(path, m)
+            JobResult::Exif(path, Box::new(m))
         }
         Job::Meta(path) => {
             let t = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -641,7 +641,7 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
             JobResult::WebExport(id, path, job.run())
         }
         #[cfg(target_arch = "wasm32")]
-        Job::WebExif(job) => JobResult::Exif(job.path.clone(), job.run()),
+        Job::WebExif(job) => JobResult::Exif(job.path.clone(), Box::new(job.run())),
         #[cfg(target_arch = "wasm32")]
         Job::WebMeasure(job) => JobResult::WebMeasure(job.path.clone(), job.run()),
     }
@@ -698,7 +698,7 @@ mod panic_recovery {
                 e.path.clone(),
                 Err("export panicked".to_string()),
             )),
-            Job::WebExif(e) => Some(JobResult::Exif(e.path.clone(), e.failed())),
+            Job::WebExif(e) => Some(JobResult::Exif(e.path.clone(), Box::new(e.failed()))),
             Job::WebMeasure(m) => Some(JobResult::WebMeasure(
                 m.path.clone(),
                 Err("decoder panicked".to_string()),
@@ -2011,7 +2011,7 @@ impl Loader {
                 }
                 JobResult::Exif(path, m) => {
                     self.exif_inflight.remove(&path);
-                    exifs.push((path, m));
+                    exifs.push((path, *m));
                 }
                 JobResult::Meta(path, t) => {
                     self.meta_inflight.remove(&path);

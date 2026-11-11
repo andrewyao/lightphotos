@@ -12,7 +12,7 @@ use super::loupe::{
 };
 use super::*;
 use crate::decode::image_decode::{Flash, ImageMetadata, WhiteBalance};
-use crate::geotag::{GeoSource, GeoTag};
+use crate::geotag::{ClockSource, GeoSource, GeoTag};
 
 /// One heading and its rows of (label, value). Rows exist only for fields
 /// the photo has. `link` is a map URL, shown under the location rows.
@@ -34,11 +34,15 @@ fn info_groups(
     let t = t();
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
     let m = |f: fn(&ImageMetadata) -> Option<String>| meta.and_then(f);
-    let (gps, source) = match meta.and_then(|m| m.gps) {
-        Some(gps) => (Some(gps), None),
+    let (gps, source, clock) = match meta.and_then(|m| m.gps) {
+        Some(gps) => (Some(gps), None, None),
         None => match stored.and_then(|s| Some((s.gps()?, s))) {
-            Some((gps, s)) => (Some(gps), Some(source_text(&s.source))),
-            None => (None, None),
+            Some((gps, s)) => (
+                Some(gps),
+                Some(source_text(&s.source)),
+                Some(clock_text(&s.source)),
+            ),
+            None => (None, None, None),
         },
     };
     let groups = [
@@ -93,6 +97,7 @@ fn info_groups(
                     gps.and_then(|g| g.alt).map(format_altitude),
                 ),
                 (t.info_location_source, source),
+                (t.info_camera_clock, clock),
             ],
         ),
     ];
@@ -114,6 +119,22 @@ fn info_groups(
 fn source_text(source: &GeoSource) -> String {
     match source {
         GeoSource::Gpx { file_name, .. } => (t().info_from_gpx)(file_name),
+    }
+}
+
+/// The camera clock offset a GPX match used, and where it came from when
+/// the record says.
+fn clock_text(source: &GeoSource) -> String {
+    let GeoSource::Gpx {
+        camera_minus_utc_s,
+        clock,
+        ..
+    } = source;
+    let offset = crate::geotag::format_utc_offset(*camera_minus_utc_s);
+    match clock {
+        Some(ClockSource::Measured) => (t().info_clock_measured)(&offset),
+        Some(ClockSource::Setting) => (t().info_clock_setting)(&offset),
+        None => format!("UTC{offset}"),
     }
 }
 
@@ -361,8 +382,27 @@ mod tests {
                     t().info_location_source,
                     "GPX \u{b7} 2026-11-08.gpx".to_string()
                 ),
+                (t().info_camera_clock, "UTC+09:00".to_string()),
             ]
         );
+        for (clock, text) in [
+            (ClockSource::Measured, (t().info_clock_measured)("+09:00")),
+            (ClockSource::Setting, (t().info_clock_setting)("+09:00")),
+        ] {
+            let mut tagged = stored.clone();
+            tagged.source = GeoSource::Gpx {
+                file_name: "2026-11-08.gpx".into(),
+                camera_minus_utc_s: 32400,
+                clock: Some(clock),
+            };
+            let (rows, _) = location(info_groups(
+                Path::new("a.jpg"),
+                Some(&no_gps),
+                Some(&tagged),
+            ))
+            .unwrap();
+            assert_eq!(rows.last(), Some(&(t().info_camera_clock, text)));
+        }
         assert!(link.is_some_and(|l| l.contains("35.500000,139.250000")));
 
         let file_gps = ImageMetadata {

@@ -648,6 +648,7 @@ fn fill_from_rawler(meta: &mut ImageMetadata, raw: &rawler::decoders::RawMetadat
     let exif = &raw.exif;
     meta.camera_make = non_empty(&raw.make);
     meta.camera_model = non_empty(&raw.model);
+    meta.camera_serial = exif.serial_number.as_deref().and_then(non_empty);
     meta.lens_model = exif
         .lens_model
         .as_deref()

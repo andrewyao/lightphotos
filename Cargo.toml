@@ -176,7 +176,9 @@ objc2 = "0.6.4"
 # Native menu bar (`shell/menu.rs`).
 muda = { version = "0.20", default-features = false }
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSArray", "NSURL", "NSEnumerator", "NSObject", "NSThread", "NSFileManager", "NSError", "NSLocale", "NSDictionary", "NSValue"] }
-objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSResponder"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSResponder", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow", "objc2-uniform-type-identifiers"] }
+# The GPS-track picker's file types (`shell/dialog.rs`).
+objc2-uniform-type-identifiers = { version = "0.3.2", default-features = false, features = ["std", "UTType"] }
 objc2-core-graphics = "0.3.2"
 objc2-core-foundation = { version = "0.3.2", features = ["CFURL", "CFString", "CFBase", "CFData", "CFDictionary", "CFArray"] }
 objc2-image-io = { version = "0.3.2", features = ["CGImageSource", "CGImageDestination"] }

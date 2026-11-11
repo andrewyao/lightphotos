@@ -250,6 +250,7 @@ fn fill_from_exif(meta: &mut ImageMetadata, exif: &exif::Exif) {
 
     meta.camera_make = text(Tag::Make);
     meta.camera_model = text(Tag::Model);
+    meta.camera_serial = text(Tag::BodySerialNumber);
     meta.lens_model = text(Tag::LensModel);
     meta.f_number = number(Tag::FNumber);
     meta.exposure_time = number(Tag::ExposureTime);

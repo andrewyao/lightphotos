@@ -6931,6 +6931,7 @@ Used by:
   objc2-image-io 0.3.2
   objc2-metal 0.3.2
   objc2-quartz-core 0.3.2
+  objc2-uniform-type-identifiers 0.3.2
   objc2-vision 0.3.2
   objc2 0.5.2
   objc2 0.6.4

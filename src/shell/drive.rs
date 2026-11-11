@@ -35,9 +35,10 @@
 //! With no photo or folder after the flags, the run starts on the home page.
 //! Settings start empty, so that is a first launch. Catalogs go under
 //! `--catalog-dir <dir>`, or under the run's scratch settings directory,
-//! never `~/Pictures`. `--icloud-gpx-dir <dir>` stands a folder in for
-//! LightRemote's iCloud GPX folder; a day there that never downloads is
-//! given up on after 8 s, inside `idle`'s 30.
+//! never `~/Pictures`. Pickers answer cancelled, except that each
+//! `--gps-pick <path>` is a file or folder the GPS-track picker answers
+//! with. A GPX file that never downloads from iCloud is given up on after
+//! 8 s, inside `idle`'s 30.
 //!
 //! Keys cannot take the `WindowEvent::KeyboardInput` road: winit's `KeyEvent`
 //! has a private field, so nothing outside winit can build one. The driver
@@ -64,6 +65,8 @@ use crate::renderer::Renderer;
 use crate::shell::macos_delegate::UserEvent;
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a run waits for iCloud downloads, well inside `IDLE_TIMEOUT`.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(8);
 const DEFAULT_SIZE: (u32, u32) = (1200, 800);
 /// The gap between two click steps. egui counts a click within 0.3 s of the
 /// last one as a double click and within 0.6 s of the one before as a
@@ -85,8 +88,8 @@ pub(crate) struct Args {
     /// Where the run keeps its catalogs, in place of `~/Pictures/LightPhotos`.
     /// Without one they go under the run's scratch settings directory.
     catalog_dir: Option<PathBuf>,
-    /// Stands in for LightRemote's iCloud GPX folder.
-    icloud_gpx_dir: Option<PathBuf>,
+    /// What the GPS-track picker answers with.
+    gps_picks: Vec<PathBuf>,
 }
 
 impl Args {
@@ -103,7 +106,7 @@ impl Args {
         let mut out_dir = None;
         let mut target = None;
         let mut catalog_dir = None;
-        let mut icloud_gpx_dir = None;
+        let mut gps_picks = Vec::new();
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -116,8 +119,10 @@ impl Args {
                 "--catalog-dir" => {
                     catalog_dir = Some(args.next().ok_or("--catalog-dir needs a directory")?);
                 }
-                "--icloud-gpx-dir" => {
-                    icloud_gpx_dir = Some(args.next().ok_or("--icloud-gpx-dir needs a directory")?);
+                "--gps-pick" => {
+                    gps_picks.push(PathBuf::from(
+                        args.next().ok_or("--gps-pick needs a file or folder")?,
+                    ));
                 }
                 _ if target.is_none() => target = Some(arg),
                 _ => return Err(format!("unexpected argument: {arg}")),
@@ -139,7 +144,7 @@ impl Args {
             out_dir,
             target,
             catalog_dir: catalog_dir.map(PathBuf::from),
-            icloud_gpx_dir: icloud_gpx_dir.map(PathBuf::from),
+            gps_picks,
         }))
     }
 }
@@ -491,9 +496,8 @@ pub(crate) fn run(args: Args) -> i32 {
             .clone()
             .unwrap_or_else(|| config_dir.join("catalogs")),
     );
-    if let Some(dir) = args.icloud_gpx_dir.clone() {
-        crate::app::override_icloud_dir(dir);
-    }
+    crate::app::override_download_timeout(DOWNLOAD_TIMEOUT);
+    crate::shell::dialog::answer_gps_pickers(args.gps_picks.clone());
     crate::shell::dialog::cancel_all_pickers();
     crate::i18n::init();
 
@@ -1119,11 +1123,11 @@ quit
             .unwrap();
         assert_eq!(parsed.catalog_dir, Some(dir.clone()));
         assert!(args(&["--drive", &s, "--catalog-dir"]).is_err());
-        let parsed = args(&["--drive", &s, "--icloud-gpx-dir", &d])
+        let parsed = args(&["--drive", &s, "--gps-pick", &d, "--gps-pick", &s])
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.icloud_gpx_dir, Some(dir.clone()));
-        assert!(args(&["--drive", &s, "--icloud-gpx-dir"]).is_err());
+        assert_eq!(parsed.gps_picks, [dir.clone(), PathBuf::from(&s)]);
+        assert!(args(&["--drive", &s, "--gps-pick"]).is_err());
 
         assert!(args(&["--drive"]).is_err());
         let parsed = args(&["--drive", &s]).unwrap().unwrap();

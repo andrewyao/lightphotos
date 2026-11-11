@@ -829,95 +829,70 @@ pub struct Strings {
     pub scoring_stopped: fn(usize, usize) -> String,
     pub scored_n: fn(usize) -> String,
     pub scored_partial: fn(usize, usize) -> String,
-    pub geotag_from_gpx: &'static str,
-    pub geotag_from_gpx_tip: &'static str,
+    pub import_gps_tracks: &'static str,
+    pub import_gps_tracks_tip: &'static str,
     pub clear_gpx_locations: &'static str,
     pub clear_gpx_locations_tip: &'static str,
-    pub gpx_picker_title: &'static str,
+    pub gps_picker_title: &'static str,
     pub gpx_filter_name: &'static str,
-    pub geotag_offset_title: &'static str,
-    pub geotag_offset_prompt: &'static str,
-    pub geotag_offset_label: &'static str,
-    pub geotag_offset_invalid: &'static str,
-    pub geotag_run: &'static str,
+    pub gps_import_title: &'static str,
+    pub gps_import_prompt: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only the macOS panel takes files and folders together"
+        )
+    )]
+    pub gps_choose: &'static str,
+    #[cfg_attr(
+        target_os = "macos",
+        allow(dead_code, reason = "the macOS panel takes files and folders together")
+    )]
+    pub gps_choose_files: &'static str,
+    #[cfg_attr(
+        target_os = "macos",
+        allow(dead_code, reason = "the macOS panel takes files and folders together")
+    )]
+    pub gps_choose_folder: &'static str,
+    pub gps_tracks: &'static str,
+    /// GPX files found, then how many of them are still in iCloud.
+    pub gps_files_found: fn(usize, usize) -> String,
+    pub gps_files_looking: &'static str,
+    pub camera_time_zone: &'static str,
+    pub camera_time_zone_hint: &'static str,
+    pub camera_unknown: &'static str,
+    pub camera_dst: &'static str,
+    /// The camera row's switch for "LightRemote measured this one".
+    pub camera_paired: &'static str,
+    pub cameras_reading: &'static str,
+    pub geotag_import: &'static str,
     pub geotag_busy: &'static str,
     pub geotag_running: &'static str,
-    /// Tagged, already had GPS, outside the track, ambiguous, no capture time.
-    pub geotag_done: fn(usize, usize, usize, usize, usize) -> String,
+    /// Tagged, already had GPS, outside the track, ambiguous, no capture
+    /// time, no camera time zone.
+    pub geotag_done: fn(usize, usize, usize, usize, usize, usize) -> String,
     pub geotag_read_failed: fn(&str) -> String,
+    pub geotag_no_tracks: &'static str,
     pub gpx_locations_cleared: fn(usize) -> String,
     pub info_location_source: &'static str,
     pub info_from_gpx: fn(&str) -> String,
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
-    )]
-    pub geotag_from_icloud: &'static str,
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
-    )]
-    pub geotag_from_icloud_tip: &'static str,
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
-    )]
-    pub icloud_title: &'static str,
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
-    )]
-    pub icloud_prompt: &'static str,
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
-    )]
-    pub icloud_from: &'static str,
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
-    )]
-    pub icloud_to: &'static str,
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
-    )]
-    pub icloud_reading_dates: &'static str,
-    pub icloud_range_invalid: &'static str,
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
-    )]
-    pub icloud_days: &'static str,
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
-    )]
-    pub icloud_day_on_mac: &'static str,
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
-    )]
-    pub icloud_day_in_icloud: &'static str,
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
-    )]
-    pub icloud_day_missing: &'static str,
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "iCloud geotagging's form is macOS-only")
-    )]
-    pub icloud_adjacent_hint: &'static str,
-    pub icloud_unavailable: &'static str,
+    pub info_camera_clock: &'static str,
+    /// The offset, such as `+09:00`.
+    pub info_clock_measured: fn(&str) -> String,
+    pub info_clock_setting: fn(&str) -> String,
     pub icloud_downloading: fn(usize) -> String,
-    /// First and last day, `YYYY-MM-DD`.
-    pub icloud_no_tracks: fn(&str, &str) -> String,
-    pub geotag_days_missing: fn(&str) -> String,
-    pub geotag_days_not_downloaded: fn(&str) -> String,
-    pub geotag_days_downloaded: fn(&str) -> String,
+    /// How many GPX files.
+    pub geotag_files_not_downloaded: fn(usize) -> String,
+    pub geotag_files_downloaded: fn(usize) -> String,
     /// File name, then why.
     pub geotag_file_skipped: fn(&str, &str) -> String,
+    pub geotag_too_many: fn(usize) -> String,
+    pub geotag_too_deep: fn(usize) -> String,
+    /// How many files and folders were looked at.
+    pub geotag_too_big: fn(usize) -> String,
+    /// Camera, then how far off: hours and minutes.
+    pub geotag_measured_off: fn(&str, u64, u64) -> String,
     pub touch_up_limit: &'static str,
     pub mask_limit: &'static str,
     pub masks: &'static str,

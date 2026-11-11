@@ -188,148 +188,124 @@ pub(super) fn preset_name_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput)
     }
 }
 
-/// Asks the camera's UTC offset for a GPX file with no clock data, in the
-/// preset prompt's shape. The field starts with a guess (`App::offset_guess`).
+/// "Import GPS Tracks…": what was chosen and how many GPX files it holds,
+/// a button to choose more, then a row per camera found among the folder's
+/// photos: the camera menu's UTC offset, its daylight saving switch and
+/// whether LightRemote was paired with it, as remembered for that camera.
+/// The lists scroll, so a long one keeps the footer on screen.
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn geotag_offset_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
-    let Some((text, valid)) = app.geotag_prompt() else {
+pub(super) fn gps_import_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
+    use crate::app::CameraClock;
+    use crate::app::PickKind;
+    use crate::geotag::{CameraZone, ZONES};
+    const LIST_HEIGHT: f32 = 160.0;
+    let Some(view) = app.import_dialog() else {
         return;
     };
     let t = t();
-    let mut text = text.to_string();
-    let resp = form::dialog(ui.ctx(), "geotag_offset", form::DIALOG_WIDTH, |ui| {
-        form::title(ui, t.geotag_offset_title);
-        ui.label(t.geotag_offset_prompt);
-        let form = Form::new(ui, &[t.geotag_offset_label]);
-        let mut field = None;
-        form.section(ui, "", |ui| {
-            form.row(ui, t.geotag_offset_label, |ui| {
-                field = Some(
-                    ui.add(
-                        egui::TextEdit::singleline(&mut text)
-                            .hint_text("+09:00")
-                            .char_limit(8)
-                            .desired_width(f32::INFINITY),
-                    ),
-                );
-                if !valid {
-                    form::error(ui, t.geotag_offset_invalid);
+    let resp = form::dialog(ui.ctx(), "gps_import", form::DIALOG_WIDTH, |ui| {
+        form::title(ui, t.gps_import_title);
+        ui.label(t.gps_import_prompt);
+        let form = Form::new(ui, &[t.gps_tracks, t.camera_time_zone]);
+        form.section(ui, t.gps_tracks, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("gps_sources")
+                .max_height(LIST_HEIGHT)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for source in view.sources {
+                        ui.label(source.display().to_string());
+                    }
+                });
+            match view.files {
+                None => form::hint(ui, t.gps_files_looking),
+                Some((0, _)) => form::error(ui, t.geotag_no_tracks),
+                Some((n, in_icloud)) => form::hint(ui, &(t.gps_files_found)(n, in_icloud)),
+            }
+            ui.horizontal(|ui| {
+                #[cfg(target_os = "macos")]
+                let pickers = [(t.gps_choose, PickKind::Any)];
+                #[cfg(not(target_os = "macos"))]
+                let pickers = [
+                    (t.gps_choose_files, PickKind::Files),
+                    (t.gps_choose_folder, PickKind::Folder),
+                ];
+                for (label, kind) in pickers {
+                    if ui.button(label).clicked() {
+                        out.actions.push(UiAction::AddGpsTracks(kind));
+                    }
                 }
             });
         });
-        let mut entered = false;
-        if let Some(field) = field {
-            if field.changed() {
-                out.actions
-                    .push(UiAction::SetGeotagOffsetText(text.clone()));
-            }
-            // As in `preset_name_modal`: read Enter before asking for focus.
-            entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if !entered && !field.has_focus() {
-                field.request_focus();
-            }
-        }
-        let buttons = [
-            Button::new(t.cancel, Role::Cancel),
-            Button {
-                enabled: valid,
-                ..Button::new(t.geotag_run, Role::Primary)
-            },
-        ];
-        match form::footer(ui, &buttons) {
-            Some(Role::Cancel) => out.actions.push(UiAction::CancelGeotagOffset),
-            Some(_) => out.actions.push(UiAction::CommitGeotagOffset),
-            None if entered => out.actions.push(UiAction::CommitGeotagOffset),
-            None => {}
-        }
-    });
-    if resp.should_close() {
-        out.actions.push(UiAction::CancelGeotagOffset);
-    }
-}
-
-/// "Geotag from iCloud…": a From and a To date, defaulting to the folder's
-/// capture dates, over a list of the picked days and whether LightRemote's
-/// track for each is on this Mac, in iCloud or missing.
-#[cfg(target_os = "macos")]
-pub(super) fn geotag_icloud_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
-    use crate::app::DayState;
-    let Some(view) = app.icloud_form() else {
-        return;
-    };
-    let t = t();
-    let (mut from, mut to) = (view.from.to_string(), view.to.to_string());
-    let resp = form::dialog(ui.ctx(), "geotag_icloud", form::DIALOG_WIDTH, |ui| {
-        form::title(ui, t.icloud_title);
-        ui.label(t.icloud_prompt);
-        let form = Form::new(ui, &[t.icloud_from, t.icloud_to, "0000-00-00"]);
-        let mut changed = false;
-        form.section(ui, "", |ui| {
-            for (label, text) in [(t.icloud_from, &mut from), (t.icloud_to, &mut to)] {
-                form.row(ui, label, |ui| {
-                    let field = egui::TextEdit::singleline(text)
-                        .hint_text("2026-11-08")
-                        .char_limit(10)
-                        .desired_width(f32::INFINITY);
-                    changed |= ui.add(field).changed();
-                });
-            }
-            if view.reading_dates {
-                form::hint(ui, t.icloud_reading_dates);
-            } else if view.days.is_none() {
-                form::error(ui, t.icloud_range_invalid);
-            }
-        });
-        if changed {
-            out.actions.push(UiAction::SetICloudDates {
-                from: from.clone(),
-                to: to.clone(),
-            });
-        }
-        if let Some(days) = view.days {
-            let row = ui.text_style_height(&egui::TextStyle::Body);
+        form.section(ui, t.camera_time_zone, |ui| {
+            let Some(cameras) = view.cameras else {
+                form::hint(ui, t.cameras_reading);
+                return;
+            };
             egui::ScrollArea::vertical()
-                .max_height(row * ICLOUD_ROWS)
+                .id_salt("gps_cameras")
+                .max_height(LIST_HEIGHT * 2.0)
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    form.section(ui, t.icloud_days, |ui| {
-                        for d in days {
-                            let state = match d.state {
-                                DayState::OnMac => t.icloud_day_on_mac,
-                                DayState::InICloud => t.icloud_day_in_icloud,
-                                DayState::Missing => t.icloud_day_missing,
-                            };
-                            form.row(ui, &crate::app::day(d.date), |ui| match d.state {
-                                DayState::Missing => form::error(ui, state),
-                                _ => {
-                                    ui.label(state);
-                                }
-                            });
-                        }
-                    });
+                    for (row, (camera, clock)) in cameras.iter().enumerate() {
+                        let label = crate::app::camera_label(camera);
+                        form.row(ui, &label, |ui| {
+                            let mut picked = *clock;
+                            egui::ComboBox::from_id_salt(("camera_zone", row))
+                                .width(ui.available_width())
+                                .selected_text(zone_text(clock.zone.utc_offset_min))
+                                .show_ui(ui, |ui| {
+                                    for (minutes, _) in ZONES {
+                                        ui.selectable_value(
+                                            &mut picked.zone.utc_offset_min,
+                                            *minutes,
+                                            zone_text(*minutes),
+                                        );
+                                    }
+                                });
+                            ui.checkbox(&mut picked.zone.dst, t.camera_dst);
+                            ui.checkbox(&mut picked.paired, t.camera_paired);
+                            if picked == *clock {
+                                return;
+                            }
+                            let zone = picked.zone;
+                            if let Some(zone) = CameraZone::new(zone.utc_offset_min, zone.dst) {
+                                let clock = CameraClock { zone, ..picked };
+                                out.actions.push(UiAction::SetCameraClock { row, clock });
+                            }
+                        });
+                    }
                 });
-            form::hint(ui, t.icloud_adjacent_hint);
-        }
+            form::hint(ui, t.camera_time_zone_hint);
+        });
         let buttons = [
             Button::new(t.cancel, Role::Cancel),
             Button {
-                enabled: view.days.is_some(),
-                ..Button::new(t.geotag_run, Role::Primary)
+                enabled: view.files.is_some_and(|(n, _)| n > 0) && view.cameras.is_some(),
+                ..Button::new(t.geotag_import, Role::Primary)
             },
         ];
         match form::footer(ui, &buttons) {
-            Some(Role::Cancel) => out.actions.push(UiAction::CancelICloud),
-            Some(_) => out.actions.push(UiAction::CommitICloud),
+            Some(Role::Cancel) => out.actions.push(UiAction::CancelImport),
+            Some(_) => out.actions.push(UiAction::CommitImport),
             None => {}
         }
     });
     if resp.should_close() {
-        out.actions.push(UiAction::CancelICloud);
+        out.actions.push(UiAction::CancelImport);
     }
 }
 
-/// How many day rows the iCloud form shows before it scrolls.
-#[cfg(target_os = "macos")]
-const ICLOUD_ROWS: f32 = 10.0;
+/// A camera menu's offset as `UTC+09:00 Tokyo, Seoul`.
+#[cfg(not(target_arch = "wasm32"))]
+fn zone_text(minutes: i32) -> String {
+    let offset = crate::geotag::format_utc_offset(i64::from(minutes) * 60);
+    let cities = crate::geotag::ZONES
+        .iter()
+        .find(|(m, _)| *m == minutes)
+        .map_or("", |(_, c)| c);
+    format!("UTC{offset} {cities}")
+}
 
 /// Names a new browser catalog, in the preset prompt's shape. Native New
 /// Catalog… is a save dialog instead.
