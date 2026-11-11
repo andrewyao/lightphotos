@@ -515,6 +515,10 @@ fn copy_group_checkboxes(
 /// the RAW tone curve as a checkbox. Opened
 /// from the landing page, the header, or Cmd+,; Close, Esc, or a backdrop click
 /// dismisses it.
+/// The height Settings keeps for its title, footer and margins, before
+/// scaling; the sections between them get the rest of the window.
+const SETTINGS_CHROME: f32 = 220.0;
+
 pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.show_settings() {
         return;
@@ -532,60 +536,75 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
             labels.push(t.settings_version);
             labels.push(t.settings_updates);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if app.comfy.enabled() {
+            labels.extend([t.comfy_server, t.comfy_models, t.comfy_features]);
+        }
         let form = Form::new(ui, &labels);
-        form.section(ui, t.form_general, |ui| {
-            form.button_row(ui, t.settings_theme, |ui| {
-                let themes = [
-                    (theme::Theme::Dark, t.theme_dark, None),
-                    (theme::Theme::Light, t.theme_light, None),
-                    (theme::Theme::Medium, t.theme_medium, None),
-                ];
-                let current = theme::current(ui.ctx());
-                let picked = form::segmented(ui, &themes, current);
-                if let Some(choice) = picked.filter(|&c| c != current) {
-                    out.actions.push(UiAction::SetTheme(choice));
-                }
-            });
-            form.row(ui, t.settings_language, |ui| {
-                // Each language is named in itself, so a reader of any of
-                // them can find their own.
-                let lang = crate::i18n::lang();
-                for choice in Lang::ALL {
-                    if ui.radio(lang == choice, choice.name()).clicked() && lang != choice {
-                        out.actions.push(UiAction::SetLanguage(choice));
-                    }
-                }
-            });
-            if let Some(version) = version {
-                form.row(ui, t.settings_version, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(version.to_string());
-                        if app.update_available().is_some()
-                            && super::update_link(ui, t.update_available).clicked()
-                        {
-                            out.actions.push(UiAction::OpenDownloads);
+        // The sections scroll under the title and over the footer, so Close
+        // stays in reach when ComfyUI's rows outgrow a short window.
+        let room = ui.ctx().content_rect().height() - font_size::px(ui.style(), SETTINGS_CHROME);
+        egui::ScrollArea::vertical()
+            .max_height(room.max(font_size::px(ui.style(), SETTINGS_CHROME)))
+            .show(ui, |ui| {
+                // Clear of the scroll bar, which draws over the right edge.
+                ui.set_width(ui.available_width() - ui.spacing().scroll.bar_width);
+                form.section(ui, t.form_general, |ui| {
+                    form.button_row(ui, t.settings_theme, |ui| {
+                        let themes = [
+                            (theme::Theme::Dark, t.theme_dark, None),
+                            (theme::Theme::Light, t.theme_light, None),
+                            (theme::Theme::Medium, t.theme_medium, None),
+                        ];
+                        let current = theme::current(ui.ctx());
+                        let picked = form::segmented(ui, &themes, current);
+                        if let Some(choice) = picked.filter(|&c| c != current) {
+                            out.actions.push(UiAction::SetTheme(choice));
                         }
                     });
-                });
-                form.row(ui, t.settings_updates, |ui| {
-                    let mut on = app.update_check_on();
-                    if ui.checkbox(&mut on, t.check_updates).changed() {
-                        out.actions.push(UiAction::SetUpdateCheck(on));
+                    form.row(ui, t.settings_language, |ui| {
+                        // Each language is named in itself, so a reader of any of
+                        // them can find their own.
+                        let lang = crate::i18n::lang();
+                        for choice in Lang::ALL {
+                            if ui.radio(lang == choice, choice.name()).clicked() && lang != choice {
+                                out.actions.push(UiAction::SetLanguage(choice));
+                            }
+                        }
+                    });
+                    if let Some(version) = version {
+                        form.row(ui, t.settings_version, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(version.to_string());
+                                if app.update_available().is_some()
+                                    && super::update_link(ui, t.update_available).clicked()
+                                {
+                                    out.actions.push(UiAction::OpenDownloads);
+                                }
+                            });
+                        });
+                        form.row(ui, t.settings_updates, |ui| {
+                            let mut on = app.update_check_on();
+                            if ui.checkbox(&mut on, t.check_updates).changed() {
+                                out.actions.push(UiAction::SetUpdateCheck(on));
+                            }
+                            form::hint(ui, t.check_updates_hint);
+                        });
                     }
-                    form::hint(ui, t.check_updates_hint);
                 });
-            }
-        });
-        #[cfg(target_os = "macos")]
-        form.section(ui, t.develop, |ui| {
-            form.row(ui, t.settings_raw, |ui| {
-                let mut on = app.apple_tone_curve();
-                if ui.checkbox(&mut on, t.apple_tone_curve).changed() {
-                    out.actions.push(UiAction::SetAppleToneCurve(on));
-                }
-                form::hint(ui, t.apple_tone_curve_hint);
+                #[cfg(target_os = "macos")]
+                form.section(ui, t.develop, |ui| {
+                    form.row(ui, t.settings_raw, |ui| {
+                        let mut on = app.apple_tone_curve();
+                        if ui.checkbox(&mut on, t.apple_tone_curve).changed() {
+                            out.actions.push(UiAction::SetAppleToneCurve(on));
+                        }
+                        form::hint(ui, t.apple_tone_curve_hint);
+                    });
+                });
+                #[cfg(not(target_arch = "wasm32"))]
+                comfy_settings(ui, app, &form, out);
             });
-        });
         if form::footer(ui, &[Button::new(t.close, Role::Primary)]).is_some() {
             out.actions.push(UiAction::CloseSettings);
         }
@@ -593,6 +612,118 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     if resp.should_close() {
         out.actions.push(UiAction::CloseSettings);
     }
+}
+
+/// A file size for a download button: gigabytes to one decimal, or whole
+/// megabytes under one.
+#[cfg(not(target_arch = "wasm32"))]
+fn file_size(bytes: u64) -> String {
+    const GB: f64 = 1e9;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else {
+        format!("{:.0} MB", b / 1e6)
+    }
+}
+
+/// Settings ▸ ComfyUI: the switch that turns every ComfyUI feature on, and
+/// under it the server, the models folder, and each feature with the model
+/// files it needs. Off, nothing else shows and nothing is contacted.
+#[cfg(not(target_arch = "wasm32"))]
+fn comfy_settings(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameOutput) {
+    use crate::app::ModelState;
+    let t = t();
+    let comfy = &app.comfy;
+    let mut push = |action: ComfyAction| out.actions.push(UiAction::Comfy(action));
+    form.section(ui, "ComfyUI", |ui| {
+        form.row(ui, "", |ui| {
+            let mut on = comfy.enabled();
+            if ui.checkbox(&mut on, t.comfy_enable).changed() {
+                push(ComfyAction::SetEnabled(on));
+            }
+            form::hint(ui, t.comfy_enable_hint);
+        });
+        if !comfy.enabled() {
+            return;
+        }
+        form.row(ui, t.comfy_server, |ui| {
+            let mut text = comfy.server_text().to_string();
+            let field = ui.add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY));
+            if field.changed() {
+                push(ComfyAction::EditServer(text));
+            }
+            if field.lost_focus() {
+                push(ComfyAction::CommitServer);
+            }
+            form::hint(ui, t.comfy_server_hint);
+        });
+        form.button_row(ui, t.comfy_models, |ui| {
+            if form::button(ui, &Button::new(t.comfy_choose, Role::Cancel)).clicked() {
+                push(ComfyAction::ChooseModelsFolder);
+            }
+            match comfy.models_dir() {
+                Some(dir) => ui.label(dir.display().to_string()),
+                None => ui.label(egui::RichText::new(t.comfy_models_unset).weak()),
+            };
+            form::hint(ui, t.comfy_models_hint);
+        });
+        form.row(ui, t.comfy_features, |ui| {
+            for feature in crate::comfy::features::FEATURES {
+                let mut on = comfy.feature_on(feature.id);
+                if ui.checkbox(&mut on, feature.name).changed() {
+                    push(ComfyAction::SetFeature(feature.id, on));
+                }
+                if !on {
+                    continue;
+                }
+                for model in feature.models {
+                    ui.label(egui::RichText::new(model.file).weak());
+                    ui.horizontal(|ui| {
+                        let download = |ui: &mut egui::Ui, push: &mut dyn FnMut(ComfyAction)| {
+                            let label = t.model_download.replace("{size}", &file_size(model.bytes));
+                            let button = Button {
+                                enabled: comfy.models_dir().is_some(),
+                                ..Button::new(&label, Role::Cancel)
+                            };
+                            if form::compact_button(ui, &button).clicked() {
+                                push(ComfyAction::Download(model.file));
+                            }
+                        };
+                        let cancel = |ui: &mut egui::Ui, push: &mut dyn FnMut(ComfyAction)| {
+                            if form::compact_button(ui, &Button::new(t.cancel, Role::Cancel))
+                                .clicked()
+                            {
+                                push(ComfyAction::CancelDownload(model.file));
+                            }
+                        };
+                        match comfy.model_state(model) {
+                            ModelState::Installed => form::hint(ui, t.model_installed),
+                            ModelState::Missing => download(ui, &mut push),
+                            ModelState::Queued => {
+                                form::hint(ui, t.model_queued);
+                                cancel(ui, &mut push);
+                            }
+                            ModelState::Downloading { done, total } => {
+                                let share = done as f32 / total.max(1) as f32;
+                                let text = format!("{} / {}", file_size(done), file_size(total));
+                                ui.add(
+                                    egui::ProgressBar::new(share)
+                                        .desired_width(font_size::px(ui.style(), 180.0))
+                                        .text(text),
+                                );
+                                cancel(ui, &mut push);
+                            }
+                            ModelState::Failed(why) => {
+                                download(ui, &mut push);
+                                form::error(ui, &t.model_failed.replace("{why}", &why));
+                            }
+                        }
+                    });
+                }
+            }
+        });
+    });
 }
 
 #[cfg(test)]

@@ -26,6 +26,14 @@ pub struct ComfyFeature {
     pub models: &'static [ModelFile],
 }
 
+/// The id of the feature Touch Up's Generative brush runs.
+pub const GENERATIVE_FILL: &str = "generative_fill";
+
+/// The feature with `id`.
+pub fn feature(id: &str) -> Option<&'static ComfyFeature> {
+    FEATURES.iter().find(|f| f.id == id)
+}
+
 macro_rules! sdxl_inpainting {
     ($path:literal) => {
         concat!(
@@ -43,7 +51,7 @@ macro_rules! sdxl_inpainting {
 /// diffusers VAE. The files are renamed because every part's file has the
 /// same name upstream.
 pub const FEATURES: &[ComfyFeature] = &[ComfyFeature {
-    id: "generative_fill",
+    id: GENERATIVE_FILL,
     name: "Generative Fill",
     workflow: include_str!("../../assets/comfyui/generative_fill.json"),
     models: &[

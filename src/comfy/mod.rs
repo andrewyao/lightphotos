@@ -11,4 +11,4 @@ pub mod features;
 pub mod workflow;
 
 #[cfg(test)]
-mod test_server;
+pub(crate) mod test_server;
