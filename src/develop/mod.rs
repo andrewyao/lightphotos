@@ -13,6 +13,7 @@ pub mod copy;
 pub mod coverage;
 pub mod curve;
 pub mod effects;
+pub mod fill;
 pub mod grade;
 pub mod image_ops;
 pub mod local;
