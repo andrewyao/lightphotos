@@ -1634,15 +1634,6 @@ impl App {
                         self.apply_web_load_folder(p);
                     }
                 }
-                Some(WebPendingNav::LoadAfterOpen(p)) if p == dir => {
-                    self.web.pending_nav = None;
-                    if listing_succeeded {
-                        self.apply_web_load_folder(p);
-                        self.mode = ViewMode::Grid;
-                        self.update_window_title();
-                        self.normalize_focus();
-                    }
-                }
                 _ => {}
             }
             if listing_succeeded {
@@ -1704,38 +1695,13 @@ impl App {
         }
     }
 
-    /// The wasm32 end of `open_folder`: opens the folder in the tree, and if
-    /// it has subfolders but no photos, opens its first subfolder instead.
-    /// Expects `dir`'s listing to be in `subdirs`.
+    /// The wasm32 end of `open_folder`: opens the folder in the tree and
+    /// loads it. Expects `dir`'s listing to be in `subdirs`.
     pub(crate) fn apply_web_open_folder(&mut self, dir: PathBuf) {
-        let subdirs = self.subdirs.get(&dir).cloned().unwrap_or_default();
-        let has_own_images = self
-            .web
-            .file_handles
-            .keys()
-            .any(|p| p.parent() == Some(dir.as_path()));
-        let pure_container = !subdirs.is_empty() && !has_own_images;
-
-        if !subdirs.is_empty() {
+        if self.subdirs.get(&dir).is_some_and(|s| !s.is_empty()) {
             self.expanded.insert(dir.clone());
         }
-
-        let target = if pure_container {
-            subdirs.into_iter().next().unwrap_or_else(|| dir.clone())
-        } else {
-            dir.clone()
-        };
-
-        if target != dir && !self.subdirs.contains_key(&target) {
-            // Once the child is listed, only load it. `Open` would also toggle
-            // the child and could skip down another level.
-            self.defer_web_nav(WebPendingNav::LoadAfterOpen(target.clone()));
-            self.request_dir_listing(&target);
-            self.request_redraw();
-            return;
-        }
-
-        self.apply_web_load_folder(target);
+        self.apply_web_load_folder(dir);
         self.mode = ViewMode::Grid;
         self.update_window_title();
         self.normalize_focus();

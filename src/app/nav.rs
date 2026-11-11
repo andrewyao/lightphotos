@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 use crate::develop::{self};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::jobs::thumbnail::THUMB_PX;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::navigation::Playlist;
 use crate::navigation::{self, flatten_visible_tree, Slot};
 use crate::persist::groups::GroupId;
 use crate::ui::toolbar::ToolbarControl;
@@ -1150,22 +1148,12 @@ impl App {
             } else {
                 self.rescan_children(&path);
             }
-            let subdirs = self.subdirs(&path).to_vec();
-            let pure_container =
-                !subdirs.is_empty() && Playlist::from_dir(&path).entries().is_empty();
-            if subdirs.is_empty() {
+            if self.subdirs(&path).is_empty() {
                 self.expanded.remove(&path);
             } else {
                 self.expanded.insert(path.clone());
             }
-            // A folder with subfolders but no photos (a year folder) would show
-            // an empty grid, so load its first child instead. It stays expanded.
-            let target = if pure_container {
-                subdirs.into_iter().next().unwrap_or(path)
-            } else {
-                path
-            };
-            self.load_folder(target);
+            self.load_folder(path);
             self.mode = ViewMode::Grid;
             self.update_window_title();
             self.normalize_focus();

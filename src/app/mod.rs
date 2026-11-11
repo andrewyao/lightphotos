@@ -275,16 +275,13 @@ pub(crate) enum StatusKind {
 }
 
 /// A wasm32 folder navigation waiting on its async subfolder listing.
-/// `Open` toggles expansion and, for a folder with subfolders but no photos,
-/// skips to its first child, like native `open_folder`. `Load` swaps the grid,
-/// like native `load_folder`. `LoadAfterOpen` finishes that skip without
-/// opening the child.
+/// `Open` toggles expansion and loads the folder, like native `open_folder`.
+/// `Load` swaps the grid, like native `load_folder`.
 #[cfg(target_arch = "wasm32")]
 #[derive(Debug, Clone)]
 pub(crate) enum WebPendingNav {
     Open(PathBuf),
     Load(PathBuf),
-    LoadAfterOpen(PathBuf),
 }
 
 /// Which module the Develop panel shows under the histogram.
