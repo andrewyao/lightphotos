@@ -54,6 +54,7 @@ pub struct Export {
     pub adj: Adjustments,
     pub touchups: Vec<TouchUp>,
     pub masks: crate::develop::MaskSet,
+    pub fills: crate::develop::fill::FillSet,
     pub rot: u8,
     pub output: crate::export::Output,
 }
@@ -92,6 +93,7 @@ impl WebExports {
             adj: export.adj,
             touchups: export.touchups,
             masks: export.masks,
+            fills: export.fills,
             rot: export.rot,
             output: export.output,
         });

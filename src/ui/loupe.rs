@@ -214,12 +214,21 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
             },
         );
     }
+    // The Generative brush takes the drag and the click while it is on.
+    #[cfg(not(target_arch = "wasm32"))]
     let generative = app.generative_view();
+    #[cfg(not(target_arch = "wasm32"))]
     let fill_pins = generative
         .as_ref()
         .map(|g| draw_fill_marks(ui, app, central, g))
         .unwrap_or_default();
-    let paints = generative.as_ref().is_some_and(|g| g.armed);
+    #[cfg(not(target_arch = "wasm32"))]
+    let (paints, spots_click) = (
+        generative.as_ref().is_some_and(|g| g.armed),
+        !generative.as_ref().is_some_and(|g| g.on),
+    );
+    #[cfg(target_arch = "wasm32")]
+    let (paints, spots_click) = (false, true);
     egui::Area::new(egui::Id::new("loupe_touchup"))
         .order(egui::Order::Foreground)
         .fixed_pos(central.min)
@@ -230,6 +239,7 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
                 egui::Sense::click()
             };
             let (_id, resp) = ui.allocate_exact_size(central.size(), sense);
+            #[cfg(not(target_arch = "wasm32"))]
             if paints {
                 generative_brush(ui, app, central, &resp, &fill_pins, out);
             }
@@ -267,7 +277,7 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
                     ));
                 }
             }
-            if resp.clicked() && !generative.as_ref().is_some_and(|g| g.on) {
+            if resp.clicked() && spots_click {
                 if let Some(p) = resp.interact_pointer_pos() {
                     let (u, v) = app.loupe_screen_to_source(central, p);
                     let mut hit = None;
@@ -291,11 +301,13 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
 }
 
 /// How near a fill's pin, in points, a click picks it rather than painting.
+#[cfg(not(target_arch = "wasm32"))]
 const FILL_PIN_REACH: f32 = 10.0;
 
 /// Draws a pin at the middle of each of the photo's fills, the picked one
 /// lit, and a spinner where a generation is running. Returns the pins'
 /// screen positions, in fill order.
+#[cfg(not(target_arch = "wasm32"))]
 fn draw_fill_marks(
     ui: &egui::Ui,
     app: &App,
@@ -338,6 +350,7 @@ fn draw_fill_marks(
 /// The Generative brush on the whole image: a press on a fill's pin picks
 /// that fill; any other press starts a stroke, which gains each place the
 /// pointer moves to and is sent when the button lets go.
+#[cfg(not(target_arch = "wasm32"))]
 fn generative_brush(
     ui: &egui::Ui,
     app: &App,

@@ -488,11 +488,12 @@ impl App {
             let touchups = self.touchups.get(path).map(Vec::as_slice).unwrap_or(&[]);
             let masks = self.masks.get(path).map(Vec::as_slice).unwrap_or(&[]);
             let rot = self.rotations.get(path).copied().unwrap_or(0);
-            let fills = super::fill::fills_in(&self.folder_store, &self.patches, path);
+            let no_fills =
+                super::fill::fills_in(&self.folder_store, &self.patches, path).is_empty();
             if adj.is_identity()
                 && touchups.is_empty()
                 && masks.is_empty()
-                && fills.is_empty()
+                && no_fills
                 && rot % 4 == 0
             {
                 if let Some(id) = renderer.upload_thumb(img.width, img.height, &img.rgba) {
@@ -507,10 +508,15 @@ impl App {
                         renderer.free_thumb(old.id);
                     }
                 }
-            } else if let Some(masks) =
-                super::masks::mask_input_of(&self.masks, &self.detections, &mut self.coverage, path)
-            {
-                let fills = super::fill::fill_input_of(&self.folder_store, &self.patches, path);
+            } else if let (Some(masks), Some(fills)) = (
+                super::masks::mask_input_of(
+                    &self.masks,
+                    &self.detections,
+                    &mut self.coverage,
+                    path,
+                ),
+                super::fill::fill_input_of(&self.folder_store, &mut self.patches, path),
+            ) {
                 loader.request_bake(path, *px, *sig, img, adj, touchups, masks, fills, rot);
             }
         }

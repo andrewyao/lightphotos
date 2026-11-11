@@ -244,6 +244,7 @@ pub enum UiAction {
     SelectTouchUp(usize),
     DeleteTouchUp,
     /// Touch Up's Generative brush and the fills it makes.
+    #[cfg(not(target_arch = "wasm32"))]
     Fill(FillAction),
     /// Settings ▸ ComfyUI.
     #[cfg(not(target_arch = "wasm32"))]
@@ -342,7 +343,9 @@ pub enum BulkKind {
     Delete,
 }
 
-/// What the Generative brush's controls ask for.
+/// What the Generative brush's controls ask for. Not in the browser, which
+/// draws fills and can't make them.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, PartialEq)]
 pub enum FillAction {
     /// The panel's Generative switch.

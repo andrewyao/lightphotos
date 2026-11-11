@@ -529,8 +529,9 @@ impl App {
             touchups: Vec<crate::develop::TouchUp>,
             masks: Vec<crate::develop::Mask>,
             detections: crate::develop::Detections,
-            /// The photo's folder, where its coverage files are read as the
-            /// job is dispatched.
+            fills: Vec<crate::develop::fill::Fill>,
+            /// The photo's folder, where its coverage and patch files are
+            /// read as the job is dispatched.
             dir: Option<web_sys::FileSystemDirectoryHandle>,
             rot: u8,
         }
@@ -543,6 +544,7 @@ impl App {
                 touchups: self.touchups.get(src).cloned().unwrap_or_default(),
                 masks: self.masks.get(src).cloned().unwrap_or_default(),
                 detections: self.detections.get(src).cloned().unwrap_or_default(),
+                fills: self.fills_of(src).to_vec(),
                 dir: src.parent().and_then(|d| self.web.dir_handle(d)),
                 rot: self.rotations.get(src).copied().unwrap_or(0),
             })
@@ -592,6 +594,7 @@ impl App {
                     touchups,
                     masks,
                     detections,
+                    fills,
                     dir,
                     rot,
                 } = job;
@@ -618,6 +621,7 @@ impl App {
                         continue;
                     }
                 };
+                let fills = super::fill::read_fill_set(dir.as_ref(), &src, &fills).await;
                 match fs.read_source_array_buffer(&src).await {
                     Ok(bytes) => pool.submit(
                         &decoder,
@@ -631,6 +635,7 @@ impl App {
                             adj,
                             touchups,
                             masks,
+                            fills,
                             rot,
                             output: output.clone(),
                         },
@@ -692,7 +697,7 @@ impl App {
                     detections: self.detections.get(&src).cloned().unwrap_or_default(),
                 }
             },
-            fills: self.fill_input(&src),
+            fills: super::fill::fill_input_on_disk(&self.folder_store, &self.patches, &src),
             rot: self.rotations.get(&src).copied().unwrap_or(0),
             location: self
                 .folder_store

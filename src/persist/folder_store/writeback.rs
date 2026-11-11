@@ -70,7 +70,9 @@ pub(crate) enum Patch {
     /// The spot removals, made at a Unix time.
     Touchups { touchups: Vec<TouchUp>, at: u64 },
     /// The generative fills, made at a Unix time. Their patch files are
-    /// written before this names them.
+    /// written before this names them. Not in the browser, which draws
+    /// fills and can't make them.
+    #[cfg(not(target_arch = "wasm32"))]
     Fills {
         fills: Vec<crate::develop::fill::Fill>,
         at: u64,
@@ -175,6 +177,7 @@ impl Patch {
             Patch::Touchups { touchups, at } => {
                 rec.edit(*at, |rec| rec.touchups = touchups.clone())
             }
+            #[cfg(not(target_arch = "wasm32"))]
             Patch::Fills { fills, at } => rec.edit(*at, |rec| rec.fills = fills.clone()),
             Patch::Masks { masks, at } => rec.edit(*at, |rec| rec.masks.set(masks.clone())),
             Patch::Detection { target, id, at } => {

@@ -196,11 +196,12 @@ pub struct Patch {
 fn alpha_bounds(width: u32, rgba: &[u8]) -> Option<[u32; 4]> {
     let mut bounds: Option<[u32; 4]> = None;
     for (y, row) in (0u32..).zip(rgba.chunks_exact(width as usize * 4)) {
-        let lit = |px: &[u8]| px.get(3).is_some_and(|&a| a > 0);
-        let Some(first) = row.chunks_exact(4).position(lit) else {
+        let (texels, _) = row.as_chunks::<4>();
+        let lit = |px: &[u8; 4]| px[3] > 0;
+        let Some(first) = texels.iter().position(lit) else {
             continue;
         };
-        let last = row.chunks_exact(4).rposition(lit).unwrap_or(first);
+        let last = texels.iter().rposition(lit).unwrap_or(first);
         let (first, last) = (first as u32, last as u32 + 1);
         bounds = Some(match bounds {
             Some([x0, y0, x1, _]) => [x0.min(first), y0, x1.max(last), y + 1],

@@ -350,25 +350,22 @@ pub(crate) async fn delete_group(
     }
 }
 
-/// `.lightphotos/masks` under `root`, or `None` when it is missing.
-async fn masks_dir(
+/// The bytes of `root/.lightphotos/<subdir>/<photo>.<id>.png`, or
+/// `Ok(None)` when there is no such file. A file over `max_bytes` is
+/// refused before it is read, like a sidecar; `what` names it in the error.
+async fn read_side_file(
     root: &FileSystemDirectoryHandle,
-) -> Result<Option<FileSystemDirectoryHandle>, String> {
-    match sidecar_dir(root, false).await? {
-        Some(dir) => subdir(&dir, crate::develop::coverage::COVERAGE_DIR, false).await,
-        None => Ok(None),
-    }
-}
-
-/// The bytes of `root/.lightphotos/masks/<photo>.<id>.png`, or `Ok(None)`
-/// when there is no such file. A file over the coverage size limit is
-/// refused before it is read, like a sidecar.
-pub(crate) async fn read_coverage(
-    root: &FileSystemDirectoryHandle,
+    subdir_name: &str,
     photo: &OsStr,
     id: crate::develop::RasterId,
+    max_bytes: u64,
+    what: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    let Some(dir) = masks_dir(root).await? else {
+    let dir = match sidecar_dir(root, false).await? {
+        Some(dir) => subdir(&dir, subdir_name, false).await?,
+        None => None,
+    };
+    let Some(dir) = dir else {
         return Ok(None);
     };
     let name = crate::develop::side_file::file_name(photo, id);
@@ -379,13 +376,46 @@ pub(crate) async fn read_coverage(
             Err(e) => return Err(js_error_string(&e)),
         };
     let file = crate::web::web_fs::stat(&handle).await?;
-    if file.size() > crate::develop::coverage::MAX_COVERAGE_FILE_BYTES as f64 {
-        return Err(format!(
-            "{} bytes, too large for a coverage file",
-            file.size()
-        ));
+    if file.size() > max_bytes as f64 {
+        return Err(format!("{} bytes, too large for {what}", file.size()));
     }
     crate::web::web_fs::file_bytes(&file).await.map(Some)
+}
+
+/// The bytes of `root/.lightphotos/masks/<photo>.<id>.png`, or `Ok(None)`
+/// when there is no such file.
+pub(crate) async fn read_coverage(
+    root: &FileSystemDirectoryHandle,
+    photo: &OsStr,
+    id: crate::develop::RasterId,
+) -> Result<Option<Vec<u8>>, String> {
+    read_side_file(
+        root,
+        crate::develop::coverage::COVERAGE_DIR,
+        photo,
+        id,
+        crate::develop::coverage::MAX_COVERAGE_FILE_BYTES,
+        "a coverage file",
+    )
+    .await
+}
+
+/// The bytes of `root/.lightphotos/fills/<photo>.<id>.png`, a generative
+/// fill's patch, or `Ok(None)` when there is no such file.
+pub(crate) async fn read_fill(
+    root: &FileSystemDirectoryHandle,
+    photo: &OsStr,
+    id: crate::develop::RasterId,
+) -> Result<Option<Vec<u8>>, String> {
+    read_side_file(
+        root,
+        crate::develop::fill::FILLS_DIR,
+        photo,
+        id,
+        crate::develop::fill::MAX_PATCH_FILE_BYTES,
+        "a fill's patch file",
+    )
+    .await
 }
 
 /// Write `bytes` to `root/.lightphotos/masks/<photo>.<id>.png`, creating

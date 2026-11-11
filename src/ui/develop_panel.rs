@@ -842,15 +842,14 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     form::page_heading(ui, t.tab_masks, |_| {});
     form::page(ui, |ui| {
         let active = app.touchup_active();
+        #[cfg_attr(target_arch = "wasm32", expect(unused_mut))]
+        let mut labels = vec![t.masks, t.touch_up, t.spots];
+        #[cfg(not(target_arch = "wasm32"))]
         let generative = app.generative_view();
-        let labels = [
-            t.masks,
-            t.touch_up,
-            t.spots,
-            t.generative,
-            t.fill_prompt,
-            t.fills,
-        ];
+        #[cfg(not(target_arch = "wasm32"))]
+        if generative.is_some() {
+            labels.extend([t.generative, t.fill_prompt, t.fills]);
+        }
         let form = Form::new(ui, &labels).spacious();
         draw_mask_section(ui, app, &form, out);
         form.section(ui, "", |ui| {
@@ -859,6 +858,7 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     out.actions.push(UiAction::ToggleTouchUp);
                 }
             });
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(g) = &generative {
                 form.row(ui, t.generative, |ui| {
                     let usable = active && g.blocked.is_none();
@@ -946,6 +946,7 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 });
             });
         }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(g) = generative.as_ref().filter(|g| g.on && active) {
             draw_generative(ui, &form, g, out);
         }
@@ -955,6 +956,7 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// The Generative brush's rows: the prompt, the job in flight or the stroke
 /// kept from one that failed, the photo's fills, and the picked fill's
 /// variants.
+#[cfg(not(target_arch = "wasm32"))]
 fn draw_generative(
     ui: &mut egui::Ui,
     form: &Form,

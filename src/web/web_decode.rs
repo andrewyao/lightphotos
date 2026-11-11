@@ -189,6 +189,9 @@ pub struct WebExportJob {
     pub adj: crate::develop::Adjustments,
     pub touchups: Vec<crate::develop::TouchUp>,
     pub masks: crate::develop::MaskSet,
+    /// The fills with their patches, read on the main thread before the
+    /// job was sent: no worker can reach the folder.
+    pub fills: crate::develop::fill::FillSet,
     pub rot: u8,
     pub output: crate::export::Output,
 }
@@ -199,9 +202,8 @@ impl WebExportJob {
             std::sync::Arc::new(self.bytes),
             self.is_raw,
             &self.adj,
-            // No fills: nothing in the browser reads their patch files yet.
             crate::develop::image_ops::Retouch {
-                fills: &crate::develop::fill::FillSet::EMPTY,
+                fills: &self.fills,
                 touchups: &self.touchups,
             },
             &self.masks,

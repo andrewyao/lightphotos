@@ -718,6 +718,7 @@ impl FolderStore {
     /// The caller has already written every patch file the fills name.
     ///
     /// [`MAX_FILLS`]: crate::develop::fill::MAX_FILLS
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_fills(&mut self, path: &Path, fills: &[crate::develop::fill::Fill]) {
         let keep = fills.len().min(crate::develop::fill::MAX_FILLS);
         let fills = fills.get(..keep).unwrap_or_default().to_vec();

@@ -855,6 +855,7 @@ mod state;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use comfy::ModelState;
 pub(crate) use coverage::{Failure, MaskStatus};
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use fill::{GenerativeView, JobView};
 pub(crate) use masks::{BrushSettings, MaskKind, BRUSH_MAX_RADIUS};
 pub(crate) use presets::FolderState;
@@ -1428,6 +1429,8 @@ impl App {
         self.teardown_loupe_state();
         self.history.clear();
         self.coverage.clear();
+        #[cfg(target_arch = "wasm32")]
+        self.patches.clear();
         self.burst_scan = None;
         self.seed_mirrors(&playlist);
         self.playlist = Some(playlist);
@@ -1871,8 +1874,6 @@ impl App {
                 ui::UiAction::ToggleTouchUp => self.toggle_touchup(),
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::Fill(action) => self.fill_action(action),
-                #[cfg(target_arch = "wasm32")]
-                ui::UiAction::Fill(_) => {}
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::Comfy(action) => self.comfy_action(action),
                 ui::UiAction::ClickRail(item) => self.click_rail(item),

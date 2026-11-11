@@ -853,8 +853,6 @@ impl App {
             Some(TouchStep::Spots(before)) => self.apply_touchups(before),
             #[cfg(not(target_arch = "wasm32"))]
             Some(TouchStep::Fills(before)) => self.store_fills(&path, before),
-            #[cfg(target_arch = "wasm32")]
-            Some(TouchStep::Fills(_)) => {}
             None => {}
         }
     }
