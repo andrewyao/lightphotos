@@ -371,7 +371,7 @@ pub(crate) async fn read_coverage(
     let Some(dir) = masks_dir(root).await? else {
         return Ok(None);
     };
-    let name = crate::develop::coverage::file_name(photo, id);
+    let name = crate::develop::side_file::file_name(photo, id);
     let handle: FileSystemFileHandle =
         match JsFuture::from(dir.get_file_handle(&name.to_string_lossy())).await {
             Ok(v) => v.unchecked_into(),
@@ -403,7 +403,7 @@ pub(crate) async fn write_coverage(
     let dir = subdir(&dir, crate::develop::coverage::COVERAGE_DIR, true)
         .await?
         .ok_or_else(|| "could not create .lightphotos/masks".to_string())?;
-    let name = crate::develop::coverage::file_name(photo, id);
+    let name = crate::develop::side_file::file_name(photo, id);
     let name = name.to_string_lossy();
     if JsFuture::from(dir.get_file_handle(&name)).await.is_ok() {
         return Ok(());

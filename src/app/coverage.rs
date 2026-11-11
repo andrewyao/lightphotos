@@ -984,7 +984,7 @@ mod tests {
     fn a_read_only_folder_deletes_no_corrupt_coverage_file() {
         let (dir, p) = photo("read-only-corrupt");
         let c = Coverage::fit(1, 1, &[200]).unwrap();
-        let name = crate::develop::coverage::file_name(std::ffi::OsStr::new("a.jpg"), c.id());
+        let name = crate::develop::side_file::file_name(std::ffi::OsStr::new("a.jpg"), c.id());
         let file = dir.join(".lightphotos").join("masks").join(name);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, b"not a coverage").unwrap();
@@ -1045,7 +1045,7 @@ mod tests {
     fn an_io_failure_on_load_keeps_the_recorded_id_and_offers_retry() {
         let (dir, p) = photo("io");
         let c = Coverage::fit(1, 1, &[200]).unwrap();
-        let name = crate::develop::coverage::file_name(std::ffi::OsStr::new("a.jpg"), c.id());
+        let name = crate::develop::side_file::file_name(std::ffi::OsStr::new("a.jpg"), c.id());
         std::fs::create_dir_all(dir.join(".lightphotos").join("masks").join(name)).unwrap();
         let mut store = CoverageStore::with_detector(half_left);
         let t = DetectTarget::Subject;

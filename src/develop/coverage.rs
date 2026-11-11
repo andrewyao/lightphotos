@@ -11,7 +11,8 @@
 //! misapplied. Files are write-once: two writers of the same detection
 //! converge on the same bytes, and nothing ever updates one in place.
 
-use std::ffi::{OsStr, OsString};
+#[cfg(not(target_arch = "wasm32"))]
+use std::ffi::OsStr;
 use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -43,11 +44,6 @@ pub const MAX_COVERAGE_BYTES: usize =
 /// directory, so neither the thumbnail cache's name parser nor the sidecar
 /// scan ever sees one.
 pub const COVERAGE_DIR: &str = "masks";
-const FILE_EXT: &str = "png";
-/// An orphaned coverage file younger than this is kept: a detection that has
-/// written its file but not yet its sidecar looks like one.
-#[cfg(not(target_arch = "wasm32"))]
-const ORPHAN_REAP_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Content hash of one coverage: FNV-1a over its width, height and bytes.
 /// Serialized as 16 lowercase hex digits.
@@ -55,11 +51,12 @@ const ORPHAN_REAP_AFTER: std::time::Duration = std::time::Duration::from_secs(36
 pub struct RasterId(u64);
 
 impl RasterId {
-    fn of(width: u32, height: u32, alpha: &[u8]) -> RasterId {
+    /// The id of a `width x height` raster of `bytes`, any layout.
+    pub(super) fn of(width: u32, height: u32, bytes: &[u8]) -> RasterId {
         let mut h = Fnv1a::new();
         h.write(&width.to_le_bytes());
         h.write(&height.to_le_bytes());
-        h.write(alpha);
+        h.write(bytes);
         RasterId(h.finish())
     }
 
@@ -360,61 +357,24 @@ impl Coverage {
     }
 }
 
-/// The coverage file's name inside `.lightphotos/masks/`:
-/// `<photo file name>.<id>.png`, such as `IMG_0042.CR3.5be1c0a39d2f7e14.png`.
-pub fn file_name(photo_name: &OsStr, id: RasterId) -> OsString {
-    let mut name = photo_name.to_os_string();
-    name.push(format!(".{id}.{FILE_EXT}"));
-    name
-}
-
-/// The reverse of [`file_name`]. `None` for anything else, so a sweep leaves
-/// other files alone.
-pub fn parse_file_name(name: &OsStr) -> Option<(OsString, RasterId)> {
-    let rest = name.to_str()?.strip_suffix(&format!(".{FILE_EXT}"))?;
-    let (photo, hex) = rest.rsplit_once('.')?;
-    if photo.is_empty() {
-        return None;
-    }
-    Some((OsString::from(photo), hex.parse().ok()?))
-}
-
-/// `<dir>/.lightphotos/masks/<name>` for the photo at `photo`.
+/// `<dir>/.lightphotos/masks/<photo>.<id>.png` for the photo at `photo`.
 #[cfg(not(target_arch = "wasm32"))]
 fn file_path(photo: &Path, id: RasterId) -> Result<std::path::PathBuf, CoverageError> {
-    let dir = photo.parent().ok_or(CoverageError::Missing)?;
-    let name = photo.file_name().ok_or(CoverageError::Missing)?;
-    Ok(dir
-        .join(crate::sidecar::SIDECAR_DIR)
-        .join(COVERAGE_DIR)
-        .join(file_name(name, id)))
+    super::side_file::path(photo, COVERAGE_DIR, id).ok_or(CoverageError::Missing)
 }
 
 /// The coverage `id` stored for `photo`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read(photo: &Path, id: RasterId) -> Result<Coverage, CoverageError> {
     let path = file_path(photo, id)?;
-    let file = match std::fs::File::open(&path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(CoverageError::Missing),
-        Err(e) => return Err(CoverageError::Io(format!("{}: {e}", path.display()))),
-    };
-    let len = file
-        .metadata()
-        .map_err(|e| CoverageError::Io(e.to_string()))?
-        .len();
-    if len > MAX_COVERAGE_FILE_BYTES {
-        return Err(CoverageError::Corrupt(format!(
-            "{len} bytes is over the {MAX_COVERAGE_FILE_BYTES}-byte limit"
-        )));
+    match crate::paths::read_capped(&path, MAX_COVERAGE_FILE_BYTES as usize) {
+        Ok(Some(bytes)) => Coverage::decode(&bytes, id),
+        Ok(None) => Err(CoverageError::Missing),
+        Err(e @ crate::paths::CappedReadError::TooBig(_)) => {
+            Err(CoverageError::Corrupt(e.to_string()))
+        }
+        Err(e) => Err(CoverageError::Io(format!("{}: {e}", path.display()))),
     }
-    let mut bytes = Vec::with_capacity(len as usize);
-    use std::io::Read;
-    (&file)
-        .take(MAX_COVERAGE_FILE_BYTES)
-        .read_to_end(&mut bytes)
-        .map_err(|e| CoverageError::Io(e.to_string()))?;
-    Coverage::decode(&bytes, id)
 }
 
 /// Stores `coverage` beside `photo`, atomically. A file already there has
@@ -439,49 +399,11 @@ pub fn remove(photo: &Path, id: RasterId) {
     }
 }
 
-/// Removes coverage files in `dir`'s folder that `named` doesn't claim, and
-/// stale write temporaries, each older than an hour, so a detection that has
-/// written its file but not yet its sidecar keeps it. `named(photo, id)`
-/// says whether the photo's sidecar records `id`.
+/// Removes coverage files in `dir`'s folder that `named` doesn't claim; see
+/// [`super::side_file::sweep_orphans`].
 #[cfg(not(target_arch = "wasm32"))]
 pub fn sweep_orphans(dir: &Path, named: impl Fn(&OsStr, RasterId) -> bool) {
-    let coverage = dir.join(crate::sidecar::SIDECAR_DIR).join(COVERAGE_DIR);
-    if crate::paths::refuse_linked_sidecar_dir(&coverage).is_err() {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(coverage) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        let orphan = match name.strip_suffix(".tmp") {
-            Some(stem) => {
-                parse_file_name(OsStr::new(crate::paths::atomic_tmp_target(stem))).is_some()
-            }
-            None => match parse_file_name(OsStr::new(name)) {
-                Some((photo, id)) => !named(&photo, id),
-                None => false,
-            },
-        };
-        if orphan && is_older_than(&entry, ORPHAN_REAP_AFTER) {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-/// `false` when the mtime is unreadable or in the future, so unknown files
-/// are kept.
-#[cfg(not(target_arch = "wasm32"))]
-fn is_older_than(entry: &std::fs::DirEntry, age: std::time::Duration) -> bool {
-    entry
-        .metadata()
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|m| std::time::SystemTime::now().duration_since(m).ok())
-        .is_some_and(|elapsed| elapsed > age)
+    super::side_file::sweep_orphans(dir, COVERAGE_DIR, named);
 }
 
 #[cfg(test)]
@@ -673,26 +595,6 @@ mod tests {
             Err(CoverageError::Corrupt(_))
         ));
     }
-
-    #[test]
-    fn file_names_round_trip_and_reject_other_files() {
-        let id = "5be1c0a39d2f7e14".parse::<RasterId>().unwrap();
-        let name = file_name(OsStr::new("IMG_0042.CR3"), id);
-        assert_eq!(name.to_str().unwrap(), "IMG_0042.CR3.5be1c0a39d2f7e14.png");
-        assert_eq!(
-            parse_file_name(&name),
-            Some((OsString::from("IMG_0042.CR3"), id))
-        );
-        for other in [
-            "IMG_0042.CR3.xmp",
-            "IMG_0042.CR3.png",
-            ".5be1c0a39d2f7e14.png",
-            "IMG_0042.CR3.5be1c0a39d2f7e1.png",
-            "IMG_0042.CR3.5be1c0a39d2f7e14.thumb.jpg",
-        ] {
-            assert_eq!(parse_file_name(OsStr::new(other)), None, "{other}");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -755,7 +657,7 @@ mod file_tests {
         let foreign = masks.join("notes.txt");
         std::fs::write(&stale_tmp, b"").unwrap();
         std::fs::write(&foreign, b"").unwrap();
-        let old = std::time::SystemTime::now() - ORPHAN_REAP_AFTER * 2;
+        let old = std::time::SystemTime::now() - super::super::side_file::ORPHAN_REAP_AFTER * 2;
         for p in [
             file_path(&photo, kept.id()).unwrap(),
             file_path(&photo, orphan.id()).unwrap(),

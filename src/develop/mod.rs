@@ -19,6 +19,7 @@ pub mod local;
 pub mod mask;
 pub mod parallel;
 pub mod sharpen;
+pub mod side_file;
 
 use serde::{Deserialize, Serialize};
 
