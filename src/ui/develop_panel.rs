@@ -729,22 +729,39 @@ fn rail_colors(id: crate::develop::SliderId) -> Option<[egui::Color32; 2]> {
 }
 
 /// A horizontal rail across `rect`, fading from `ends[0]` on the left to
-/// `ends[1]` on the right, with round caps in the end colors.
+/// `ends[1]` on the right, with round caps in the end colors. It is one mesh
+/// with no overlapping triangles, so a disabled panel's opacity dims it
+/// evenly instead of brightening where a cap would cover the body.
 fn gradient_rail(rect: egui::Rect, [left, right]: [egui::Color32; 2]) -> egui::Shape {
+    const CAP_STEPS: u32 = 6;
     let r = rect.height() / 2.0;
-    let body = rect.shrink2(egui::vec2(r, 0.0));
+    let (body, y) = (rect.shrink2(egui::vec2(r, 0.0)), rect.center().y);
+    // Columns left to right, each an x, a half-height and a color: the left
+    // cap from its tip to the body, then the right cap from the body to its tip.
+    let cap = |k: u32| {
+        let t = k as f32 / CAP_STEPS as f32 * std::f32::consts::FRAC_PI_2;
+        (r * t.cos(), r * t.sin())
+    };
+    let columns = (0..=CAP_STEPS)
+        .map(|k| {
+            let (dx, h) = cap(k);
+            (body.left() - dx, h, left)
+        })
+        .chain((0..=CAP_STEPS).rev().map(|k| {
+            let (dx, h) = cap(k);
+            (body.right() + dx, h, right)
+        }));
     let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(body.left_top(), left);
-    mesh.colored_vertex(body.left_bottom(), left);
-    mesh.colored_vertex(body.right_top(), right);
-    mesh.colored_vertex(body.right_bottom(), right);
-    mesh.add_triangle(0, 1, 3);
-    mesh.add_triangle(0, 3, 2);
-    egui::Shape::Vec(vec![
-        egui::Shape::circle_filled(body.left_center(), r, left),
-        egui::Shape::circle_filled(body.right_center(), r, right),
-        egui::Shape::mesh(mesh),
-    ])
+    for (i, (x, h, color)) in columns.enumerate() {
+        mesh.colored_vertex(egui::pos2(x, y - h), color);
+        mesh.colored_vertex(egui::pos2(x, y + h), color);
+        if let Some(i) = (i as u32).checked_sub(1) {
+            let (a, b) = (2 * i, 2 * i + 2);
+            mesh.add_triangle(a, a + 1, b + 1);
+            mesh.add_triangle(a, b + 1, b);
+        }
+    }
+    egui::Shape::mesh(mesh)
 }
 
 /// The white-balance picker's toggle: an eyedropper, painted so it can't fall
