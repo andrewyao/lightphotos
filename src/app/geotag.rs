@@ -3,28 +3,31 @@
 //! "Import GPS Tracks…": the App side of `crate::geotag`. The user chooses
 //! GPX files, folders of them, or both, and confirms each camera's time
 //! zone setting in the import dialog. A worker thread then downloads any
-//! file still in iCloud, joins every file into one track, reads the camera,
-//! capture time and GPS of each photo in the open folder and its
-//! subfolders, and matches it on the track; each
-//! location lands in its photo's sidecar as it arrives, through
-//! `save_patch`, so a run that outlives its folder still writes to the
-//! right photos. The photo files are never written.
+//! file still in iCloud, joins every file into one track, and walks the
+//! open folder and its subfolders a batch of photos at a time
+//! ([`walk::PhotoWalk`]): it reads each photo's camera, capture time and
+//! GPS, matches it on the track, and sends the batch's outcomes. Each
+//! location lands in its photo's sidecar through `save_patch`, so a run
+//! that outlives its folder still writes to the right photos. The photo
+//! files are never written. Clearing the GPX locations walks the same way
+//! on the same job slot, so a run and a clear never overlap.
 //!
 //! Each photo's camera clock comes from LightRemote's measurements when the
 //! camera was paired with it and a track has them, else from its camera's
 //! time zone setting. The dialog asks both once per camera and the app's
-//! prefs remember them. The photos and the chosen folders are read
-//! off the UI thread while the dialog is open, and the run reuses what the
-//! dialog read.
+//! prefs remember them. While the dialog is open, a reader walks the
+//! photos off the UI thread and sends only the cameras each batch holds,
+//! so the rows fill in as it goes; the run reads each photo again itself.
 //!
 //! Desktop only: the browser has no picker for GPX files yet.
 
 mod cameras;
 mod source;
+mod walk;
 
 use super::*;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
@@ -35,6 +38,7 @@ use crate::persist::folder_store::Patch;
 use cameras::CameraClocks;
 pub(crate) use cameras::{CameraClock, CameraKey};
 use source::{Found, Loaded, Note};
+use walk::PhotoWalk;
 
 /// How long a run waits for iCloud to download the files it needs.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
@@ -101,28 +105,50 @@ impl GeotagTally {
     }
 }
 
-/// A run. At most one at a time.
+/// A run or a clear. At most one at a time, so neither saves under the
+/// other.
 struct Job {
     events: Receiver<Event>,
-    tally: GeotagTally,
+    work: Work,
 }
 
-/// What a run's worker reports.
+/// What a job does, and what it has counted so far.
+enum Work {
+    Import(GeotagTally),
+    /// How many photos lost a GPX location.
+    Clear(usize),
+}
+
+/// What a job's worker reports.
 enum Event {
     /// Waiting for iCloud to download this many files.
     Downloading(usize),
-    Matched(PathBuf, MatchOutcome),
+    /// One batch of photos, matched.
+    Matched(Vec<(PathBuf, MatchOutcome)>),
+    /// One batch of photos that may hold a GPX location, each with whether
+    /// its sidecar on disk holds one. A photo of the folder the clear began
+    /// in is sent either way: the folder's cache can hold a location not yet
+    /// on disk.
+    Clear(Vec<(PathBuf, bool)>),
     Done(Report),
-    /// No track to match on, and why.
+    /// No track to match on, or no photo, and why.
     Failed(String),
 }
 
 /// What the user should hear when a run ends, past the tally.
+#[derive(Default)]
 struct Report {
     notes: Vec<Note>,
     /// Each camera LightRemote measured far from its setting, and how far
     /// (measured minus set, seconds).
     disagreements: BTreeMap<CameraKey, i64>,
+}
+
+/// The GPX files a run matches on: found while the dialog was open, or
+/// still to look for in the files and folders a command named.
+enum Tracks {
+    Found(Found),
+    Search(Vec<PathBuf>),
 }
 
 /// Each camera's clock, as a run reads it.
@@ -135,14 +161,16 @@ struct Settings {
 
 impl Settings {
     /// The camera's time zone setting, and whether LightRemote measured
-    /// it. A camera never asked about counts as paired when it is the
-    /// folder's `only_camera`.
-    fn for_camera(&self, camera: &CameraKey, only_camera: bool) -> (Option<i64>, bool) {
+    /// it. The dialog remembers every camera it shows, so only a command's
+    /// run meets a camera never asked about. That camera counts as paired:
+    /// it takes LightRemote's measurements when the tracks have them, as
+    /// the dialog's default does for a folder's only camera.
+    fn for_camera(&self, camera: &CameraKey) -> (Option<i64>, bool) {
         let clock = self.clocks.get(camera);
         let offset = self
             .all
             .or_else(|| clock.map(|c| c.zone.camera_minus_utc_s()));
-        (offset, clock.map_or(only_camera, |c| c.paired))
+        (offset, clock.is_none_or(|c| c.paired))
     }
 }
 
@@ -161,6 +189,10 @@ struct Facts {
     stamp: Option<CaptureStamp>,
 }
 
+/// Each camera the dialog's reader saw, with the first offset one of its
+/// photos recorded in `OffsetTimeOriginal`.
+type Sightings = BTreeMap<CameraKey, Option<i64>>;
+
 /// Work the dialog waits on, done off the UI thread.
 enum Pending<T> {
     Waiting(Receiver<T>),
@@ -170,12 +202,9 @@ enum Pending<T> {
 impl<T: Send + 'static> Pending<T> {
     fn spawn(name: &str, work: impl FnOnce() -> T + Send + 'static) -> Result<Pending<T>, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name(name.into())
-            .spawn(move || {
-                let _ = tx.send(work());
-            })
-            .map_err(|e| (crate::i18n::t().geotag_read_failed)(&e.to_string()))?;
+        spawn(name, move || {
+            let _ = tx.send(work());
+        })?;
         Ok(Pending::Waiting(rx))
     }
 
@@ -202,13 +231,16 @@ impl<T: Send + 'static> Pending<T> {
     }
 }
 
-/// The import dialog: what was chosen and the GPX files in it, the
-/// folder's photos, and a row per camera among them.
+/// The import dialog: what was chosen and the GPX files in it, and a row
+/// per camera among the folder's photos, filled in as they're read.
 struct Dialog {
     sources: Vec<PathBuf>,
     found: Pending<Found>,
-    photos: Pending<Vec<Photo>>,
-    /// Filled once `photos` lands.
+    /// Each batch's cameras as the reader sends them. `None` once it's done.
+    reading: Option<Receiver<Sightings>>,
+    seen: Sightings,
+    /// The clock the user chose for each camera, kept as rows are rebuilt.
+    chosen: BTreeMap<CameraKey, CameraClock>,
     cameras: Vec<(CameraKey, CameraClock)>,
 }
 
@@ -218,8 +250,10 @@ pub(crate) struct ImportView<'a> {
     /// GPX files found, and how many of them are still in iCloud. `None`
     /// while still looking.
     pub(crate) files: Option<(usize, usize)>,
-    /// One row per camera, once they're read.
-    pub(crate) cameras: Option<&'a [(CameraKey, CameraClock)]>,
+    /// One row per camera read so far.
+    pub(crate) cameras: &'a [(CameraKey, CameraClock)],
+    /// The photos are still being read, so more rows may come.
+    pub(crate) reading: bool,
 }
 
 /// Which picker the import dialog's button opens.
@@ -263,16 +297,12 @@ impl App {
         self.open_import_dialog(sources);
     }
 
-    /// Open the dialog over `sources`. The photos of the folder and its
+    /// Open the dialog over `sources`. The cameras of the folder and its
     /// subfolders, and the chosen folders, are read off the UI thread.
     pub(super) fn open_import_dialog(&mut self, sources: Vec<PathBuf>) {
-        let dir = self.open_dir();
-        let opened = Pending::spawn("geotag-photos", move || {
-            let paths = dir.map(|dir| photos_under(&dir)).unwrap_or_default();
-            read_photos(&paths, Vec::new())
-        })
-        .and_then(|photos| Ok((photos, search(&sources)?)));
-        let (photos, found) = match opened {
+        let opened =
+            read_cameras(self.open_dir()).and_then(|reading| Ok((reading, search(&sources)?)));
+        let (reading, found) = match opened {
             Ok(opened) => opened,
             Err(reason) => {
                 self.set_status(StatusKind::Error, reason);
@@ -282,7 +312,9 @@ impl App {
         self.geotag.dialog = Some(Dialog {
             sources,
             found,
-            photos,
+            reading: Some(reading),
+            seen: Sightings::new(),
+            chosen: BTreeMap::new(),
             cameras: Vec::new(),
         });
         self.request_redraw();
@@ -315,18 +347,17 @@ impl App {
                 let in_icloud = found.files.iter().filter(|f| f.in_icloud).count();
                 (found.files.len(), in_icloud)
             }),
-            cameras: d.photos.done().map(|_| &d.cameras[..]),
+            cameras: &d.cameras,
+            reading: d.reading.is_some(),
         })
     }
 
-    pub(super) fn set_camera_clock(&mut self, row: usize, clock: CameraClock) {
-        if let Some(r) = self
-            .geotag
-            .dialog
-            .as_mut()
-            .and_then(|d| d.cameras.get_mut(row))
-        {
-            r.1 = clock;
+    pub(super) fn set_camera_clock(&mut self, camera: CameraKey, clock: CameraClock) {
+        if let Some(d) = self.geotag.dialog.as_mut() {
+            for row in d.cameras.iter_mut().filter(|r| r.0 == camera) {
+                row.1 = clock;
+            }
+            d.chosen.insert(camera, clock);
         }
         self.request_redraw();
     }
@@ -335,7 +366,7 @@ impl App {
     /// photos or the GPX files are still being read, or none was found.
     pub(super) fn commit_import_dialog(&mut self) {
         let ready = self.geotag.dialog.as_ref().is_some_and(|d| {
-            d.photos.done().is_some() && d.found.done().is_some_and(|f| !f.files.is_empty())
+            d.reading.is_none() && d.found.done().is_some_and(|f| !f.files.is_empty())
         });
         if !ready {
             return;
@@ -353,11 +384,10 @@ impl App {
             clocks: self.geotag.clocks.clone(),
             all: None,
         };
-        let (Pending::Done(found), Pending::Done(photos)) = (dialog.found, dialog.photos) else {
+        let Pending::Done(found) = dialog.found else {
             return;
         };
-        let paths = photos.iter().map(|p| p.path.clone()).collect();
-        if let Err(reason) = self.start_run(found, paths, photos, settings) {
+        if let Err(reason) = self.start_run(Tracks::Found(found), settings) {
             self.set_status(StatusKind::Error, reason);
         }
         self.request_redraw();
@@ -374,26 +404,22 @@ impl App {
 
     /// `geotag.import`: a run over the tracks in `paths` without the dialog.
     /// Each camera takes `camera_minus_utc_s` when given, else its
-    /// remembered setting. Returns how many photos it covers.
+    /// remembered setting. How many photos it covers is known only when it
+    /// ends.
     pub(super) fn start_geotag(
         &mut self,
         paths: &[PathBuf],
         camera_minus_utc_s: Option<i64>,
-    ) -> Result<usize, CommandError> {
-        let found = source::find(paths);
+    ) -> Result<(), CommandError> {
         let settings = Settings {
             clocks: self.geotag.clocks.clone(),
             all: camera_minus_utc_s,
         };
-        let photos = self
-            .open_dir()
-            .map(|dir| photos_under(&dir))
-            .unwrap_or_default();
-        self.start_run(found, photos, Vec::new(), settings)
+        self.start_run(Tracks::Search(paths.to_vec()), settings)
             .map_err(|reason| CommandError::Failed { reason })
     }
 
-    /// Why a run can't start now, if it can't.
+    /// Why a job can't start now, if it can't.
     fn check_can_geotag(&self) -> Result<(), String> {
         if self.geotag.job.is_some() {
             return Err(crate::i18n::t().geotag_busy.into());
@@ -411,47 +437,41 @@ impl App {
         self.playlist.as_ref().map(|pl| pl.dir().to_path_buf())
     }
 
-    /// Start matching `photos` on the tracks in `found`. A photo in `known`
-    /// is not read again.
-    fn start_run(
-        &mut self,
-        found: Found,
-        photos: Vec<PathBuf>,
-        known: Vec<Photo>,
-        settings: Settings,
-    ) -> Result<usize, String> {
-        let t = crate::i18n::t();
-        self.check_can_geotag()?;
-        if photos.is_empty() {
-            return Err(CommandError::NoPhotos.to_string());
-        }
-        if found.files.is_empty() {
-            return Err(no_tracks(&found.notes));
-        }
-        let total = photos.len();
+    /// Start matching the open folder's photos on `tracks`.
+    fn start_run(&mut self, tracks: Tracks, settings: Settings) -> Result<(), String> {
         let timeout = self.geotag.download_timeout;
-        let (tx, events) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name("geotag".into())
-            .spawn(move || {
-                let end = match run(found, &photos, known, &settings, timeout, &tx) {
-                    Ok(report) => Event::Done(report),
-                    Err(reason) => Event::Failed(reason),
-                };
-                let _ = tx.send(end);
-            })
-            .map_err(|e| (t.geotag_read_failed)(&e.to_string()))?;
-        self.geotag.job = Some(Job {
-            events,
-            tally: GeotagTally::default(),
-        });
-        self.set_status(StatusKind::Progress, t.geotag_running.into());
+        self.start_job(Work::Import(GeotagTally::default()), move |dir, tx| {
+            run(tracks, dir, &settings, timeout, tx)
+        })?;
+        self.set_status(StatusKind::Progress, crate::i18n::t().geotag_running.into());
         self.request_redraw();
-        Ok(total)
+        Ok(())
+    }
+
+    /// Start `work` on a worker thread over the open folder.
+    fn start_job(
+        &mut self,
+        work: Work,
+        worker: impl FnOnce(&Path, &Sender<Event>) -> Result<Report, String> + Send + 'static,
+    ) -> Result<(), String> {
+        self.check_can_geotag()?;
+        let dir = self
+            .open_dir()
+            .ok_or_else(|| CommandError::NoPhotos.to_string())?;
+        let (tx, events) = std::sync::mpsc::channel();
+        spawn("geotag", move || {
+            let end = match worker(&dir, &tx) {
+                Ok(report) => Event::Done(report),
+                Err(reason) => Event::Failed(reason),
+            };
+            let _ = tx.send(end);
+        })?;
+        self.geotag.job = Some(Job { events, work });
+        Ok(())
     }
 
     /// Store the locations that landed, and take what the dialog waits
-    /// on. Returns true while a run is going or the dialog waits.
+    /// on. Returns true while a job is going or the dialog waits.
     pub(crate) fn pump_geotag(&mut self) -> bool {
         let waiting = self.pump_dialog();
         if self.geotag.job.is_some() {
@@ -460,21 +480,33 @@ impl App {
         waiting || self.geotag.job.is_some()
     }
 
-    /// Take the dialog's GPX files and photos as they land, and fill its
-    /// camera rows from the photos. Returns true while either is still
+    /// Take the dialog's GPX files and each batch of cameras as they land,
+    /// and rebuild its camera rows. Returns true while either is still
     /// being read.
     fn pump_dialog(&mut self) -> bool {
         let Some(d) = self.geotag.dialog.as_mut() else {
             return false;
         };
         let mut landed = d.found.poll(Found::default);
-        if d.photos.poll(Vec::new) {
-            if let Some(photos) = d.photos.done() {
-                d.cameras = camera_rows(photos, &self.geotag.clocks);
+        let mut seen_more = false;
+        while let Some(rx) = &d.reading {
+            match rx.try_recv() {
+                Ok(batch) => {
+                    merge(&mut d.seen, batch);
+                    seen_more = true;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    d.reading = None;
+                    seen_more = true;
+                }
             }
+        }
+        if seen_more {
+            d.cameras = camera_rows(&d.seen, &d.chosen, &self.geotag.clocks);
             landed = true;
         }
-        let waiting = d.found.done().is_none() || d.photos.done().is_none();
+        let waiting = d.found.done().is_none() || d.reading.is_some();
         if landed {
             self.request_redraw();
         }
@@ -486,50 +518,83 @@ impl App {
             return;
         };
         let t = crate::i18n::t();
-        let mut landed = Vec::new();
+        let mut located = Vec::new();
+        let mut to_clear = Vec::new();
         let mut end = None;
         let mut downloading = None;
         loop {
             match job.events.try_recv() {
-                Ok(Event::Matched(path, outcome)) => {
-                    job.tally.count(&outcome);
-                    landed.push((path, outcome));
+                Ok(Event::Matched(batch)) => {
+                    for (path, outcome) in batch {
+                        if let Work::Import(tally) = &mut job.work {
+                            tally.count(&outcome);
+                        }
+                        if let MatchOutcome::Located(tag) = outcome {
+                            located.push((path, tag));
+                        }
+                    }
                 }
+                Ok(Event::Clear(batch)) => to_clear.extend(batch),
                 Ok(Event::Downloading(n)) => downloading = Some(n),
                 Ok(Event::Done(report)) => {
-                    end = Some(summary(&job.tally, &report));
+                    end = Some(Ok(report));
                     break;
                 }
                 Ok(Event::Failed(reason)) => {
-                    end = Some((StatusKind::Error, reason));
+                    end = Some(Err(reason));
                     break;
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    let reason = (t.geotag_read_failed)("the run stopped");
-                    end = Some((StatusKind::Error, reason));
+                    end = Some(Err((t.geotag_read_failed)("the run stopped")));
                     break;
                 }
             }
         }
-        for (path, outcome) in landed {
-            // A trashed photo's sidecar must not come back for it.
-            if let MatchOutcome::Located(tag) = outcome {
-                if path.exists() {
-                    self.save_patch(&path, Patch::Location(Some(tag)));
-                }
+        // A trashed photo's sidecar must not come back for it.
+        for (path, tag) in located {
+            if path.exists() {
+                self.save_patch(&path, Patch::Location(Some(tag)));
             }
+        }
+        let is_gpx = |tag: &crate::geotag::GeoTag| matches!(tag.source, GeoSource::Gpx { .. });
+        let mut cleared = 0;
+        for (path, on_disk) in to_clear {
+            let has_gpx = if self.folder_store.takes_result(&path) {
+                self.folder_store.location(&path).is_some_and(is_gpx)
+            } else {
+                on_disk
+            };
+            if has_gpx && path.exists() {
+                self.save_patch(&path, Patch::Location(None));
+                cleared += 1;
+            }
+        }
+        if let Some(Job {
+            work: Work::Clear(n),
+            ..
+        }) = self.geotag.job.as_mut()
+        {
+            *n += cleared;
         }
         if let Some(n) = downloading {
             self.set_status(StatusKind::Progress, (t.icloud_downloading)(n));
             self.request_redraw();
         }
-        if let Some((kind, msg)) = end {
-            self.geotag.job = None;
-            eprintln!("[lightphotos] geotag: {msg}");
-            self.set_status(kind, msg);
-            self.request_redraw();
-        }
+        let Some(end) = end else {
+            return;
+        };
+        let Some(job) = self.geotag.job.take() else {
+            return;
+        };
+        let (kind, msg) = match (end, job.work) {
+            (Err(reason), _) => (StatusKind::Error, reason),
+            (Ok(report), Work::Import(tally)) => summary(&tally, &report),
+            (Ok(_), Work::Clear(n)) => (StatusKind::Success, (t.gpx_locations_cleared)(n)),
+        };
+        eprintln!("[lightphotos] geotag: {msg}");
+        self.set_status(kind, msg);
+        self.request_redraw();
     }
 
     pub(crate) fn geotag_running(&self) -> bool {
@@ -537,56 +602,24 @@ impl App {
     }
 
     /// `geotag.clear`: forget every GPX location in the open folder and its
-    /// subfolders. Returns how many photos had one. Refused while a run is
-    /// saving, since a subfolder's locations are read from disk.
-    pub(super) fn clear_geotags(&mut self) -> Result<usize, String> {
-        if self.geotag.job.is_some() {
-            return Err(crate::i18n::t().geotag_busy.into());
-        }
-        let dir = self.open_dir();
-        let is_gpx = |tag: &crate::geotag::GeoTag| matches!(tag.source, GeoSource::Gpx { .. });
-        let paths: Vec<PathBuf> = dir
-            .as_deref()
-            .map(photos_under)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|p| {
-                // The open folder's records are in the cache, which holds
-                // edits not yet on disk. A subfolder's are only on disk.
-                if p.parent() == dir.as_deref() {
-                    self.folder_store.location(p).is_some_and(is_gpx)
-                } else {
-                    crate::sidecar::read_record(p)
-                        .is_ok_and(|rec| rec.location.as_ref().is_some_and(is_gpx))
-                }
-            })
-            .collect();
-        for path in &paths {
-            self.save_patch(path, Patch::Location(None));
-        }
-        let msg = (crate::i18n::t().gpx_locations_cleared)(paths.len());
-        self.set_status(StatusKind::Success, msg);
+    /// subfolders, on a worker that reads the subfolders' sidecars. How many
+    /// photos had one is known only when it ends.
+    pub(super) fn clear_geotags(&mut self) -> Result<(), String> {
+        self.start_job(Work::Clear(0), |dir, tx| {
+            clear(dir, tx);
+            Ok(Report::default())
+        })?;
         self.request_redraw();
-        Ok(paths.len())
+        Ok(())
     }
 }
 
-/// The photos in `dir` and in each subfolder the folder tree lists under it,
-/// down to [`source::MAX_DEPTH`] levels. A link to a folder is not followed,
-/// so the walk stays inside `dir` and can't loop.
-fn photos_under(dir: &Path) -> Vec<PathBuf> {
-    let mut photos = Vec::new();
-    let mut todo = vec![(dir.to_path_buf(), 0)];
-    while let Some((dir, depth)) = todo.pop() {
-        photos.extend_from_slice(crate::navigation::Playlist::from_dir(&dir).entries());
-        if depth < source::MAX_DEPTH {
-            let subdirs = crate::navigation::list_subdirs(&dir)
-                .into_iter()
-                .filter(|d| std::fs::symlink_metadata(d).is_ok_and(|m| m.is_dir()));
-            todo.extend(subdirs.rev().map(|d| (d, depth + 1)));
-        }
-    }
-    photos
+fn spawn(name: &str, work: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(work)
+        .map(drop)
+        .map_err(|e| (crate::i18n::t().geotag_read_failed)(&e.to_string()))
 }
 
 /// The GPX files among `sources`, looked for off the UI thread: a folder
@@ -596,16 +629,50 @@ fn search(sources: &[PathBuf]) -> Result<Pending<Found>, String> {
     Pending::spawn("geotag-search", move || source::find(&sources))
 }
 
-/// Each of `paths` with its camera, GPS and capture time, taking those in
-/// `known` as already read. A photo with no serial takes its model's one
-/// numbered body's.
-fn read_photos(paths: &[PathBuf], known: Vec<Photo>) -> Vec<Photo> {
-    let mut known: HashMap<PathBuf, Photo> =
-        known.into_iter().map(|p| (p.path.clone(), p)).collect();
-    let mut photos: Vec<Photo> = paths
-        .iter()
-        .map(|path| known.remove(path).unwrap_or_else(|| read_photo(path)))
-        .collect();
+/// Read the cameras of the photos under `dir`, off the UI thread, sending
+/// each batch's. The channel closes when the reading is done.
+fn read_cameras(dir: Option<PathBuf>) -> Result<Receiver<Sightings>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    spawn("geotag-photos", move || {
+        for paths in dir.iter().flat_map(|dir| PhotoWalk::new(dir)) {
+            let photos = read_photos(&paths);
+            let mut seen = Sightings::new();
+            merge(
+                &mut seen,
+                photos
+                    .iter()
+                    .filter_map(|p| p.facts.as_ref())
+                    .map(|f| (f.camera.clone(), recorded_offset(f))),
+            );
+            if tx.send(seen).is_err() {
+                return;
+            }
+        }
+    })?;
+    Ok(rx)
+}
+
+/// Add `from` to `into`, keeping each camera's first recorded offset.
+fn merge(into: &mut Sightings, from: impl IntoIterator<Item = (CameraKey, Option<i64>)>) {
+    for (camera, offset) in from {
+        let known = into.entry(camera).or_default();
+        if known.is_none() {
+            *known = offset;
+        }
+    }
+}
+
+/// The offset the photo's `OffsetTimeOriginal` recorded.
+fn recorded_offset(facts: &Facts) -> Option<i64> {
+    let offset = facts.stamp.as_ref()?.offset.as_deref()?;
+    crate::geotag::parse_utc_offset(offset)
+}
+
+/// Each of `paths` with its camera, GPS and capture time. A photo with no
+/// serial takes the serial of its model's one numbered body among them, so
+/// a batch holding a body's RAWs and JPEGs names one camera.
+fn read_photos(paths: &[PathBuf]) -> Vec<Photo> {
+    let mut photos: Vec<Photo> = paths.iter().map(|path| read_photo(path)).collect();
     cameras::fold_serials(
         photos
             .iter_mut()
@@ -633,46 +700,55 @@ fn read_photo(path: &Path) -> Photo {
     }
 }
 
-/// A row per camera among `photos`: its remembered clock, else the offset
-/// the first of its photos to record `OffsetTimeOriginal` gave, else this
-/// computer's, and paired with LightRemote when it's the only camera.
-fn camera_rows(photos: &[Photo], clocks: &CameraClocks) -> Vec<(CameraKey, CameraClock)> {
-    let mut recorded: BTreeMap<&CameraKey, Option<i64>> = BTreeMap::new();
-    for f in photos.iter().filter_map(|p| p.facts.as_ref()) {
-        let offset = f
-            .stamp
-            .as_ref()
-            .and_then(|s| crate::geotag::parse_utc_offset(s.offset.as_deref()?));
-        let known = recorded.entry(&f.camera).or_default();
-        if known.is_none() {
-            *known = offset;
-        }
-    }
+/// A row per camera `seen`, one with no serial folded onto its model's one
+/// numbered body: the user's choice, else its remembered clock, else the
+/// offset its photos recorded, else this computer's, and paired with
+/// LightRemote when it's the only camera.
+fn camera_rows(
+    seen: &Sightings,
+    chosen: &BTreeMap<CameraKey, CameraClock>,
+    clocks: &CameraClocks,
+) -> Vec<(CameraKey, CameraClock)> {
+    let mut sightings: Vec<(CameraKey, Option<i64>)> =
+        seen.iter().map(|(c, o)| (c.clone(), *o)).collect();
+    cameras::fold_serials(sightings.iter_mut().map(|(c, _)| c));
+    let mut folded = Sightings::new();
+    merge(&mut folded, sightings);
     let here = i64::from(chrono::Local::now().offset().local_minus_utc());
-    let only = recorded.len() == 1;
-    recorded
+    let only = folded.len() == 1;
+    folded
         .into_iter()
         .map(|(camera, offset)| {
-            let clock = clocks.get(camera).unwrap_or(CameraClock {
-                zone: CameraZone::nearest(offset.unwrap_or(here)),
-                paired: only,
-            });
-            (camera.clone(), clock)
+            let clock = chosen
+                .get(&camera)
+                .copied()
+                .or_else(|| clocks.get(&camera))
+                .unwrap_or(CameraClock {
+                    zone: CameraZone::nearest(offset.unwrap_or(here)),
+                    paired: only,
+                });
+            (camera, clock)
         })
         .collect()
 }
 
-/// The worker: download what iCloud holds, join the tracks, then match
-/// each photo, sending each outcome as it lands.
+/// The worker: find and download the tracks, join them, then walk the
+/// open folder a batch at a time, matching each photo and sending each
+/// batch's outcomes.
 fn run(
-    found: Found,
-    paths: &[PathBuf],
-    known: Vec<Photo>,
+    tracks: Tracks,
+    dir: &Path,
     settings: &Settings,
     timeout: Duration,
     tx: &Sender<Event>,
 ) -> Result<Report, String> {
-    let Found { files, notes } = found;
+    let Found { files, notes } = match tracks {
+        Tracks::Found(found) => found,
+        Tracks::Search(paths) => source::find(&paths),
+    };
+    if files.is_empty() {
+        return Err(no_tracks(&notes));
+    }
     let waiting = files.iter().filter(|f| f.in_icloud).count();
     if waiting > 0 {
         let _ = tx.send(Event::Downloading(waiting));
@@ -685,23 +761,22 @@ fn run(
         notes,
         disagreements: BTreeMap::new(),
     };
-    let photos = read_photos(paths, known);
-    let only_camera = photos
-        .iter()
-        .filter_map(|p| p.facts.as_ref())
-        .map(|f| &f.camera)
-        .collect::<BTreeSet<_>>()
-        .len()
-        == 1;
     let mut clocks: BTreeMap<CameraKey, Option<ClockModel>> = BTreeMap::new();
-    for photo in photos {
-        let outcome = match photo.facts {
-            Some(Facts {
-                camera,
-                has_gps,
-                stamp,
-            }) => {
-                let (setting, paired) = settings.for_camera(&camera, only_camera);
+    let mut any = false;
+    for paths in PhotoWalk::new(dir) {
+        any = true;
+        let matched = read_photos(&paths)
+            .into_iter()
+            .map(|photo| {
+                let Some(Facts {
+                    camera,
+                    has_gps,
+                    stamp,
+                }) = photo.facts
+                else {
+                    return (photo.path, MatchOutcome::NoCaptureTime);
+                };
+                let (setting, paired) = settings.for_camera(&camera);
                 let clock = clocks
                     .entry(camera.clone())
                     .or_insert_with(|| ClockModel::select(&track, setting, paired));
@@ -716,15 +791,37 @@ fn run(
                         *worst = off;
                     }
                 }
-                outcome
-            }
-            None => MatchOutcome::NoCaptureTime,
-        };
-        if tx.send(Event::Matched(photo.path, outcome)).is_err() {
+                (photo.path, outcome)
+            })
+            .collect();
+        if tx.send(Event::Matched(matched)).is_err() {
             break;
         }
     }
+    if !any {
+        return Err(CommandError::NoPhotos.to_string());
+    }
     Ok(report)
+}
+
+/// The clear's worker: send each batch's photos that may hold a GPX
+/// location.
+fn clear(dir: &Path, tx: &Sender<Event>) {
+    let is_gpx = |tag: &crate::geotag::GeoTag| matches!(tag.source, GeoSource::Gpx { .. });
+    for paths in PhotoWalk::new(dir) {
+        let open = paths.first().and_then(|p| p.parent()) == Some(dir);
+        let candidates: Vec<(PathBuf, bool)> = paths
+            .into_iter()
+            .filter_map(|p| {
+                let on_disk = crate::sidecar::read_record(&p)
+                    .is_ok_and(|rec| rec.location.as_ref().is_some_and(is_gpx));
+                (open || on_disk).then_some((p, on_disk))
+            })
+            .collect();
+        if !candidates.is_empty() && tx.send(Event::Clear(candidates)).is_err() {
+            return;
+        }
+    }
 }
 
 /// Why no track could be read: each file skipped, and those that didn't

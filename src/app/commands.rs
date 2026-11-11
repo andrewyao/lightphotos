@@ -462,17 +462,21 @@ impl App {
             }
             #[cfg(not(target_arch = "wasm32"))]
             Command::ImportGpsTracks(p) => {
-                let photos = self.start_geotag(&p.paths, p.camera_minus_utc_s)?;
+                self.start_geotag(&p.paths, p.camera_minus_utc_s)?;
                 Ok(Outcome {
-                    photos,
+                    photos: 0,
                     pending: true,
                 })
             }
             #[cfg(not(target_arch = "wasm32"))]
-            Command::ClearGeotags => match self.clear_geotags() {
-                Ok(photos) => done(photos),
-                Err(reason) => Err(CommandError::Failed { reason }),
-            },
+            Command::ClearGeotags => {
+                self.clear_geotags()
+                    .map_err(|reason| CommandError::Failed { reason })?;
+                Ok(Outcome {
+                    photos: 0,
+                    pending: true,
+                })
+            }
             #[cfg(target_arch = "wasm32")]
             Command::ImportGpsTracks(_) | Command::ClearGeotags => Err(CommandError::Failed {
                 reason: "GPS track import runs only in the desktop app".into(),

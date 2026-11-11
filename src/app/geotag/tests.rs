@@ -63,6 +63,12 @@ fn run_to_end(app: &mut App) {
     }
 }
 
+/// Choose `clock` in the dialog's camera row `row`.
+fn set_row(app: &mut App, row: usize, clock: CameraClock) {
+    let camera = app.import_dialog().unwrap().cameras[row].0.clone();
+    app.set_camera_clock(camera, clock);
+}
+
 fn model(name: &str) -> Field {
     field(Tag::Model, Value::Ascii(vec![name.as_bytes().to_vec()]))
 }
@@ -153,7 +159,11 @@ fn a_run_locates_each_photo_in_its_sidecar_and_leaves_the_files_alone() {
     );
 
     let out = app.run(import(&[&gpx], Some(9 * 3600))).unwrap();
-    assert_eq!((out.photos, out.pending), (4, true));
+    assert_eq!(
+        (out.photos, out.pending),
+        (0, true),
+        "the count comes in the closing status"
+    );
     assert!(app.batch_running(), "drive's idle waits for the run");
     run_to_end(&mut app);
 
@@ -184,26 +194,37 @@ fn a_run_locates_each_photo_in_its_sidecar_and_leaves_the_files_alone() {
             p.display()
         );
     }
-    assert_eq!(app.run(Command::ClearGeotags).unwrap().photos, 1);
+    assert!(app.run(Command::ClearGeotags).unwrap().pending);
+    assert!(app.batch_running(), "drive's idle waits for the clear");
+    run_to_end(&mut app);
     assert_eq!(app.stored_location(&paths[0]), None);
+    assert_eq!(
+        app.status_text(),
+        Some((crate::i18n::t().gpx_locations_cleared)(1).as_str())
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn nothing_to_read_is_an_error_and_a_bad_file_fails_the_run_not_the_app() {
-    let (mut app, dir, _) = folder_app("geotag-bad", 1);
-    let missing = app.run(import(&[&dir.join("nope.gpx")], Some(0)));
-    assert!(
-        matches!(&missing, Err(CommandError::Failed { reason }) if reason.contains("nope.gpx")),
-        "{missing:?}"
-    );
+fn nothing_to_read_fails_the_run_and_a_bad_file_fails_the_run_not_the_app() {
+    let (mut app, dir, paths) = folder_app("geotag-bad", 1);
+    std::fs::write(&paths[0], jpeg_with(&[taken_at("2026:11:08 18:05:00")])).unwrap();
     let notes = dir.join("notes.txt");
     put(&notes, "not a track");
-    assert!(app.run(import(&[&notes], Some(0))).is_err());
     let empty = dir.join("empty");
     std::fs::create_dir_all(&empty).unwrap();
-    assert!(app.run(import(&[&empty], Some(0))).is_err());
-    assert!(!app.geotag_running());
+    let no_tracks = crate::i18n::t().geotag_no_tracks;
+    for (chosen, says) in [
+        (dir.join("nope.gpx"), "nope.gpx"),
+        (notes, no_tracks),
+        (empty, no_tracks),
+    ] {
+        app.run(import(&[&chosen], Some(0))).unwrap();
+        run_to_end(&mut app);
+        let status = app.status_text().unwrap_or_default();
+        assert!(status.contains(says), "{}: {status}", chosen.display());
+    }
+    assert_eq!(app.stored_location(&paths[0]), None);
 
     for (name, body) in [("bad.gpx", "<gpx><trk>"), ("empty.gpx", "")] {
         let gpx = dir.join(name);
@@ -496,7 +517,8 @@ fn the_dialog_asks_each_camera_once_and_remembers_its_setting() {
     run_to_end(&mut app);
     let view = app.import_dialog().unwrap();
     assert_eq!(view.files, Some((1, 0)));
-    let cameras: Vec<CameraKey> = view.cameras.unwrap().iter().map(|r| r.0.clone()).collect();
+    assert!(!view.reading);
+    let cameras: Vec<CameraKey> = view.cameras.iter().map(|r| r.0.clone()).collect();
     assert_eq!(
         cameras.iter().map(|c| c.pref_key()).collect::<Vec<_>>(),
         ["ILCE-7M2", "X100V#0042"]
@@ -509,13 +531,12 @@ fn the_dialog_asks_each_camera_once_and_remembers_its_setting() {
         app.import_dialog()
             .unwrap()
             .cameras
-            .unwrap()
             .iter()
             .all(|(_, c)| !c.paired),
         "with two cameras, neither is taken as LightRemote's"
     );
-    app.set_camera_clock(0, clock(540, true));
-    app.set_camera_clock(1, clock(540, false));
+    set_row(&mut app, 0, clock(540, true));
+    set_row(&mut app, 1, clock(540, false));
     app.commit_import_dialog();
     assert!(app.import_dialog().is_none());
     run_to_end(&mut app);
@@ -534,7 +555,7 @@ fn the_dialog_asks_each_camera_once_and_remembers_its_setting() {
 
     app.open_import_dialog(vec![gpx]);
     run_to_end(&mut app);
-    let rows = app.import_dialog().unwrap().cameras.unwrap().to_vec();
+    let rows = app.import_dialog().unwrap().cameras.to_vec();
     assert_eq!(
         rows,
         [
@@ -573,7 +594,7 @@ fn a_measurement_far_from_the_setting_is_used_and_flagged() {
     );
     app.open_import_dialog(vec![dir.join("t")]);
     run_to_end(&mut app);
-    let rows = app.import_dialog().unwrap().cameras.unwrap();
+    let rows = app.import_dialog().unwrap().cameras;
     assert!(
         rows[0].1.paired,
         "the only camera is taken as LightRemote's"
@@ -582,7 +603,7 @@ fn a_measurement_far_from_the_setting_is_used_and_flagged() {
         zone: CameraZone::new(minutes, dst).unwrap(),
         paired: true,
     };
-    app.set_camera_clock(0, paired(540, false));
+    set_row(&mut app, 0, paired(540, false));
     app.commit_import_dialog();
     run_to_end(&mut app);
     for p in &paths {
@@ -601,9 +622,10 @@ fn a_measurement_far_from_the_setting_is_used_and_flagged() {
 
     // Within half an hour of the setting, nothing is flagged.
     app.run(Command::ClearGeotags).unwrap();
+    run_to_end(&mut app);
     app.open_import_dialog(vec![dir.join("t")]);
     run_to_end(&mut app);
-    app.set_camera_clock(0, paired(540, true));
+    set_row(&mut app, 0, paired(540, true));
     app.commit_import_dialog();
     run_to_end(&mut app);
     let status = app.status_text().unwrap_or_default().to_string();
@@ -664,14 +686,16 @@ fn only_the_camera_paired_with_lightremote_takes_its_measurements() {
     app.open_import_dialog(vec![dir.join("t")]);
     run_to_end(&mut app);
     let tokyo = CameraZone::new(540, false).unwrap();
-    app.set_camera_clock(
+    set_row(
+        &mut app,
         0,
         CameraClock {
             zone: tokyo,
             paired: true,
         },
     );
-    app.set_camera_clock(
+    set_row(
+        &mut app,
         1,
         CameraClock {
             zone: tokyo,
@@ -694,7 +718,7 @@ fn only_the_camera_paired_with_lightremote_takes_its_measurements() {
 }
 
 #[test]
-fn the_run_matches_on_what_the_dialog_read() {
+fn the_run_reads_each_photo_itself_not_what_the_dialog_saw() {
     let (mut app, dir, paths) = folder_app("geotag-reuse", 1);
     std::fs::write(&paths[0], jpeg_with(&[taken_at("2026:11:08 18:05:00")])).unwrap();
     let gpx = dir.join("t/day.gpx");
@@ -703,7 +727,8 @@ fn the_run_matches_on_what_the_dialog_read() {
     run_to_end(&mut app);
     // Rewritten off the track after the dialog read it.
     std::fs::write(&paths[0], jpeg_with(&[taken_at("2026:11:09 18:05:00")])).unwrap();
-    app.set_camera_clock(
+    set_row(
+        &mut app,
         0,
         CameraClock {
             zone: CameraZone::new(540, false).unwrap(),
@@ -712,7 +737,7 @@ fn the_run_matches_on_what_the_dialog_read() {
     );
     app.commit_import_dialog();
     run_to_end(&mut app);
-    assert_eq!(location_file(&app, &paths[0]).as_deref(), Some("day.gpx"));
+    assert_eq!(app.stored_location(&paths[0]), None, "a day off the track");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -735,17 +760,183 @@ fn a_run_and_a_clear_reach_every_subfolder_but_hidden_and_linked_ones() {
 
     let mut app = App::new(None);
     crate::app::test_support::load_folder(&mut app, &root);
-    let out = app.run(import(&[&gpx], Some(9 * 3600))).unwrap();
-    assert_eq!(out.photos, 2, "day1 and day2/deep, not .hidden or link");
+    app.run(import(&[&gpx], Some(9 * 3600))).unwrap();
     run_to_end(&mut app);
+    assert_eq!(
+        app.status_text(),
+        Some((crate::i18n::t().geotag_done)(2, 0, 0, 0, 0, 0).as_str()),
+        "day1 and day2/deep, not .hidden or link"
+    );
     app.folder_store.flush_blocking(Duration::from_secs(10));
     let on_disk = |p: &Path| crate::sidecar::read_record(p).unwrap().location;
     assert!(on_disk(&day1).is_some() && on_disk(&day2).is_some());
     assert!(on_disk(&hidden).is_none() && on_disk(&linked).is_none());
 
-    assert_eq!(app.run(Command::ClearGeotags).unwrap().photos, 2);
+    app.run(Command::ClearGeotags).unwrap();
+    run_to_end(&mut app);
+    assert_eq!(
+        app.status_text(),
+        Some((crate::i18n::t().gpx_locations_cleared)(2).as_str())
+    );
     app.folder_store.flush_blocking(Duration::from_secs(10));
     assert!(on_disk(&day1).is_none() && on_disk(&day2).is_none());
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[test]
+fn the_photo_walk_goes_a_folder_and_a_batch_at_a_time() {
+    let root = crate::app::test_support::temp_folder("geotag-batches");
+    let outside = crate::app::test_support::temp_folder("geotag-batches-outside");
+    let mut expected = Vec::new();
+    for i in 0..walk::BATCH + 10 {
+        let p = root.join(format!("{i:04}.jpg"));
+        put(&p, "");
+        expected.push(p);
+    }
+    let mut deep = root.join("nested");
+    for level in 1..=MAX_DEPTH {
+        let p = deep.join("x.jpg");
+        put(&p, "");
+        expected.push(p);
+        deep = deep.join(format!("l{level}"));
+    }
+    put(&deep.join("too-deep.jpg"), "");
+    put(&root.join("empty/only/e.jpg"), "");
+    expected.push(root.join("empty/only/e.jpg"));
+    put(&root.join(".hidden/h.jpg"), "");
+    put(&outside.join("linked.jpg"), "");
+    std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+    let batches: Vec<Vec<PathBuf>> = PhotoWalk::new(&root).collect();
+    assert!(batches.len() > 2, "{} batches", batches.len());
+    for batch in &batches {
+        assert!(
+            !batch.is_empty() && batch.len() <= walk::BATCH,
+            "{}",
+            batch.len()
+        );
+        let parent = batch[0].parent();
+        assert!(
+            batch.iter().all(|p| p.parent() == parent),
+            "one folder each"
+        );
+    }
+    let mut seen: Vec<PathBuf> = batches.into_iter().flatten().collect();
+    seen.sort();
+    expected.sort();
+    assert_eq!(seen, expected, "hidden, linked and too deep left out");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[test]
+fn a_jpeg_apart_from_its_raws_takes_its_bodys_remembered_clock() {
+    let root = crate::app::test_support::temp_folder("geotag-apart");
+    let serial = field(Tag::BodySerialNumber, Value::Ascii(vec![b"3001".to_vec()]));
+    let raw = root.join("raw/a.jpg");
+    let jpeg = root.join("b.jpg");
+    put(&raw, "");
+    std::fs::write(
+        &raw,
+        jpeg_with(&[taken_at("2026:11:08 18:05:00"), model("Z 8"), serial]),
+    )
+    .unwrap();
+    put(&jpeg, "");
+    std::fs::write(
+        &jpeg,
+        jpeg_with(&[taken_at("2026:11:08 18:06:00"), model("Z 8")]),
+    )
+    .unwrap();
+    let gpx = root.join("t/day.gpx");
+    put(&gpx, GPX);
+    let mut app = App::new(None);
+    crate::app::test_support::load_folder(&mut app, &root);
+    let body = CameraKey {
+        model: "Z 8".into(),
+        serial: Some("3001".into()),
+    };
+    let tokyo = CameraClock {
+        zone: CameraZone::new(540, false).unwrap(),
+        paired: false,
+    };
+    app.geotag.clocks.set(&body, tokyo);
+
+    app.run(import(&[&gpx], None)).unwrap();
+    run_to_end(&mut app);
+    assert_eq!(
+        clock_of(&app, &jpeg),
+        Some((9 * 3600, Some(ClockSource::Setting)))
+    );
+    app.folder_store.flush_blocking(Duration::from_secs(10));
+    let raw_tag = crate::sidecar::read_record(&raw).unwrap().location;
+    assert!(raw_tag.is_some_and(|t| matches!(
+        t.source,
+        GeoSource::Gpx {
+            camera_minus_utc_s: 32400,
+            ..
+        }
+    )));
+
+    let other = CameraKey {
+        model: "Z 8".into(),
+        serial: Some("3002".into()),
+    };
+    app.geotag.clocks.set(&other, tokyo);
+    let serialless = CameraKey {
+        model: "Z 8".into(),
+        serial: None,
+    };
+    assert_eq!(
+        app.geotag.clocks.get(&serialless),
+        None,
+        "with two bodies, which one is unknown"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_camera_row_the_user_set_keeps_its_clock_as_more_cameras_arrive() {
+    let (mut app, dir, _) = folder_app("geotag-rows", 1);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let gpx = dir.join("day.gpx");
+    put(&gpx, GPX);
+    app.geotag.dialog = Some(Dialog {
+        sources: vec![gpx.clone()],
+        found: Pending::Done(source::find(&[gpx])),
+        reading: Some(rx),
+        seen: Sightings::new(),
+        chosen: BTreeMap::new(),
+        cameras: Vec::new(),
+    });
+    let camera = |name: &str| CameraKey {
+        model: name.into(),
+        serial: None,
+    };
+    let tokyo = CameraClock {
+        zone: CameraZone::new(540, false).unwrap(),
+        paired: false,
+    };
+    tx.send(Sightings::from([(camera("Z 8"), Some(0))]))
+        .unwrap();
+    app.pump_geotag();
+    set_row(&mut app, 0, tokyo);
+    tx.send(Sightings::from([(camera("A1"), Some(0))])).unwrap();
+    drop(tx);
+    run_to_end(&mut app);
+    let view = app.import_dialog().unwrap();
+    assert!(!view.reading);
+    let rows: Vec<(String, CameraZone)> = view
+        .cameras
+        .iter()
+        .map(|(c, clock)| (c.pref_key(), clock.zone))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("A1".to_string(), CameraZone::nearest(0)),
+            ("Z 8".into(), tokyo.zone),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

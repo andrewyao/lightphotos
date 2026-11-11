@@ -816,7 +816,9 @@ mod fullscreen;
 #[cfg(not(target_arch = "wasm32"))]
 mod geotag;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use geotag::{camera_label, override_download_timeout, CameraClock, PickKind};
+pub(crate) use geotag::{
+    camera_label, override_download_timeout, CameraClock, CameraKey, PickKind,
+};
 mod slideshow;
 pub(crate) use slideshow::SlideshowSettings;
 mod group_compare;
@@ -1652,7 +1654,9 @@ impl App {
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::AddGpsTracks(kind) => self.add_gps_tracks(kind),
                 #[cfg(not(target_arch = "wasm32"))]
-                ui::UiAction::SetCameraClock { row, clock } => self.set_camera_clock(row, clock),
+                ui::UiAction::SetCameraClock { camera, clock } => {
+                    self.set_camera_clock(camera, clock)
+                }
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::CommitImport => self.commit_import_dialog(),
                 #[cfg(not(target_arch = "wasm32"))]

@@ -1257,11 +1257,14 @@ impl Command {
                  photo whose file has GPS keeps its own. Files still in iCloud are downloaded \
                  first, waiting up to a minute. Each photo's camera clock comes from \
                  LightRemote's measurements in the tracks, else `camera_minus_utc_s`, else \
-                 its camera's remembered time zone. Desktop only.",
+                 its camera's remembered time zone. Runs in the background: `photos` is 0, \
+                 and the closing status gives each outcome's count. Desktop only.",
                 false,
             ),
             ClearGeotags => (
-                "Remove the GPX locations from the photos in the open folder and its subfolders.",
+                "Remove the GPX locations from the photos in the open folder and its subfolders. \
+                 Runs in the background: `photos` is 0, and the closing status gives how many \
+                 photos lost one.",
                 false,
             ),
             Undo => (

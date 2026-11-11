@@ -49,7 +49,7 @@ pub enum UiAction {
     /// A camera row's clock, as chosen.
     #[cfg(not(target_arch = "wasm32"))]
     SetCameraClock {
-        row: usize,
+        camera: crate::app::CameraKey,
         clock: crate::app::CameraClock,
     },
     #[cfg(not(target_arch = "wasm32"))]

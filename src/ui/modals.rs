@@ -238,20 +238,16 @@ pub(super) fn gps_import_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) 
             });
         });
         form.section(ui, t.camera_time_zone, |ui| {
-            let Some(cameras) = view.cameras else {
-                form::hint(ui, t.cameras_reading);
-                return;
-            };
             egui::ScrollArea::vertical()
                 .id_salt("gps_cameras")
                 .max_height(LIST_HEIGHT * 2.0)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    for (row, (camera, clock)) in cameras.iter().enumerate() {
+                    for (camera, clock) in view.cameras {
                         let label = crate::app::camera_label(camera);
                         form.row(ui, &label, |ui| {
                             let mut picked = *clock;
-                            egui::ComboBox::from_id_salt(("camera_zone", row))
+                            egui::ComboBox::from_id_salt(("camera_zone", camera))
                                 .width(ui.available_width())
                                 .selected_text(zone_text(clock.zone.utc_offset_min))
                                 .show_ui(ui, |ui| {
@@ -271,17 +267,23 @@ pub(super) fn gps_import_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) 
                             let zone = picked.zone;
                             if let Some(zone) = CameraZone::new(zone.utc_offset_min, zone.dst) {
                                 let clock = CameraClock { zone, ..picked };
-                                out.actions.push(UiAction::SetCameraClock { row, clock });
+                                out.actions.push(UiAction::SetCameraClock {
+                                    camera: camera.clone(),
+                                    clock,
+                                });
                             }
                         });
                     }
                 });
+            if view.reading {
+                form::hint(ui, t.cameras_reading);
+            }
             form::hint(ui, t.camera_time_zone_hint);
         });
         let buttons = [
             Button::new(t.cancel, Role::Cancel),
             Button {
-                enabled: view.files.is_some_and(|(n, _)| n > 0) && view.cameras.is_some(),
+                enabled: view.files.is_some_and(|(n, _)| n > 0) && !view.reading,
                 ..Button::new(t.geotag_import, Role::Primary)
             },
         ];

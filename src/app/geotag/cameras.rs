@@ -132,8 +132,26 @@ impl CameraClocks {
         serde_json::to_string(&self.0).unwrap_or_else(|_| "{}".into())
     }
 
+    /// `camera`'s remembered clock. One with no serial that was never asked
+    /// about takes its model's one remembered numbered body's: a body's
+    /// JPEGs can lack the serial its RAWs carry, and a run that reads a
+    /// batch at a time may not see the RAWs.
     pub(crate) fn get(&self, camera: &CameraKey) -> Option<CameraClock> {
-        self.0.get(&camera.pref_key()).copied()
+        if let Some(clock) = self.0.get(&camera.pref_key()) {
+            return Some(*clock);
+        }
+        if camera.serial.is_some() {
+            return None;
+        }
+        let prefix = format!("{}#", camera.model);
+        let mut bodies = self
+            .0
+            .range(prefix.clone()..)
+            .take_while(|(key, _)| key.starts_with(&prefix));
+        match (bodies.next(), bodies.next()) {
+            (Some((_, clock)), None) => Some(*clock),
+            _ => None,
+        }
     }
 
     /// Remember `clock` for `camera`. Past [`MAX_CAMERAS`], a new camera is
