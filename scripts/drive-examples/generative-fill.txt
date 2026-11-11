@@ -1,0 +1,93 @@
+# Generative fill from Settings to an undone fill, on one photo, against
+# fake-comfyui.py standing in for ComfyUI. Run it from the repo root:
+#
+#   d=$(mktemp -d)
+#   scripts/drive-examples/make-fixture.sh "$d/photos" 3
+#   scripts/drive-examples/fake-comfyui.py --make-models "$d/models"
+#   scripts/drive-examples/fake-comfyui.py --port 8765 --delay 2 &
+#   ./target/release/lightphotos --drive scripts/drive-examples/generative-fill.txt \
+#       --drive-out "$d/shots" --models-pick "$d/models" "$d/photos/IMG_0001.jpg"
+#   kill %1
+#
+# The server's flags pick what the same steps show:
+#   --delay 2        the run above: three variations
+#   --delay 2 --fail 2       one variation fails: the fill keeps two, with a notice
+#   --delay 2 --die-after 2  the server dies mid-job: the notice says to start it again
+#   not started      Generative is off, and its hover text says to start ComfyUI
+#   --missing vae    Generative is off, and its hover text names the file
+#
+# No command names these controls yet, so the clicks are at fixed points of
+# a 1200x1000 window in the default font size. Each says what it presses.
+size 1200 1000
+idle
+
+# Settings > ComfyUI. The section is one checkbox until it is ticked.
+key cmd+,
+idle
+shot settings-comfyui-off
+click 487 686           # Enable ComfyUI
+idle
+click 505 785           # Features: Generative Fill
+idle
+click 640 587           # the Server field
+type 127.0.0.1:8765
+idle
+click 539 633           # Models folder: Choose..., answered by --models-pick
+idle
+shot settings-comfyui-on
+key escape
+idle
+
+# Touch Up, with the pointer resting on the Generative switch for its hover text.
+key q
+idle
+move 933 244
+wait 1200
+shot generative-switch
+click 933 244           # Generative on
+idle
+# A brush wide enough to see: ] grows it a step.
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+key ]
+move 300 400
+idle
+shot generative-on
+
+# Paint; letting go sends the area.
+stroke 250,300 300,320 360,330 420,320 480,300
+wait 1000
+shot generating
+# A failure's notice lasts three seconds, and `idle` would outlast it.
+wait 2000
+shot just-landed
+idle
+shot result
+
+# The next variation, then Cmd+Z takes the fill back.
+click 968 567           # the > beside 1/3
+idle
+shot next-variation
+move 300 400
+key cmd+z
+idle
+shot after-undo
