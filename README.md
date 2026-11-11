@@ -23,6 +23,33 @@ Keyboard shortcuts are in [`docs/KEYBOARD_SHORTCUTS.md`](docs/KEYBOARD_SHORTCUTS
 (or press `?` in the app). The architecture diagrams are in
 [`docs/SYSTEM_DIAGRAM.md`](docs/SYSTEM_DIAGRAM.md).
 
+## Generative fill with ComfyUI
+
+LightPhotos can remove or replace part of a photo: paint over it, and an
+image model fills it in. The model runs in [ComfyUI](https://www.comfy.org)
+on your own computer, so nothing is uploaded anywhere. This works in the
+desktop app. The browser version shows fills made on the desktop but can't
+make new ones.
+
+1. **Enable it.** Install ComfyUI Desktop. In LightPhotos, open Settings
+   (`Cmd`+`,`), tick **Enable ComfyUI**, and tick **Generative Fill** under
+   Features. Leave **Server** empty unless ComfyUI runs on an unusual port.
+2. **Download the models.** Click **Choose…** beside Models folder and pick
+   ComfyUI's models folder, which ComfyUI Desktop keeps in
+   `Documents/ComfyUI/models` (its Help menu has Open Model Folder). Then
+   click **Download** next to each of the four model files, about 7 GB in
+   all. A download that is interrupted picks up where it stopped.
+3. **Start ComfyUI Desktop** and leave it running.
+4. **Paint.** Open a photo, go to the Masks page, turn on **Touch Up**
+   (`Q`) and then **Generative**. Drag over what you want gone and let go.
+   Type a prompt first if you want something specific there. In a little
+   while you get up to three variations: step through them with `‹` and
+   `›`, ask for others with **Generate More**, or **Delete** the fill.
+
+If Generative is greyed out, hover over it: it says what is missing. A
+fill is saved with your other edits, can be undone with `Cmd`+`Z`, and is
+included in exports.
+
 ## How to build it from scratch
 
 You need [Rust](https://rustup.rs). The repo picks the right toolchain for you.

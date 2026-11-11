@@ -94,9 +94,33 @@ edit.
 | `R` / `Enter` | Commit the crop |
 | `Esc` | Cancel the crop, or leave Touch Up |
 | `Delete` / `Backspace` | Delete the selected touch-up |
-| `Cmd`+`Z` | Delete the selected touch-up, or the last one if none is selected |
+| `Cmd`+`Z` | Undo the last Touch Up change, a spot or a generative fill |
 
 While cropping, drag the edges to resize and hold `Shift` to keep the ratio.
+
+In Touch Up:
+
+| Key | Action |
+| --- | --- |
+| `Q` | Touch Up on / off |
+| `[` / `]` | Brush size |
+| `Shift`+`[` / `Shift`+`]` | Brush feather |
+| Scroll | Brush size |
+| `Shift`+scroll | Brush feather |
+| `O` | Show or hide the spots and the fill pins |
+| `Shift`+`O` | Select the next spot |
+
+With the Generative brush on (desktop builds, with ComfyUI enabled in
+Settings):
+
+| Key | Action |
+| --- | --- |
+| Drag | Paint the area to fill; letting go sends it |
+| Click a pin | Pick that fill |
+| `Enter` | Generate again from the area kept after a failed or cancelled generation |
+| `Esc` | Stop the running generation; press again to drop the kept area, and again to leave Touch Up |
+| `Delete` / `Backspace` | Delete the picked fill |
+| `Cmd`+`Z` | Undo the last fill, Generate More or delete |
 
 On the Masks page, a mask tool or a picked mask takes these keys. The others
 work as usual.

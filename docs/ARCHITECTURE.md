@@ -597,6 +597,117 @@ stroke grows: about 2 ms a point for one 3:2 brush mask.
 
 ---
 
+## Generative fill
+
+A generative fill replaces a painted area of a photo with pixels a
+generator made. LightPhotos does not generate anything itself: it sends the
+area to a ComfyUI server running on the same computer and keeps what comes
+back. The fill is an edit like any other. It lives in the sidecar, undoes,
+is graded by the sliders, and draws the same in the Loupe, thumbnails and
+exports. Fills are made in the desktop builds; the browser build draws them.
+
+**What a fill is.** `ImageRecord::fills` holds up to `MAX_FILLS` (16)
+`Fill`s (`develop/fill.rs`). A `Fill` is a source UV rect, the ids of up to
+three variant patches, which one is shown, and the prompt: about 300 bytes
+of JSON. The pixels are not in the sidecar. Each variant is a `Patch`, an
+RGBA8 image of the rect at most 2048 px a side, whose colour is what the
+generator returned and whose alpha is the feathered painted area. The
+fills enter the edit signature, so thumbnails re-bake when one changes.
+
+**Side files.** Pixels too large for a sidecar live in content-addressed
+PNGs beside it (`develop/side_file.rs`), one subdirectory of
+`.lightphotos/` per kind:
+
+| Directory | Holds | Named by |
+|---|---|---|
+| `.lightphotos/masks/` | detected-mask coverage | `ImageRecord::detections` |
+| `.lightphotos/fills/` | fill patches | every variant of every `Fill` |
+
+A file is `<photo file name>.<id>.png`, where the id is a hash of its
+pixels. Files are write-once and checked against their id on every read.
+The file is written before the sidecar names it, so a sidecar never names
+a file that isn't there. After a folder loads, a sweep removes files no
+sidecar names that are older than an hour, except in a read-only folder.
+Leaving Touch Up drops the variants a fill isn't showing, and the next
+sweep frees their files.
+
+**How a fill draws.** Fills composite on source pixels at the Touch Up
+stage, before spot heals, masks, white balance and tone, so every slider
+grades them with the photo. The CPU bake does it in
+`fill::Compositor::apply`; the Loupe does it in `applyFills`
+(`loupe_common.wgsl`, and `base.wgsl` for the base layer) from one RGBA8
+atlas texture and a table of `GpuFill`s, and `renderer/match_test.rs`
+holds the two together. A generator works in display sRGB, so
+`fill::to_comfy` and `from_comfy` convert to and from the photo's own
+encoding; for a RAW that goes through the display curve, which is why
+highlights above its white clip inside a fill.
+
+**Who reads the patches.** Bake jobs carry a `FillInput`. Native workers
+read the patch files themselves (`OnDisk`); the Loupe's come from
+`app/fill.rs`'s `PatchStore`, which holds the shown photo's and loads them
+on a worker. A read-only folder takes no files, so a fill made there keeps
+its record and patches in the store for the session. In the browser no
+worker can reach the folder: the store lists the files it wants, the app
+reads each through File System Access (`web_folder_store_fs::read_fill`),
+and both the Loupe and thumbnail bakes take patches from the store, up to
+192 MiB of them. A web export reads its own. A patch that is missing or
+corrupt draws nothing; natively the corrupt file is removed.
+
+**The `comfy` module** (`src/comfy/`, native only) is everything that
+knows ComfyUI:
+
+- `client.rs` is a blocking `ureq` client for the six routes used: check
+  the server, list a loader's models, upload an image, queue a workflow,
+  poll its history, fetch the result, and cancel. Every reply is size
+  capped. A server that doesn't answer gives the one value `LOST`; the
+  transport's own text goes to the log, never to the UI.
+- `workflow.rs` fills the photo, the prompt and a seed into an API-format
+  workflow. A workflow needs exactly one `LoadImage`, a `SaveImage`, and a
+  node titled `LightPhotos Prompt`; one that doesn't gets an error naming
+  what to change.
+- `features.rs` is the table of AI features: each row has its workflow
+  JSON (`assets/comfyui/`) and the model files that workflow loads, with
+  each file's folder, URL, size and SHA-256. Settings and the liveness
+  check walk this table; nothing branches on a feature.
+- `download.rs` downloads one model file.
+
+**A generation** (`app/generative.rs`). Releasing the Generative brush
+turns the stroke into a coverage raster and starts one thread. It crops the
+photo to the painted area's bounds plus context (`develop/fill_request.rs`),
+scales the crop to at most 1024 px with sides in multiples of 8, cuts the
+painted area out of its alpha, uploads it, queues the workflow three times
+with three seeds, and turns each result into a patch written beside the
+photo. The frame loop polls the thread and records the `Fill` when it
+finishes. A variant that fails does not fail the job: the fill is made of
+the variants that arrived, and a notice reports the rest. `Esc` sets a
+stop flag the thread checks between polls. A fill's undo step is on Touch
+Up's own stack with the spots (`TouchStep`), not the main edit history.
+
+**Liveness** (`app/comfy.rs`). Nothing contacts ComfyUI until it is
+enabled in Settings, and then only while Touch Up is open: on entering
+it, every 5 s while the server is down, every 30 s while it is up, and at
+once after a job fails. There is no probe at startup. A probe is
+`GET /system_stats` with a one-second timeout, on its own thread. With no
+URL set it tries `127.0.0.1:8000` (ComfyUI Desktop) and then
+`127.0.0.1:8188`, and remembers the one that answers. A server that
+answers is also asked which model files its loaders list, and a file the
+workflow names that is not listed counts as down, with the file named.
+`Comfy::gate` folds the settings, the models folder scan and this status
+into one answer per feature (hidden, blocked with a reason, checking, or
+ready), and that is the only thing the UI reads.
+
+**Downloads.** LightPhotos ships no model weights. Settings offers each
+missing file, and one download runs at a time on its own thread. A model
+is gigabytes, so it streams to `<file>.part` beside its final name. The
+`.part` is renamed into place only when its size and SHA-256 match, so
+ComfyUI never sees a half-written model. A `.part` left by a cancel, a
+crash or a dropped connection is resumed with an HTTP Range request.
+
+The App Store build is sandboxed, so writing into the models folder there
+will need a security-scoped bookmark for it; today only its path is kept.
+
+---
+
 ## Vision signals (macOS only)
 
 Machine learning enters the app in two places. On macOS it is Apple's Vision
@@ -855,5 +966,10 @@ already keeps handles for.
 | `scoring/judge.rs` | Quality score: technical measures plus Vision face and aesthetics signals | all; Vision part macOS only, technical-only elsewhere |
 | `jobs/score.rs` | `ScorePool`: scores chosen photos on 2-4 low-priority workers | builds everywhere; `ScorePool::new` returns `None` off macOS, where a technical-only score would mislead |
 | `persist/signalcache.rs` | Persists capture time and face quality to `.lightphotos/signals.json` | all |
+| `develop/fill.rs`, `develop/fill_request.rs` | A generative fill's record, its patch files and colour encoding; the crop a generation uploads and the patch its reply becomes | all |
+| `app/fill.rs` | The fill patches in memory, for the Loupe and, in the browser, for bakes | all |
+| `comfy/` | The ComfyUI client, workflow injection, feature table and model downloader | native |
+| `app/comfy.rs` | The Settings ▸ ComfyUI choices, server liveness, the models folder scan and the download queue | native |
+| `app/generative.rs` | Touch Up's Generative brush: the stroke, the job thread, cancel, variants, undo and the prune on leaving | native |
 | `control_auth.rs` | HMAC sign-in of the `--control` channel, shared by the app and `lightphotos-mcp` | native |
 | `bin/*_probe.rs` | Probes that run one lib stage on real photos: `face_probe`, `score_probe`, `seg_probe`, `sky_probe` (writes `scoring/sky.rs`'s coverage as images) | native |
