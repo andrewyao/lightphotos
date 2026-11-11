@@ -8,15 +8,93 @@
 //! Native only. No worker in the browser can reach the folder, and nothing
 //! reads patches through File System Access yet, so there a fill draws
 //! nothing, in the Loupe or in a bake.
+//!
+//! A read-only folder takes no file, so a fill made there keeps its record
+//! and its patches in the store's memory for the session, and bakes take
+//! them from there.
 
 use std::path::Path;
 
-use crate::develop::fill::{FillInput, FillSet};
+use crate::develop::fill::{Fill, FillInput, FillSet};
+use crate::develop::TouchUp;
 
 use super::App;
 
-#[cfg(not(target_arch = "wasm32"))]
+/// One step of Touch Up's own undo: what the photo held before a spot or a
+/// fill changed, newest last, so Cmd+Z walks both in the order they were
+/// made.
+pub(crate) enum TouchStep {
+    Spots(Vec<TouchUp>),
+    Fills(Vec<Fill>),
+}
+
+/// What the Touch Up panel and the Loupe draw for the Generative brush.
+pub(crate) struct GenerativeView<'a> {
+    /// The panel's switch is on.
+    pub on: bool,
+    /// A drag on the photo paints: the switch is on, Touch Up is open and
+    /// ComfyUI can run the fill.
+    pub armed: bool,
+    /// Why the controls are disabled, for their hover text.
+    pub blocked: Option<String>,
+    pub prompt: &'a str,
+    pub job: JobView<'a>,
+    /// The shown photo's fills, as source UV rects.
+    pub fills: Vec<[f32; 4]>,
+    pub picked: Option<PickedFill>,
+}
+
+pub(crate) enum JobView<'a> {
+    Idle,
+    /// The pointer is down on a stroke.
+    Painting,
+    /// `bbox` is the rect being filled, when it is on the shown photo.
+    Generating {
+        done: usize,
+        of: usize,
+        bbox: Option<[f32; 4]>,
+    },
+    /// A stroke whose job failed (`why`) or was cancelled, kept so Generate
+    /// can send it again.
+    Kept {
+        why: Option<&'a str>,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PickedFill {
+    pub index: usize,
+    /// The variant shown, from 0.
+    pub variant: usize,
+    pub variants: usize,
+}
+
 pub(crate) use store::PatchStore;
+
+/// The browser's store: nothing there is read-only or made in the session.
+#[cfg(target_arch = "wasm32")]
+mod store {
+    use std::path::Path;
+
+    use crate::develop::fill::{Fill, FillSet};
+
+    #[derive(Default)]
+    pub(crate) struct PatchStore;
+
+    impl PatchStore {
+        pub(crate) fn new() -> Self {
+            PatchStore
+        }
+
+        pub(crate) fn unsaved_fills(&self, _photo: &Path) -> Option<&[Fill]> {
+            None
+        }
+
+        pub(crate) fn unsaved_set(&self, _photo: &Path) -> Option<FillSet> {
+            None
+        }
+    }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 mod store {
@@ -40,6 +118,13 @@ mod store {
         id: RasterId,
     }
 
+    /// A read-only photo's fills made this session, with their patches.
+    #[derive(Default)]
+    struct Unsaved {
+        fills: Option<Vec<Fill>>,
+        patches: HashMap<RasterId, Arc<Patch>>,
+    }
+
     pub(crate) struct PatchStore {
         /// The photo the slots belong to. Showing another drops them, so
         /// at most one photo's patches are held.
@@ -49,6 +134,8 @@ mod store {
         /// Loads submitted and not yet drained, so the frame loop keeps
         /// polling.
         in_flight: usize,
+        /// What read-only folders could not be given as files.
+        unsaved: HashMap<PathBuf, Unsaved>,
     }
 
     impl PatchStore {
@@ -64,7 +151,69 @@ mod store {
                     |_| "reading a fill's image file panicked".into(),
                 ),
                 in_flight: 0,
+                unsaved: HashMap::new(),
             }
+        }
+
+        /// The fills of a read-only `photo` as this session left them;
+        /// `None` when it made none there, so the sidecar's stand.
+        pub(crate) fn unsaved_fills(&self, photo: &Path) -> Option<&[Fill]> {
+            self.unsaved.get(photo)?.fills.as_deref()
+        }
+
+        /// Keeps `fills` as a read-only `photo`'s, in place of a sidecar
+        /// write.
+        pub(crate) fn keep_fills(&mut self, photo: &Path, fills: Vec<Fill>) {
+            self.unsaved.entry(photo.to_path_buf()).or_default().fills = Some(fills);
+        }
+
+        /// Patches a generation just made for `photo`, so the Loupe draws
+        /// them without reading them back. `keep` holds them, and the shown
+        /// photo's other loaded patches, for the session: a read-only
+        /// folder's patches have no file.
+        pub(crate) fn hand_in(
+            &mut self,
+            photo: &Path,
+            patches: impl Iterator<Item = Arc<Patch>>,
+            keep: bool,
+        ) {
+            let current = self.photo.as_deref() == Some(photo);
+            for patch in patches {
+                if keep {
+                    let kept = self.unsaved.entry(photo.to_path_buf()).or_default();
+                    kept.patches.insert(patch.id(), Arc::clone(&patch));
+                }
+                if current {
+                    self.slots.insert(patch.id(), Slot::Ready(patch));
+                }
+            }
+            if keep && current {
+                let kept = self.unsaved.entry(photo.to_path_buf()).or_default();
+                for (id, slot) in &self.slots {
+                    if let Slot::Ready(patch) = slot {
+                        kept.patches.entry(*id).or_insert_with(|| Arc::clone(patch));
+                    }
+                }
+            }
+        }
+
+        /// Patch `id` of `photo`, if it is in memory.
+        pub(crate) fn ready(&self, photo: &Path, id: RasterId) -> Option<Arc<Patch>> {
+            let kept = || self.unsaved.get(photo)?.patches.get(&id).cloned();
+            match self.slots.get(&id) {
+                Some(Slot::Ready(patch)) if self.photo.as_deref() == Some(photo) => {
+                    Some(Arc::clone(patch))
+                }
+                _ => kept(),
+            }
+        }
+
+        /// A read-only `photo`'s fills with the patches held for it, for a
+        /// bake; `None` when the session made none there.
+        pub(crate) fn unsaved_set(&self, photo: &Path) -> Option<FillSet> {
+            let kept = self.unsaved.get(photo)?;
+            let fills = kept.fills.as_deref()?;
+            Some(FillSet::new(fills, |id| kept.patches.get(&id).cloned()))
         }
 
         /// `photo`'s fills with the patches in hand, starting a load for each
@@ -76,7 +225,11 @@ mod store {
             }
             FillSet::new(fills, |id| {
                 if !self.slots.contains_key(&id) {
-                    let slot = self.start_load(photo, id);
+                    let kept = self.unsaved.get(photo).and_then(|u| u.patches.get(&id));
+                    let slot = match kept {
+                        Some(patch) => Slot::Ready(Arc::clone(patch)),
+                        None => self.start_load(photo, id),
+                    };
                     self.slots.insert(id, slot);
                 }
                 match self.slots.get(&id) {
@@ -143,9 +296,23 @@ impl App {
     pub(crate) fn current_fill_set(&mut self) -> FillSet {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = self.shown.path() {
-            return self.patches.ask(path, self.folder_store.fills(path));
+            let fills = self.fills_of(path).to_vec();
+            return self.patches.ask(path, &fills);
         }
         FillSet::default()
+    }
+
+    /// The browser build can't reach a ComfyUI server, so it never shows
+    /// the Generative brush.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn generative_view(&self) -> Option<GenerativeView<'_>> {
+        None
+    }
+
+    /// A photo's fills: the sidecar's, or for a read-only folder the ones
+    /// made this session and kept in memory.
+    pub(crate) fn fills_of(&self, path: &Path) -> &[Fill] {
+        fills_in(&self.folder_store, &self.patches, path)
     }
 
     /// Whether a patch is still loading, so the frame loop keeps polling.
@@ -164,7 +331,7 @@ impl App {
     /// patch files itself, in a read-only folder too, since reading writes
     /// nothing.
     pub(crate) fn fill_input(&self, path: &Path) -> FillInput {
-        fill_input_of(&self.folder_store, path)
+        fill_input_of(&self.folder_store, &self.patches, path)
     }
 
     /// Each frame: patches that finished loading go up to the Loupe.
@@ -179,19 +346,34 @@ impl App {
     }
 }
 
-/// [`App::fill_input`] as a free function, so a caller holding the loader
-/// can still build one.
+/// [`App::fills_of`] as a free function, so a caller holding the loader
+/// can still ask.
+pub(crate) fn fills_in<'a>(
+    folder_store: &'a crate::persist::folder_store::FolderStore,
+    patches: &'a PatchStore,
+    path: &Path,
+) -> &'a [Fill] {
+    patches
+        .unsaved_fills(path)
+        .unwrap_or_else(|| folder_store.fills(path))
+}
+
+/// [`App::fill_input`] as a free function, as [`fills_in`] is.
 pub(crate) fn fill_input_of(
     folder_store: &crate::persist::folder_store::FolderStore,
+    patches: &PatchStore,
     path: &Path,
 ) -> FillInput {
+    if let Some(set) = patches.unsaved_set(path) {
+        return FillInput::Ready(set);
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         FillInput::OnDisk(folder_store.fills(path).to_vec())
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = (folder_store, path);
+        let _ = folder_store;
         FillInput::none()
     }
 }

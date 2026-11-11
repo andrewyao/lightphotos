@@ -6,6 +6,7 @@
 //! from their own threads, so blocking keeps an async runtime out of the
 //! crate, as in `export/immich.rs`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -21,6 +22,8 @@ const OBJECT_INFO_REPLY: u64 = 16 * 1024 * 1024;
 const HISTORY_REPLY: u64 = 8 * 1024 * 1024;
 const IMAGE_REPLY: u64 = 64 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(500);
+/// What [`ComfyServer::wait`] answers when its caller stopped it.
+pub const STOPPED: &str = "the job was cancelled";
 
 pub struct ComfyServer {
     url: String,
@@ -115,10 +118,6 @@ impl ComfyServer {
         })
     }
 
-    pub fn url(&self) -> &str {
-        &self.url
-    }
-
     /// Whether a ComfyUI server answers at `url`, within about a second.
     pub fn probe(url: &str) -> Result<ServerInfo, String> {
         let url = normalize_url(url)?;
@@ -206,20 +205,29 @@ impl ComfyServer {
         parse_queue(status, &String::from_utf8_lossy(&body))
     }
 
-    /// Polls until `prompt_id` finishes or `deadline` passes. Returns the
-    /// images `output_node` saved.
+    /// Polls until `prompt_id` finishes, `deadline` passes or `stop` is set.
+    /// Returns the images `output_node` saved.
     pub fn wait(
         &self,
         prompt_id: &str,
         output_node: &str,
         deadline: Instant,
+        stop: &AtomicBool,
     ) -> Result<Vec<OutputImage>, String> {
         loop {
+            if stop.load(Ordering::Relaxed) {
+                return Err(STOPPED.into());
+            }
             let resp = self
                 .agent
                 .get(format!("{}/history/{prompt_id}", self.url))
                 .call()
-                .map_err(|e| format!("lost ComfyUI at {}: {e}", self.url))?;
+                .map_err(|e| {
+                    format!(
+                        "ComfyUI stopped answering at {}. Start it again, then try again. ({e})",
+                        self.url
+                    )
+                })?;
             let body = checked(resp, HISTORY_REPLY)?;
             if let History::Done(images) = parse_history(&body, prompt_id, output_node)? {
                 return Ok(images);
@@ -827,6 +835,7 @@ mod tests {
                 &id,
                 &injected.output_node,
                 Instant::now() + Duration::from_secs(900),
+                &AtomicBool::new(false),
             )
             .unwrap();
         let bytes = server.fetch(&images[0]).unwrap();

@@ -332,7 +332,7 @@ impl App {
             self.detections
                 .get(path)
                 .unwrap_or(&develop::Detections::default()),
-            self.folder_store.fills(path),
+            self.fills_of(path),
             rot,
         )
     }
@@ -488,7 +488,7 @@ impl App {
             let touchups = self.touchups.get(path).map(Vec::as_slice).unwrap_or(&[]);
             let masks = self.masks.get(path).map(Vec::as_slice).unwrap_or(&[]);
             let rot = self.rotations.get(path).copied().unwrap_or(0);
-            let fills = self.folder_store.fills(path);
+            let fills = super::fill::fills_in(&self.folder_store, &self.patches, path);
             if adj.is_identity()
                 && touchups.is_empty()
                 && masks.is_empty()
@@ -510,7 +510,7 @@ impl App {
             } else if let Some(masks) =
                 super::masks::mask_input_of(&self.masks, &self.detections, &mut self.coverage, path)
             {
-                let fills = super::fill::fill_input_of(&self.folder_store, path);
+                let fills = super::fill::fill_input_of(&self.folder_store, &self.patches, path);
                 loader.request_bake(path, *px, *sig, img, adj, touchups, masks, fills, rot);
             }
         }

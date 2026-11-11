@@ -1,6 +1,7 @@
 use super::*;
 use std::path::Path;
 
+use super::fill::TouchStep;
 use super::history::{Before, EditStep, GroupBefore};
 use crate::develop::curve::Channel;
 use crate::develop::image_ops;
@@ -815,7 +816,10 @@ impl App {
         if self.current_touchups() == before.as_slice() {
             return false;
         }
-        self.touchup_undo.entry(path).or_default().push(before);
+        self.touchup_undo
+            .entry(path)
+            .or_default()
+            .push(TouchStep::Spots(before));
         true
     }
 
@@ -839,15 +843,20 @@ impl App {
         self.input_blocker().is_none() && !self.read_only() && self.history.can_redo()
     }
 
-    /// Steps the shown image's spots back to before the last add or delete.
+    /// Steps the shown image's spots or fills back to before the last
+    /// Touch Up change.
     pub(super) fn undo_touchup(&mut self) {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return;
         };
-        let Some(before) = self.touchup_undo.get_mut(&path).and_then(Vec::pop) else {
-            return;
-        };
-        self.apply_touchups(before);
+        match self.touchup_undo.get_mut(&path).and_then(Vec::pop) {
+            Some(TouchStep::Spots(before)) => self.apply_touchups(before),
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(TouchStep::Fills(before)) => self.store_fills(&path, before),
+            #[cfg(target_arch = "wasm32")]
+            Some(TouchStep::Fills(_)) => {}
+            None => {}
+        }
     }
 
     /// True while the next Loupe click samples a pixel for white balance.
