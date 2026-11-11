@@ -25,6 +25,10 @@
 
 mod app;
 mod autotone;
+// Wired into the app by the Generative Fill slice; until then only tests call it.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+mod comfy;
 mod i18n;
 mod jobs;
 mod navigation;

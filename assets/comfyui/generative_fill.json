@@ -1,0 +1,80 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "sdxl_inpainting_0.1_unet.fp16.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": { "title": "SDXL Inpainting UNet" }
+  },
+  "2": {
+    "class_type": "DualCLIPLoader",
+    "inputs": {
+      "clip_name1": "sdxl_inpainting_0.1_clip_l.fp16.safetensors",
+      "clip_name2": "sdxl_inpainting_0.1_clip_g.fp16.safetensors",
+      "type": "sdxl"
+    },
+    "_meta": { "title": "SDXL Text Encoders" }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "sdxl_inpainting_0.1_vae.fp16.safetensors" },
+    "_meta": { "title": "SDXL VAE" }
+  },
+  "4": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "lightphotos_fill.png" },
+    "_meta": { "title": "LightPhotos Image" }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "", "clip": ["2", 0] },
+    "_meta": { "title": "LightPhotos Prompt" }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "blurry, low quality, distorted, watermark, text, signature",
+      "clip": ["2", 0]
+    },
+    "_meta": { "title": "Negative Prompt" }
+  },
+  "7": {
+    "class_type": "InpaintModelConditioning",
+    "inputs": {
+      "positive": ["5", 0],
+      "negative": ["6", 0],
+      "vae": ["3", 0],
+      "pixels": ["4", 0],
+      "mask": ["4", 1],
+      "noise_mask": true
+    },
+    "_meta": { "title": "Inpaint Conditioning" }
+  },
+  "8": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["1", 0],
+      "positive": ["7", 0],
+      "negative": ["7", 1],
+      "latent_image": ["7", 2],
+      "seed": 0,
+      "steps": 25,
+      "cfg": 6.0,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 1.0
+    },
+    "_meta": { "title": "KSampler" }
+  },
+  "9": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["8", 0], "vae": ["3", 0] },
+    "_meta": { "title": "VAE Decode" }
+  },
+  "10": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["9", 0], "filename_prefix": "LightPhotos/fill" },
+    "_meta": { "title": "Save Image" }
+  }
+}
