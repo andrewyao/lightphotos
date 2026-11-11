@@ -10,6 +10,8 @@ three different patches.
     fake-comfyui.py --port 8765 --delay 2        each prompt takes 2 s
     fake-comfyui.py --port 8765 --die-after 2    exit on the 2nd /history poll,
                                                  as a server killed mid-job
+    fake-comfyui.py --port 8765 --fail 2         the 2nd queued prompt ends in
+                                                 an error, the others succeed
     fake-comfyui.py --make-models DIR            write empty files of the
                                                  right sizes into DIR and exit
 
@@ -64,7 +66,7 @@ def png(width, height, rgb):
 class State:
     def __init__(self, args):
         self.args = args
-        self.queued = {}  # prompt id -> (time queued, colour)
+        self.queued = {}  # prompt id -> (time queued, colour, fails)
         self.history_polls = 0
         self.listed = [name for _, name, _ in models() if args.missing not in name]
 
@@ -108,6 +110,10 @@ class Handler(BaseHTTPRequestHandler):
             queued = state.queued.get(prompt)
             if not queued or time.time() - queued[0] < state.args.delay:
                 return self.reply(200, {})
+            if queued[2]:
+                error = {"node_type": "KSampler", "exception_message": "out of memory"}
+                status = {"status_str": "error", "completed": False, "messages": [["execution_error", error]]}
+                return self.reply(200, {prompt: {"outputs": {}, "status": status}})
             image = {"filename": prompt + ".png", "subfolder": "", "type": "output"}
             return self.reply(
                 200,
@@ -135,7 +141,7 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/prompt":
             n = len(state.queued)
             prompt = "fake-%d" % n
-            state.queued[prompt] = (time.time(), COLOURS[n % len(COLOURS)])
+            state.queued[prompt] = (time.time(), COLOURS[n % len(COLOURS)], n + 1 == state.args.fail)
             return self.reply(200, {"prompt_id": prompt, "number": n})
         if url.path in ("/queue", "/interrupt"):
             json.loads(body or b"{}")
@@ -149,6 +155,7 @@ def main():
     parser.add_argument("--missing", default="\0", help="leave models whose name contains this off the lists")
     parser.add_argument("--delay", type=float, default=0.5, help="seconds each prompt takes")
     parser.add_argument("--die-after", type=int, default=0, help="exit on this /history poll")
+    parser.add_argument("--fail", type=int, default=0, help="this queued prompt, counted from 1, ends in an error")
     parser.add_argument("--make-models", metavar="DIR", help="write right-sized empty model files and exit")
     args = parser.parse_args()
     if args.make_models:

@@ -24,6 +24,17 @@ const IMAGE_REPLY: u64 = 64 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(500);
 /// What [`ComfyServer::wait`] answers when its caller stopped it.
 pub const STOPPED: &str = "the job was cancelled";
+/// What a request answers when the server didn't: nothing is listening, the
+/// connection dropped or the reply never came. The caller words it for the
+/// user, with the address and what to do next; the transport's own text
+/// goes to the log.
+pub const LOST: &str = "ComfyUI stopped responding";
+
+/// [`LOST`], with why in the log.
+fn lost(url: &str, e: &ureq::Error) -> String {
+    eprintln!("[comfy] no answer from {url}: {e}");
+    LOST.into()
+}
 
 pub struct ComfyServer {
     url: String,
@@ -160,7 +171,7 @@ impl ComfyServer {
                 .agent
                 .get(format!("{}/object_info/{class}", self.url))
                 .call()
-                .map_err(|e| format!("could not reach ComfyUI at {}: {e}", self.url))?;
+                .map_err(|e| lost(&self.url, &e))?;
             let body = checked(resp, OBJECT_INFO_REPLY)?;
             if let Ok(Value::Object(one)) = serde_json::from_str::<Value>(&body) {
                 info.extend(one);
@@ -188,7 +199,7 @@ impl ComfyServer {
                 format!("multipart/form-data; boundary={boundary}"),
             )
             .send(&body[..])
-            .map_err(|e| format!("could not send the image to ComfyUI: {e}"))?;
+            .map_err(|e| lost(&self.url, &e))?;
         parse_upload(&checked(resp, SMALL_REPLY)?)
     }
 
@@ -199,7 +210,7 @@ impl ComfyServer {
             .post(format!("{}/prompt", self.url))
             .header("content-type", "application/json")
             .send(serde_json::json!({ "prompt": prompt, "client_id": client_id }).to_string())
-            .map_err(|e| format!("could not reach ComfyUI at {}: {e}", self.url))?;
+            .map_err(|e| lost(&self.url, &e))?;
         let status = resp.status().as_u16();
         let body = read_capped(resp, OBJECT_INFO_REPLY)?;
         parse_queue(status, &String::from_utf8_lossy(&body))
@@ -222,12 +233,7 @@ impl ComfyServer {
                 .agent
                 .get(format!("{}/history/{prompt_id}", self.url))
                 .call()
-                .map_err(|e| {
-                    format!(
-                        "ComfyUI stopped answering at {}. Start it again, then try again. ({e})",
-                        self.url
-                    )
-                })?;
+                .map_err(|e| lost(&self.url, &e))?;
             let body = checked(resp, HISTORY_REPLY)?;
             if let History::Done(images) = parse_history(&body, prompt_id, output_node)? {
                 return Ok(images);
@@ -247,7 +253,7 @@ impl ComfyServer {
             .query("subfolder", &image.subfolder)
             .query("type", &image.kind)
             .call()
-            .map_err(|e| format!("could not fetch the result from ComfyUI: {e}"))?;
+            .map_err(|e| lost(&self.url, &e))?;
         let status = resp.status().as_u16();
         let bytes = read_capped(resp, IMAGE_REPLY)?;
         match status {
@@ -268,7 +274,7 @@ impl ComfyServer {
                 .post(format!("{}{path}", self.url))
                 .header("content-type", "application/json")
                 .send(body.to_string())
-                .map_err(|e| format!("could not reach ComfyUI at {}: {e}", self.url))?;
+                .map_err(|e| lost(&self.url, &e))?;
             checked(resp, SMALL_REPLY).map(|_| ())
         };
         send("/queue", serde_json::json!({ "delete": [prompt_id] }))?;
@@ -281,7 +287,10 @@ fn read_capped(mut resp: ureq::http::Response<ureq::Body>, cap: u64) -> Result<V
         .with_config()
         .limit(cap)
         .read_to_vec()
-        .map_err(|e| format!("could not read ComfyUI's reply: {e}"))
+        .map_err(|e| match e {
+            ureq::Error::BodyExceedsLimit(_) => "ComfyUI's reply was too large to read".into(),
+            e => lost("the server", &e),
+        })
 }
 
 /// The body of a 2xx reply, or an error naming the status.
@@ -568,6 +577,22 @@ mod tests {
         let err = ComfyServer::probe(&format!("127.0.0.1:{port}")).unwrap_err();
         assert!(err.contains("isn't running"), "{err}");
         assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_server_that_went_away_is_lost_with_no_transport_text() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let server = ComfyServer::new(&format!("127.0.0.1:{port}")).unwrap();
+        let never = Instant::now() + Duration::from_secs(60);
+        let stop = AtomicBool::new(false);
+        assert_eq!(server.wait("id", "10", never, &stop).unwrap_err(), LOST);
+        assert_eq!(server.queue(&Value::Null, "c").unwrap_err(), LOST);
+        assert_eq!(server.upload_png(&[], "a.png").unwrap_err(), LOST);
+        assert_eq!(server.cancel("id").unwrap_err(), LOST);
     }
 
     fn refs() -> Vec<ModelRef> {

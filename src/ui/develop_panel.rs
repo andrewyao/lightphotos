@@ -1025,12 +1025,12 @@ fn draw_generative(
             }
             JobView::Idle | JobView::Painting => {}
         }
-        if g.fills.is_empty() {
+        if g.pins.is_empty() {
             return;
         }
         form.row(ui, t.fills, |ui| {
             ui.horizontal_wrapped(|ui| {
-                for i in 0..g.fills.len() {
+                for i in 0..g.pins.len() {
                     let picked = g.picked.is_some_and(|p| p.index == i);
                     if ui.selectable_label(picked, format!("{}", i + 1)).clicked() {
                         push(FillAction::Select(i));

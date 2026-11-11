@@ -39,8 +39,9 @@ pub(crate) struct GenerativeView<'a> {
     pub blocked: Option<String>,
     pub prompt: &'a str,
     pub job: JobView<'a>,
-    /// The shown photo's fills, as source UV rects.
-    pub fills: Vec<[f32; 4]>,
+    /// Where each of the shown photo's fills is pinned, in source UV: the
+    /// middle of its painted area.
+    pub pins: Vec<[f32; 2]>,
     pub picked: Option<PickedFill>,
 }
 
@@ -48,11 +49,12 @@ pub(crate) enum JobView<'a> {
     Idle,
     /// The pointer is down on a stroke.
     Painting,
-    /// `bbox` is the rect being filled, when it is on the shown photo.
+    /// `at` is the middle of the area being filled, in source UV, when it
+    /// is on the shown photo.
     Generating {
         done: usize,
         of: usize,
-        bbox: Option<[f32; 4]>,
+        at: Option<[f32; 2]>,
     },
     /// A stroke whose job failed (`why`) or was cancelled, kept so Generate
     /// can send it again.

@@ -15,10 +15,10 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use super::comfy::Gate;
+use super::comfy::{bare, Gate};
 use super::fill::{GenerativeView, JobView, PickedFill, TouchStep};
 use super::{App, LoupeTool, StatusKind};
-use crate::comfy::client::{ComfyServer, STOPPED};
+use crate::comfy::client::{ComfyServer, LOST, STOPPED};
 use crate::comfy::features::{self, GENERATIVE_FILL};
 use crate::comfy::workflow;
 use crate::decode::image_decode::DecodedImage;
@@ -58,13 +58,67 @@ enum Target {
 struct Job {
     path: PathBuf,
     target: Target,
+    /// The server it runs on.
+    url: String,
     bbox: [f32; 4],
+    /// The middle of the painted area, where the spinner turns.
+    pin: [f32; 2],
     prompt: String,
     /// False for a read-only folder: the patches stay in memory.
     written: bool,
     stop: Arc<AtomicBool>,
     done: Arc<AtomicUsize>,
-    result: Receiver<Result<Vec<Patch>, String>>,
+    result: Receiver<Result<Generated, String>>,
+}
+
+/// What a job brings back when at least one variant arrived.
+#[derive(Debug, PartialEq)]
+struct Generated {
+    patches: Vec<Patch>,
+    /// Why each variant that didn't arrive failed.
+    failed: Vec<String>,
+}
+
+/// Sorts a job's variants, one result each, into what it brings back. The
+/// variants that arrived are kept whatever became of the others; the job
+/// fails only when it was stopped or none arrived, with the first reason.
+fn settle(variants: Vec<Result<Patch, String>>) -> Result<Generated, String> {
+    if variants
+        .iter()
+        .any(|v| v.as_ref().is_err_and(|e| e == STOPPED))
+    {
+        return Err(STOPPED.into());
+    }
+    let (mut patches, mut failed) = (Vec::<Patch>::new(), Vec::new());
+    for variant in variants {
+        match variant {
+            // Two identical results are one variant.
+            Ok(patch) if patches.iter().any(|p| p.id() == patch.id()) => {}
+            Ok(patch) => patches.push(patch),
+            Err(why) => failed.push(why),
+        }
+    }
+    if patches.is_empty() {
+        let why = failed.into_iter().next();
+        return Err(why.unwrap_or_else(|| "ComfyUI returned no image".into()));
+    }
+    Ok(Generated { patches, failed })
+}
+
+/// A failure as its notice says it. A server that stopped answering is
+/// named by its address, with `button` as the way to try again.
+fn worded(why: String, url: &str, button: &str) -> String {
+    if why != LOST {
+        return why;
+    }
+    crate::i18n::t()
+        .comfy_lost
+        .replace("{where}", bare(url))
+        .replace("{button}", button)
+}
+
+fn centre(rect: [f32; 4]) -> [f32; 2] {
+    [(rect[0] + rect[2]) * 0.5, (rect[1] + rect[3]) * 0.5]
 }
 
 /// Everything a job's thread needs; it shares nothing else with the app.
@@ -117,8 +171,9 @@ fn seed(i: usize) -> u64 {
 
 /// One generation, start to finish, on the job's thread: upload the crop,
 /// queue a workflow per variant, and turn each result into a patch, written
-/// beside the photo before the app hears of it.
-fn run(input: &JobInput) -> Result<Vec<Patch>, String> {
+/// beside the photo before the app hears of it. A variant that fails
+/// doesn't stop the others.
+fn run(input: &JobInput) -> Result<Generated, String> {
     let request = Request::new(&input.img, input.ca, &input.painted, input.bbox)?;
     let server = ComfyServer::new(&input.url)?;
     let nodes = workflow::parse(input.workflow)?;
@@ -127,29 +182,19 @@ fn run(input: &JobInput) -> Result<Vec<Patch>, String> {
         server.upload_png(request.upload(), &format!("lightphotos_fill_{run_id}.png"))?;
     let client_id = format!("lightphotos-{run_id}");
 
-    let mut queued: Vec<(String, String)> = Vec::new();
-    let cancel_from = |queued: &[(String, String)], from: usize| {
-        for (id, _) in queued.iter().skip(from) {
-            let _ = server.cancel(id);
-        }
-    };
-    for i in 0..MAX_VARIANTS {
-        let sent = workflow::inject(&nodes, &uploaded.image_ref(), &input.prompt, seed(i))
-            .and_then(|w| Ok((server.queue(&w.prompt, &client_id)?, w.output_node)));
-        match sent {
-            Ok(pair) => queued.push(pair),
-            Err(e) => {
-                cancel_from(&queued, 0);
-                return Err(e);
-            }
-        }
-    }
+    let queued: Vec<Result<(String, String), String>> = (0..MAX_VARIANTS)
+        .map(|i| {
+            let w = workflow::inject(&nodes, &uploaded.image_ref(), &input.prompt, seed(i))?;
+            Ok((server.queue(&w.prompt, &client_id)?, w.output_node))
+        })
+        .collect();
 
     let deadline = Instant::now() + JOB_TIMEOUT;
-    let mut patches: Vec<Patch> = Vec::new();
-    for (n, (id, node)) in queued.iter().enumerate() {
-        let patch = server
-            .wait(id, node, deadline, &input.stop)
+    let mut variants: Vec<Result<Patch, String>> = Vec::new();
+    for (n, sent) in queued.iter().enumerate() {
+        let patch = sent
+            .clone()
+            .and_then(|(id, node)| server.wait(&id, &node, deadline, &input.stop))
             .and_then(|images| {
                 let first = images.first().ok_or("ComfyUI finished without an image")?;
                 server.fetch(first)
@@ -162,21 +207,17 @@ fn run(input: &JobInput) -> Result<Vec<Patch>, String> {
                 }
                 Ok(patch)
             });
-        match patch {
-            Ok(patch) => {
-                // Two identical results are one variant.
-                if !patches.iter().any(|p| p.id() == patch.id()) {
-                    patches.push(patch);
-                }
-                input.done.store(n + 1, Ordering::Relaxed);
+        let stopped = patch.as_ref().is_err_and(|e| e == STOPPED);
+        variants.push(patch);
+        if stopped {
+            for (id, _) in queued.iter().skip(n).flatten() {
+                let _ = server.cancel(id);
             }
-            Err(e) => {
-                cancel_from(&queued, n);
-                return Err(e);
-            }
+            break;
         }
+        input.done.store(n + 1, Ordering::Relaxed);
     }
-    Ok(patches)
+    settle(variants)
 }
 
 impl App {
@@ -254,7 +295,7 @@ impl App {
             (Some(job), _) => JobView::Generating {
                 done: job.done.load(Ordering::Relaxed),
                 of: MAX_VARIANTS,
-                bbox: (shown == Some(job.path.as_path())).then_some(job.bbox),
+                at: (shown == Some(job.path.as_path())).then_some(job.pin),
             },
             (None, Some(p)) if p.down => JobView::Painting,
             (None, Some(p)) if shown == Some(p.path.as_path()) => JobView::Kept {
@@ -277,9 +318,17 @@ impl App {
             blocked,
             prompt: &g.prompt,
             job,
-            fills: fills.iter().map(Fill::bbox).collect(),
+            pins: fills.iter().map(|f| self.fill_pin(shown, f)).collect(),
             picked,
         })
+    }
+
+    /// Where a fill's pin sits: the middle of its painted area, or of its
+    /// rect until its patch is in memory.
+    fn fill_pin(&self, photo: Option<&Path>, fill: &Fill) -> [f32; 2] {
+        photo
+            .and_then(|photo| self.patches.ready(photo, fill.chosen()))
+            .map_or_else(|| centre(fill.bbox()), |p| p.painted_centre(fill.bbox()))
     }
 
     /// The stroke painted and not yet filled, as the Loupe tints it.
@@ -328,6 +377,9 @@ impl App {
         }
         let (w, h) = self.image_size();
         let aspect = w / h;
+        if !(aspect.is_finite() && aspect > 0.0) {
+            return;
+        }
         let mut stroke = Stroke {
             radius: self.touchup_radius(),
             feather: self.touchup_feather(),
@@ -360,7 +412,7 @@ impl App {
             return;
         }
         if brush::push_point(&mut p.stroke, uv, p.aspect) {
-            let last = p.stroke.points.len() - 1;
+            let last = p.stroke.points.len().saturating_sub(1);
             p.raster.stamp(&p.stroke, last);
             p.coverage = Arc::new(p.raster.coverage());
             self.request_redraw();
@@ -375,7 +427,7 @@ impl App {
         p.down = false;
         if let Some(uv) = uv {
             if brush::finish_at(&mut p.stroke, uv) {
-                let last = p.stroke.points.len() - 1;
+                let last = p.stroke.points.len().saturating_sub(1);
                 p.raster.stamp(&p.stroke, last);
                 p.coverage = Arc::new(p.raster.coverage());
             }
@@ -390,11 +442,11 @@ impl App {
             return;
         };
         let (path, painted) = (p.path.clone(), Painted::whole(Arc::clone(&p.coverage)));
-        let Some(bbox) = painted.padded_bbox() else {
+        let (Some(bbox), Some(bounds)) = (painted.padded_bbox(), painted.bounds()) else {
             self.generative.painting = None;
             return;
         };
-        if let Err(why) = self.start_fill_job(path, Target::New, painted, bbox) {
+        if let Err(why) = self.start_fill_job(path, Target::New, painted, bbox, centre(bounds)) {
             self.fill_failed(why);
         }
     }
@@ -412,6 +464,7 @@ impl App {
         else {
             return;
         };
+        let pin = self.fill_pin(Some(&path), &fill);
         let painted = self
             .patches
             .ready(&path, fill.chosen())
@@ -419,7 +472,7 @@ impl App {
         let started = match painted {
             Some(painted) => {
                 let bbox = fill.bbox();
-                self.start_fill_job(path, Target::More(fill), painted, bbox)
+                self.start_fill_job(path, Target::More(fill), painted, bbox, pin)
             }
             None => Err(crate::i18n::t().fill_not_loaded.into()),
         };
@@ -434,6 +487,7 @@ impl App {
         target: Target,
         painted: Painted,
         bbox: [f32; 4],
+        pin: [f32; 2],
     ) -> Result<(), String> {
         if self.generative.job.is_some() {
             return Ok(());
@@ -464,7 +518,7 @@ impl App {
             Arc::new(AtomicUsize::new(0)),
         );
         let input = JobInput {
-            url,
+            url: url.clone(),
             workflow: feature.workflow,
             photo: path.clone(),
             img,
@@ -483,11 +537,16 @@ impl App {
             .spawn(move || {
                 let _ = tx.send(run(&input));
             })
-            .map_err(|e| format!("could not start the fill: {e}"))?;
+            .map_err(|e| {
+                eprintln!("[fill] could not start the job's thread: {e}");
+                t.fill_not_started.to_string()
+            })?;
         self.generative.job = Some(Job {
             path,
             target,
+            url,
             bbox,
+            pin,
             prompt,
             written: write,
             stop,
@@ -617,18 +676,22 @@ impl App {
         }
     }
 
-    fn land_job(&mut self, job: Job, result: Result<Vec<Patch>, String>) {
+    /// A finished job: its variants become a fill, or replace the picked
+    /// fill's. Variants that failed while others arrived get a notice and
+    /// the fill is made of the ones that arrived.
+    fn land_job(&mut self, job: Job, result: Result<Generated, String>) {
+        let t = crate::i18n::t();
         let stopped = job.stop.load(Ordering::Relaxed);
-        let patches = match result {
-            Ok(patches) => patches,
-            Err(why) if stopped || why == STOPPED => {
-                let _ = why;
-                return;
-            }
+        let Generated { patches, failed } = match result {
+            Ok(generated) => generated,
+            Err(why) if stopped || why == STOPPED => return,
             Err(why) => {
                 match job.target {
-                    Target::New => self.fill_failed(why),
+                    Target::New => {
+                        self.fill_failed(worded(why, &job.url, t.fill_generate));
+                    }
                     Target::More(_) => {
+                        let why = worded(why, &job.url, t.fill_generate_more);
                         self.set_status(StatusKind::Error, why);
                         self.comfy.check_now();
                     }
@@ -636,6 +699,7 @@ impl App {
                 return;
             }
         };
+        let arrived = patches.len();
         let ids: Vec<_> = patches.iter().map(Patch::id).collect();
         let Some(made) = Fill::new(job.bbox, ids, job.prompt.clone()) else {
             self.fill_failed("ComfyUI returned no image".into());
@@ -673,6 +737,18 @@ impl App {
         }
         if self.shown.path() == Some(job.path.as_path()) {
             self.generative.picked = Some(index);
+        }
+        if let Some(why) = failed.first() {
+            let notice = t
+                .fill_partial
+                .replace("{failed}", &failed.len().to_string())
+                .replace("{of}", &(arrived + failed.len()).to_string())
+                .replace(
+                    "{why}",
+                    &worded(why.clone(), &job.url, t.fill_generate_more),
+                );
+            self.set_status(StatusKind::Error, notice);
+            self.comfy.check_now();
         }
         self.request_redraw();
     }
@@ -744,5 +820,238 @@ impl App {
             self.request_redraw();
         }
         comfy_busy || self.generative.job.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::folder_app;
+    use crate::app::Shown;
+
+    const URL: &str = "http://127.0.0.1:8765";
+    const RECT: [f32; 4] = [0.0, 0.25, 0.5, 0.75];
+
+    /// A 4x4 patch of one grey, painted only in its left column.
+    fn patch(v: u8) -> Patch {
+        let rgba = (0..16)
+            .flat_map(|i| [v, v, v, if i % 4 == 0 { 255 } else { 0 }])
+            .collect();
+        Patch::new(4, 4, rgba).unwrap()
+    }
+
+    /// A job as `start_fill_job` leaves it, with no thread behind it.
+    fn job(path: &Path, target: Target) -> Job {
+        Job {
+            path: path.to_path_buf(),
+            target,
+            url: URL.into(),
+            bbox: RECT,
+            pin: [0.1, 0.5],
+            prompt: String::new(),
+            written: false,
+            stop: Arc::new(AtomicBool::new(false)),
+            done: Arc::new(AtomicUsize::new(0)),
+            result: std::sync::mpsc::channel().1,
+        }
+    }
+
+    /// An App showing its one photo with Touch Up open.
+    fn touch_up(tag: &str) -> (App, PathBuf, PathBuf) {
+        let (mut app, dir, paths) = folder_app(tag, 1);
+        app.shown = Shown::Preview(paths[0].clone(), 100, 100);
+        app.tool = LoupeTool::TouchUp;
+        app.poll_generative();
+        (app, dir, paths[0].clone())
+    }
+
+    fn arrived(patches: &[Patch]) -> Result<Generated, String> {
+        settle(patches.iter().cloned().map(Ok).collect())
+    }
+
+    #[test]
+    fn a_job_keeps_the_variants_that_arrived_and_fails_only_with_none() {
+        let (a, b) = (patch(1), patch(2));
+        let all = settle(vec![Ok(a.clone()), Ok(b.clone()), Ok(a.clone())]).unwrap();
+        assert_eq!(
+            all.patches,
+            [a.clone(), b.clone()],
+            "a repeat is one variant"
+        );
+        assert!(all.failed.is_empty());
+
+        let some = settle(vec![Ok(a.clone()), Err("boom".into()), Ok(b.clone())]).unwrap();
+        assert_eq!(some.patches, [a.clone(), b]);
+        assert_eq!(some.failed, ["boom"]);
+
+        let none = settle(vec![Err("first".into()), Err("second".into())]);
+        assert_eq!(none, Err("first".into()));
+        assert!(settle(Vec::new()).is_err());
+        let stopped = settle(vec![Ok(a), Err(STOPPED.into())]);
+        assert_eq!(stopped, Err(STOPPED.into()), "a cancel keeps nothing");
+    }
+
+    #[test]
+    fn a_finished_job_records_a_fill_pinned_on_its_paint() {
+        let (mut app, dir, photo) = touch_up("fill-land");
+        let (a, b, c) = (patch(1), patch(2), patch(3));
+        app.land_job(
+            job(&photo, Target::New),
+            arrived(&[a.clone(), b.clone(), c]),
+        );
+
+        let fills = app.fills_of(&photo).to_vec();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].bbox(), RECT);
+        assert_eq!(fills[0].variants().len(), 3);
+        assert_eq!(fills[0].chosen(), a.id());
+        // Shown disabled rather than hidden, with no server asked.
+        app.comfy.set_enabled(true);
+        let view = app.generative_view().unwrap();
+        assert_eq!(
+            view.pins,
+            [[0.0625, 0.5]],
+            "the paint's middle, not the rect's"
+        );
+        let picked = view.picked.unwrap();
+        assert_eq!((picked.index, picked.variant, picked.variants), (0, 0, 3));
+        drop(view);
+        assert!(app.status_text().is_none(), "no notice for a whole job");
+
+        app.cycle_fill_variant(false);
+        assert_eq!(app.fills_of(&photo)[0].chosen(), patch(3).id(), "wraps");
+        app.cycle_fill_variant(true);
+        app.cycle_fill_variant(true);
+        assert_eq!(app.fills_of(&photo)[0].chosen(), b.id());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_variant_that_failed_costs_a_notice_not_the_fill() {
+        let (mut app, dir, photo) = touch_up("fill-partial");
+        let (a, b) = (patch(1), patch(2));
+        let result = settle(vec![Ok(a), Err(LOST.into()), Ok(b)]);
+        app.land_job(job(&photo, Target::New), result);
+
+        assert_eq!(app.fills_of(&photo)[0].variants().len(), 2);
+        let notice = app.status_text().unwrap().to_string();
+        assert_eq!(
+            notice,
+            "1 of 3 variations failed. ComfyUI stopped responding at 127.0.0.1:8765. \
+             Start it again, then press Generate More."
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_job_with_no_variant_keeps_the_stroke_and_says_what_to_do() {
+        let (mut app, dir, photo) = touch_up("fill-none");
+        let mut raster = BrushRaster::new(1.0);
+        let stroke = Stroke {
+            radius: 0.1,
+            feather: 0.5,
+            flow: 1.0,
+            erase: false,
+            points: vec![[0.5, 0.5]],
+        };
+        raster.stamp(&stroke, 0);
+        app.generative.painting = Some(Painting {
+            path: photo.clone(),
+            aspect: 1.0,
+            coverage: Arc::new(raster.coverage()),
+            stroke,
+            raster,
+            down: false,
+            failed: None,
+        });
+        app.land_job(job(&photo, Target::New), Err(LOST.into()));
+
+        assert!(app.fills_of(&photo).is_empty());
+        let said = "ComfyUI stopped responding at 127.0.0.1:8765. \
+                    Start it again, then press Generate.";
+        assert_eq!(app.status_text(), Some(said));
+        let kept = app.generative.painting.as_ref().unwrap();
+        assert_eq!(kept.failed.as_deref(), Some(said), "kept for Generate");
+        assert!(!said.contains("io"), "no transport text reaches the notice");
+
+        // A cancel says nothing and keeps the stroke too.
+        app.status = None;
+        app.land_job(job(&photo, Target::New), Err(STOPPED.into()));
+        assert!(app.status_text().is_none());
+        assert!(app.generative.painting.is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn undo_steps_back_through_fills_on_touch_ups_own_stack() {
+        let (mut app, dir, photo) = touch_up("fill-undo");
+        app.land_job(job(&photo, Target::New), arrived(&[patch(1)]));
+        app.land_job(job(&photo, Target::New), arrived(&[patch(2)]));
+        let two = app.fills_of(&photo).to_vec();
+        assert_eq!(two.len(), 2);
+
+        app.select_fill(0);
+        app.delete_picked_fill();
+        assert_eq!(app.fills_of(&photo), &two[1..]);
+
+        app.undo_touchup();
+        assert_eq!(app.fills_of(&photo), two.as_slice(), "the delete");
+        app.undo_touchup();
+        assert_eq!(app.fills_of(&photo), &two[..1], "the second fill");
+        app.undo_touchup();
+        assert!(app.fills_of(&photo).is_empty(), "the first fill");
+        app.undo_touchup();
+        assert!(app.fills_of(&photo).is_empty(), "nothing left to undo");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn generate_more_replaces_the_fill_it_was_asked_for() {
+        let (mut app, dir, photo) = touch_up("fill-more");
+        app.land_job(job(&photo, Target::New), arrived(&[patch(1), patch(2)]));
+        let was = app.fills_of(&photo)[0].clone();
+        let more = [patch(7), patch(8), patch(9)];
+        app.land_job(job(&photo, Target::More(was.clone())), arrived(&more));
+        let ids: Vec<_> = more.iter().map(Patch::id).collect();
+        assert_eq!(app.fills_of(&photo).len(), 1);
+        assert_eq!(app.fills_of(&photo)[0].variants(), ids.as_slice());
+
+        // The fill was deleted while its job ran: nothing comes back.
+        app.select_fill(0);
+        app.delete_picked_fill();
+        let gone = app.fills_of(&photo).to_vec();
+        app.land_job(job(&photo, Target::More(was)), arrived(&[patch(4)]));
+        assert_eq!(app.fills_of(&photo), gone.as_slice());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn leaving_touch_up_keeps_only_the_variant_each_fill_shows() {
+        let (mut app, dir, photo) = touch_up("fill-prune");
+        let (a, b, c) = (patch(1), patch(2), patch(3));
+        app.land_job(job(&photo, Target::New), arrived(&[a, b.clone(), c]));
+        app.cycle_fill_variant(true);
+        app.select_fill(0);
+        app.delete_picked_fill();
+        assert!(app.fills_of(&photo).is_empty());
+
+        app.tool = LoupeTool::None;
+        app.poll_generative();
+        // The delete's undo step was pruned with the fills, so undoing it
+        // brings back a fill that names only the file that is kept.
+        app.tool = LoupeTool::TouchUp;
+        app.undo_touchup();
+        let back = app.fills_of(&photo).to_vec();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].variants(), [b.id()]);
+
+        app.tool = LoupeTool::None;
+        app.poll_generative();
+        assert_eq!(
+            app.fills_of(&photo),
+            back.as_slice(),
+            "pruning twice is the same"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

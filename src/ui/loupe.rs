@@ -303,10 +303,8 @@ fn draw_fill_marks(
     g: &crate::app::GenerativeView,
 ) -> Vec<egui::Pos2> {
     let painter = ui.painter_at(central);
-    let middle = |b: &[f32; 4]| {
-        app.loupe_source_to_screen(central, (b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5)
-    };
-    let pins: Vec<egui::Pos2> = g.fills.iter().map(middle).collect();
+    let on_screen = |at: &[f32; 2]| app.loupe_source_to_screen(central, at[0], at[1]);
+    let pins: Vec<egui::Pos2> = g.pins.iter().map(on_screen).collect();
     if app.touchup_spots_shown() {
         let colors = theme::colors(ui.ctx());
         for (i, &at) in pins.iter().enumerate() {
@@ -321,12 +319,9 @@ fn draw_fill_marks(
             painter.circle_filled(at, 5.0, fill);
         }
     }
-    if let crate::app::JobView::Generating {
-        bbox: Some(bbox), ..
-    } = &g.job
-    {
+    if let crate::app::JobView::Generating { at: Some(at), .. } = &g.job {
         let size = 28.0;
-        let rect = egui::Rect::from_center_size(middle(bbox), egui::vec2(size, size));
+        let rect = egui::Rect::from_center_size(on_screen(at), egui::vec2(size, size));
         painter.circle_filled(
             rect.center(),
             size * 0.75,

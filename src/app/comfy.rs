@@ -16,7 +16,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::comfy::client::{ComfyServer, DEFAULT_URLS};
+use crate::comfy::client::{ComfyServer, DEFAULT_URLS, LOST};
 use crate::comfy::download;
 use crate::comfy::features::{self, ComfyFeature, ModelFile, FEATURES};
 use crate::comfy::workflow;
@@ -114,7 +114,7 @@ pub(crate) struct Comfy {
 }
 
 /// `host:port` for a message, without the scheme.
-fn bare(url: &str) -> &str {
+pub(super) fn bare(url: &str) -> &str {
     url.split_once("://").map_or(url, |(_, rest)| rest)
 }
 
@@ -172,7 +172,10 @@ fn probe(server: Option<String>, wanted: Vec<&'static ComfyFeature>) -> Probed {
         let server = ComfyServer::new(&url).map_err(ProbeFail::Other)?;
         for feature in wanted {
             let nodes = workflow::parse(feature.workflow).map_err(ProbeFail::Other)?;
-            let missing = server.missing_models(&nodes).map_err(ProbeFail::Other)?;
+            let missing = server.missing_models(&nodes).map_err(|why| match why {
+                why if why == LOST => ProbeFail::NotRunning(vec![url.clone()]),
+                why => ProbeFail::Other(why),
+            })?;
             if let Some(first) = missing.first() {
                 return Err(ProbeFail::Other(first.message()));
             }
