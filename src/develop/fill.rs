@@ -187,6 +187,27 @@ pub struct Patch {
     height: u32,
     rgba: Vec<u8>,
     id: RasterId,
+    /// The texels with any alpha, as `(x0, y0, x1, y1)` with the far edges
+    /// exclusive; the whole patch when none has.
+    painted: [u32; 4],
+}
+
+/// The bounds of the texels of `rgba` whose alpha isn't 0.
+fn alpha_bounds(width: u32, rgba: &[u8]) -> Option<[u32; 4]> {
+    let mut bounds: Option<[u32; 4]> = None;
+    for (y, row) in (0u32..).zip(rgba.chunks_exact(width as usize * 4)) {
+        let lit = |px: &[u8]| px.get(3).is_some_and(|&a| a > 0);
+        let Some(first) = row.chunks_exact(4).position(lit) else {
+            continue;
+        };
+        let last = row.chunks_exact(4).rposition(lit).unwrap_or(first);
+        let (first, last) = (first as u32, last as u32 + 1);
+        bounds = Some(match bounds {
+            Some([x0, y0, x1, _]) => [x0.min(first), y0, x1.max(last), y + 1],
+            None => [first, y, last, y + 1],
+        });
+    }
+    bounds
 }
 
 impl Patch {
@@ -207,16 +228,32 @@ impl Patch {
             )));
         }
         let id = RasterId::of(width, height, &rgba);
+        let painted = alpha_bounds(width, &rgba).unwrap_or([0, 0, width, height]);
         Ok(Patch {
             width,
             height,
             rgba,
             id,
+            painted,
         })
     }
 
     pub fn id(&self) -> RasterId {
         self.id
+    }
+
+    /// The middle of the painted area, the texels with any alpha, inside
+    /// `bbox`, the source UV rect the patch covers. A fill's rect is padded
+    /// with context and cut at the photo's edges, so its own middle can sit
+    /// off the paint.
+    pub fn painted_centre(&self, bbox: [f32; 4]) -> [f32; 2] {
+        let [x0, y0, x1, y1] = self.painted;
+        let [u0, v0, u1, v1] = bbox;
+        let mid = |a: u32, b: u32, side: u32| (a + b) as f32 * 0.5 / side as f32;
+        [
+            u0 + (u1 - u0) * mid(x0, x1, self.width),
+            v0 + (v1 - v0) * mid(y0, y1, self.height),
+        ]
     }
 
     pub fn width(&self) -> u32 {
@@ -707,6 +744,19 @@ mod tests {
         enc.set_depth(png::BitDepth::Eight);
         enc.write_header().unwrap().write_image_data(data).unwrap();
         out
+    }
+
+    #[test]
+    fn a_patch_knows_the_middle_of_its_paint() {
+        // 4x2, alpha only in the left column's top texel.
+        let mut rgba = vec![0u8; 4 * 2 * 4];
+        rgba[3] = 255;
+        let patch = Patch::new(4, 2, rgba).unwrap();
+        assert_eq!(patch.painted_centre([0.0, 0.0, 1.0, 1.0]), [0.125, 0.25]);
+        assert_eq!(patch.painted_centre([0.2, 0.4, 0.6, 0.8]), [0.25, 0.5]);
+        // No alpha at all: the rect's own middle.
+        let clear = Patch::new(4, 2, vec![0u8; 32]).unwrap();
+        assert_eq!(clear.painted_centre([0.0, 0.0, 1.0, 1.0]), [0.5, 0.5]);
     }
 
     #[test]

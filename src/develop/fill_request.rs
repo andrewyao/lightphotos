@@ -72,9 +72,9 @@ impl Painted {
         self.coverage.at_uv([(u - u0) / w, (v - v0) / h])
     }
 
-    /// The source UV rect to send: the painted texels' bounds with context
-    /// around them, inside the photo. `None` when nothing is painted.
-    pub fn padded_bbox(&self) -> Option<[f32; 4]> {
+    /// The painted texels' bounds as a source UV rect. `None` when nothing
+    /// is painted.
+    pub fn bounds(&self) -> Option<[f32; 4]> {
         let (w, h) = (
             self.coverage.width() as usize,
             self.coverage.height() as usize,
@@ -97,7 +97,18 @@ impl Painted {
         let (rw, rh) = (r1 - r0, s1 - s0);
         let u = |x: usize| r0 + rw * x as f32 / w as f32;
         let v = |y: usize| s0 + rh * y as f32 / h as f32;
-        let (u0, v0, u1, v1) = (u(x0), v(y0), u(x1), v(y1));
+        Some([u(x0), v(y0), u(x1), v(y1)])
+    }
+
+    /// The source UV rect to send: the painted texels' bounds with context
+    /// around them, inside the photo. `None` when nothing is painted.
+    pub fn padded_bbox(&self) -> Option<[f32; 4]> {
+        let [u0, v0, u1, v1] = self.bounds()?;
+        let (w, h) = (
+            self.coverage.width() as usize,
+            self.coverage.height() as usize,
+        );
+        let (rw, rh) = (self.rect[2] - self.rect[0], self.rect[3] - self.rect[1]);
         // A whole-photo raster's texels are square in the photo, so its
         // sides give the photo's shape and the pad is the same length along
         // both axes.
@@ -316,6 +327,25 @@ mod tests {
             }
         }
         Painted::whole(Arc::new(Coverage::fit(w as u32, h as u32, &alpha).unwrap()))
+    }
+
+    #[test]
+    fn a_stroke_at_the_edge_is_centred_on_its_paint_not_its_padded_rect() {
+        // Painted over x 0..10, y 20..30: the pad is cut at the left edge.
+        let (w, h) = (100usize, 50usize);
+        let mut alpha = vec![0u8; w * h];
+        for y in 20..30 {
+            for x in 0..10 {
+                alpha[y * w + x] = 255;
+            }
+        }
+        let edge = Painted::whole(Arc::new(Coverage::fit(100, 50, &alpha).unwrap()));
+        assert_eq!(edge.bounds(), Some([0.0, 0.4, 0.1, 0.6]));
+        let [u0, _, u1, _] = edge.padded_bbox().unwrap();
+        assert_eq!(u0, 0.0);
+        assert!((u0 + u1) * 0.5 > 0.06, "the padded rect's middle is off it");
+        let blank = Painted::whole(Arc::new(Coverage::fit(4, 4, &[0; 16]).unwrap()));
+        assert_eq!(blank.bounds(), None);
     }
 
     fn decode_rgba(png_bytes: &[u8]) -> (u32, u32, Vec<u8>) {
