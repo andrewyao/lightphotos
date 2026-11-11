@@ -69,6 +69,12 @@ pub(crate) enum Patch {
     Adjustments(Box<AdjustmentsChange>),
     /// The spot removals, made at a Unix time.
     Touchups { touchups: Vec<TouchUp>, at: u64 },
+    /// The generative fills, made at a Unix time. Their patch files are
+    /// written before this names them.
+    Fills {
+        fills: Vec<crate::develop::fill::Fill>,
+        at: u64,
+    },
     /// The masks this build reads, made at a Unix time; foreign ones stay.
     Masks { masks: Vec<Mask>, at: u64 },
     /// Which coverage answers one detected-mask target.
@@ -169,6 +175,7 @@ impl Patch {
             Patch::Touchups { touchups, at } => {
                 rec.edit(*at, |rec| rec.touchups = touchups.clone())
             }
+            Patch::Fills { fills, at } => rec.edit(*at, |rec| rec.fills = fills.clone()),
             Patch::Masks { masks, at } => rec.edit(*at, |rec| rec.masks.set(masks.clone())),
             Patch::Detection { target, id, at } => {
                 rec.edit(*at, |rec| rec.detections.set(*target, *id))

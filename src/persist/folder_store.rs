@@ -714,6 +714,17 @@ impl FolderStore {
         self.update(path, Patch::Touchups { touchups, at });
     }
 
+    /// Replaces `path`'s generative fills, at most [`MAX_FILLS`] of them.
+    /// The caller has already written every patch file the fills name.
+    ///
+    /// [`MAX_FILLS`]: crate::develop::fill::MAX_FILLS
+    pub fn set_fills(&mut self, path: &Path, fills: &[crate::develop::fill::Fill]) {
+        let keep = fills.len().min(crate::develop::fill::MAX_FILLS);
+        let fills = fills.get(..keep).unwrap_or_default().to_vec();
+        let at = crate::sidecar::unix_now();
+        self.update(path, Patch::Fills { fills, at });
+    }
+
     pub fn masks(&self, path: &Path) -> Vec<Mask> {
         self.record(path)
             .map(|r| r.masks.to_vec())
@@ -2333,6 +2344,15 @@ mod tests {
                 delta: [0.01, -0.02, 0.0],
                 opacity: 1.0,
             }];
+            let ids = ["0123456789abcdef", "fedcba9876543210"].map(|s| s.parse().unwrap());
+            let mut fill = crate::develop::fill::Fill::new(
+                [0.1, 0.2, 0.4, 0.5],
+                ids.to_vec(),
+                "a red boat".into(),
+            )
+            .unwrap();
+            fill.choose(1);
+            r.fills = vec![fill];
         });
         rec
     }
@@ -2361,6 +2381,7 @@ mod tests {
         cat.set_label(&p, rec.label);
         cat.set_adjustments(&p, &rec.adjustments);
         cat.set_touchups(&p, &rec.touchups);
+        cat.set_fills(&p, &rec.fills);
         cat.set_rotation(&p, rec.rotation);
         cat.update(
             &p,
