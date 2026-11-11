@@ -408,7 +408,9 @@ impl App {
         let Some(p) = self.generative.painting.as_mut().filter(|p| p.down) else {
             return;
         };
-        if p.stroke.points.len() >= crate::develop::mask::STROKE_POINTS {
+        // A fill's stroke never reaches the sidecar, but it is re-stamped
+        // whole, so it shares the mask brush's ceiling.
+        if p.stroke.points.len() >= crate::develop::mask::MAX_BRUSH_POINTS {
             return;
         }
         if brush::push_point(&mut p.stroke, uv, p.aspect) {
@@ -940,6 +942,38 @@ mod tests {
             "1 of 3 variations failed. ComfyUI stopped responding at 127.0.0.1:8765. \
              Start it again, then press Generate More."
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_long_drag_keeps_painting() {
+        let (mut app, dir, photo) = touch_up("fill-long");
+        let mut stroke = Stroke {
+            radius: 0.02,
+            feather: 0.5,
+            flow: 1.0,
+            erase: false,
+            points: Vec::new(),
+        };
+        brush::push_point(&mut stroke, [0.05, 0.5], 1.0);
+        let mut raster = BrushRaster::new(1.0);
+        raster.stamp(&stroke, 0);
+        app.generative.painting = Some(Painting {
+            path: photo.clone(),
+            aspect: 1.0,
+            coverage: Arc::new(raster.coverage()),
+            stroke,
+            raster,
+            down: true,
+            failed: None,
+        });
+        for i in 1..=90 {
+            app.extend_fill_stroke([0.05 + i as f32 * 0.01, 0.5]);
+        }
+        let p = app.generative.painting.as_ref().unwrap();
+        let reached = p.stroke.points.last().unwrap()[0];
+        assert!(reached > 0.9, "the stroke stopped at u = {reached}");
+        assert!(p.coverage.at_uv([0.9, 0.5]) > 0.0, "the far end is painted");
         let _ = std::fs::remove_dir_all(dir);
     }
 
