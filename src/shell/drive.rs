@@ -24,6 +24,8 @@
 //! stroke 100,100 200,150 300,140 [alt]
 //!                          press at the first point, move through the rest a frame each, release
 //! idle                     wait until decodes, sidecar writes, batches and animations settle
+//! wait 1500                draw frames for that many milliseconds, at most 30000, to catch
+//!                          something `idle` would outlast, such as a notice or a job mid-run
 //! shot grid                write <out dir>/grid.png
 //! state                    print one JSON line of the app's state
 //! run {"id":"photo.rate","params":{"stars":4}}
@@ -37,7 +39,8 @@
 //! `--catalog-dir <dir>`, or under the run's scratch settings directory,
 //! never `~/Pictures`. Pickers answer cancelled, except that each
 //! `--gps-pick <path>` is a file or folder the GPS-track picker answers
-//! with. A GPX file that never downloads from iCloud is given up on after
+//! with, and `--models-pick <dir>` is what the ComfyUI models-folder picker
+//! answers with. A GPX file that never downloads from iCloud is given up on after
 //! 8 s, inside `idle`'s 30.
 //!
 //! Keys cannot take the `WindowEvent::KeyboardInput` road: winit's `KeyEvent`
@@ -90,6 +93,8 @@ pub(crate) struct Args {
     catalog_dir: Option<PathBuf>,
     /// What the GPS-track picker answers with.
     gps_picks: Vec<PathBuf>,
+    /// What the ComfyUI models-folder picker answers with.
+    models_pick: Option<PathBuf>,
 }
 
 impl Args {
@@ -107,6 +112,7 @@ impl Args {
         let mut target = None;
         let mut catalog_dir = None;
         let mut gps_picks = Vec::new();
+        let mut models_pick = None;
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -122,6 +128,11 @@ impl Args {
                 "--gps-pick" => {
                     gps_picks.push(PathBuf::from(
                         args.next().ok_or("--gps-pick needs a file or folder")?,
+                    ));
+                }
+                "--models-pick" => {
+                    models_pick = Some(PathBuf::from(
+                        args.next().ok_or("--models-pick needs a folder")?,
                     ));
                 }
                 _ if target.is_none() => target = Some(arg),
@@ -145,6 +156,7 @@ impl Args {
             target,
             catalog_dir: catalog_dir.map(PathBuf::from),
             gps_picks,
+            models_pick,
         }))
     }
 }
@@ -193,6 +205,7 @@ pub(crate) enum Step {
         mods: ModifiersState,
     },
     Idle,
+    Wait(Duration),
     Shot(String),
     State,
     Run(Box<Command>),
@@ -422,6 +435,16 @@ fn parse_step(line: &str) -> Result<Step, String> {
             }
         }
         "idle" => Step::Idle,
+        "wait" => {
+            let ms = match args {
+                [ms] => ms.parse::<u64>().ok(),
+                _ => None,
+            };
+            let ms = ms
+                .filter(|ms| *ms <= IDLE_TIMEOUT.as_millis() as u64)
+                .ok_or("wait takes milliseconds, at most 30000")?;
+            Step::Wait(Duration::from_millis(ms))
+        }
         "shot" => {
             let [slug] = args else {
                 return Err("shot takes one name".into());
@@ -498,6 +521,9 @@ pub(crate) fn run(args: Args) -> i32 {
     );
     crate::app::override_download_timeout(DOWNLOAD_TIMEOUT);
     crate::shell::dialog::answer_gps_pickers(args.gps_picks.clone());
+    if let Some(dir) = args.models_pick.clone() {
+        crate::shell::dialog::answer_models_picker(dir);
+    }
     crate::shell::dialog::cancel_all_pickers();
     crate::i18n::init();
 
@@ -644,6 +670,13 @@ impl Driver {
                 Step::Drag { from, to } => self.drag(el, *from, *to),
                 Step::Stroke { points, mods } => self.stroke(el, points, *mods),
                 Step::Idle => self.idle()?,
+                Step::Wait(time) => {
+                    let start = Instant::now();
+                    while start.elapsed() < *time {
+                        self.frame();
+                        std::thread::sleep(Duration::from_millis(8));
+                    }
+                }
                 Step::Shot(slug) => self.shot(slug)?,
                 Step::State => println!("{}", self.state_json()?),
                 Step::Run(cmd) => {
@@ -936,6 +969,7 @@ drag 100 100 300 200
 stroke 10,20 30.5,40 50,60 alt
 stroke 5,5
 idle
+wait 250
 shot grid-1
 state
 run {"id":"photo.rate","params":{"stars":4}}
@@ -1003,6 +1037,7 @@ quit
                     mods: ModifiersState::empty(),
                 },
                 Step::Idle,
+                Step::Wait(Duration::from_millis(250)),
                 Step::Shot("grid-1".into()),
                 Step::State,
                 Step::Run(Box::new(

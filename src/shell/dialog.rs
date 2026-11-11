@@ -75,6 +75,33 @@ pub fn pick_preset_folder() -> Option<PathBuf> {
         .pick_folder()
 }
 
+/// What `--drive --models-pick` answers the ComfyUI models-folder picker
+/// with, in place of cancelling it.
+static MODELS_PICK: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Answer the ComfyUI models-folder picker of a `--drive` run with `dir`.
+/// Set once, before the app starts.
+pub(crate) fn answer_models_picker(dir: PathBuf) {
+    let _ = MODELS_PICK.set(dir);
+}
+
+/// The folder picker for ComfyUI's models folder, opened in `start` when it
+/// exists. `None` when the user cancelled. Blocks until the dialog closes,
+/// so call it only on the main thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn pick_models_folder(start: Option<PathBuf>) -> Option<PathBuf> {
+    if HEADLESS.load(Ordering::Relaxed) {
+        let pick = MODELS_PICK.get().cloned();
+        eprintln!("[drive] the models-folder picker was asked for; answering {pick:?}");
+        return pick;
+    }
+    let mut dialog = rfd::FileDialog::new().set_title(crate::i18n::t().comfy_models_picker_title);
+    if let Some(start) = start.filter(|s| s.is_dir()) {
+        dialog = dialog.set_directory(start);
+    }
+    dialog.pick_folder()
+}
+
 /// What `--drive --gps-pick` answers the GPS-track picker with, in place of
 /// cancelling it.
 static GPS_PICKS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
