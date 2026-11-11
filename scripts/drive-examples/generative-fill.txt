@@ -13,8 +13,8 @@
 #   --delay 2        the run above: three variations
 #   --delay 2 --fail 2       one variation fails: the fill keeps two, with a notice
 #   --delay 2 --die-after 2  the server dies mid-job: the notice says to start it again
-#   not started      Generative is off, and its hover text says to start ComfyUI
-#   --missing vae    Generative is off, and its hover text names the file
+#   not started      + Brush is greyed, and its hover text says to start ComfyUI
+#   --missing vae    + Brush is greyed, and its hover text names the file
 #
 # No command names these controls yet, so the clicks are at fixed points of
 # a 1200x1000 window in the default font size. Each says what it presses.
@@ -38,14 +38,13 @@ shot settings-comfyui-on
 key escape
 idle
 
-# Touch Up, with the pointer resting on the Generative switch for its hover text.
+# Touch Up keeps the page's Brush lit, so a drag paints a fill. The pointer
+# rests on + Brush for its hover text.
 key q
 idle
-move 933 244
+move 1050 119
 wait 1200
 shot generative-switch
-click 933 244           # Generative on
-idle
 # A brush wide enough to see: ] grows it a step.
 key ]
 key ]

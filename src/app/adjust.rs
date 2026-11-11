@@ -202,13 +202,30 @@ impl App {
     pub(crate) fn touchup_active(&self) -> bool {
         self.tool == LoupeTool::TouchUp
     }
+    /// Touch Up keeps the Masks page's Brush, which then paints fills; from
+    /// a gradient tool, clicks heal spots.
     pub(super) fn toggle_touchup(&mut self) {
-        self.tool = if self.tool == LoupeTool::TouchUp {
-            LoupeTool::None
+        if self.tool == LoupeTool::TouchUp {
+            self.tool = LoupeTool::None;
         } else {
-            LoupeTool::TouchUp
-        };
+            #[cfg(not(target_arch = "wasm32"))]
+            self.set_generative(self.mask_tool().is_none_or(|k| k == MaskKind::Brush));
+            self.tool = LoupeTool::TouchUp;
+        }
         self.request_redraw();
+    }
+
+    /// Whether `+ Brush` is lit under Touch Up, where a drag paints a
+    /// generative fill, or why it can't be.
+    pub(crate) fn touchup_brush(&self) -> Result<bool, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(g) = self.generative_view() {
+            return match g.blocked {
+                Some(why) => Err(why),
+                None => Ok(g.on),
+            };
+        }
+        Err(crate::i18n::t().fill_needs_comfy.to_string())
     }
     pub(crate) fn touchup_radius(&self) -> f32 {
         self.touchup_radius.max(self.touchup_radius_min())

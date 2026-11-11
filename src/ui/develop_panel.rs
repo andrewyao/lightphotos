@@ -848,7 +848,7 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         let generative = app.generative_view();
         #[cfg(not(target_arch = "wasm32"))]
         if generative.is_some() {
-            labels.extend([t.generative, t.fill_prompt, t.fills]);
+            labels.extend([t.fill_prompt, t.fills]);
         }
         let form = Form::new(ui, &labels).spacious();
         draw_mask_section(ui, app, &form, out);
@@ -858,23 +858,6 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     out.actions.push(UiAction::ToggleTouchUp);
                 }
             });
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(g) = &generative {
-                form.row(ui, t.generative, |ui| {
-                    let usable = active && g.blocked.is_none();
-                    let switch = ui
-                        .add_enabled_ui(usable, |ui| toggle_switch(ui, g.on))
-                        .inner;
-                    let why = g.blocked.as_deref().unwrap_or(t.generative_tip);
-                    if switch
-                        .on_hover_text(why)
-                        .on_disabled_hover_text(why)
-                        .clicked()
-                    {
-                        out.actions.push(UiAction::Fill(FillAction::SetOn(!g.on)));
-                    }
-                });
-            }
         });
         ui.add_space(font_size::px(ui.style(), form::SLIDER_GAP));
         ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), form::SLIDER_GAP);
@@ -1085,6 +1068,26 @@ fn draw_generative(
     });
 }
 
+/// `+ Brush` under Touch Up: lit, a drag paints a generative fill; unlit, a
+/// click places a spot heal. Greyed, with the reason, where no fill can run.
+#[cfg_attr(target_arch = "wasm32", expect(unused_variables))]
+fn touchup_brush_button(ui: &mut egui::Ui, app: &App, label: &str, out: &mut FrameOutput) {
+    let text = format!("+ {label}");
+    match app.touchup_brush() {
+        Ok(on) => {
+            let button = ui.add(egui::Button::selectable(on, text));
+            if button.on_hover_text(t().generative_tip).clicked() {
+                #[cfg(not(target_arch = "wasm32"))]
+                out.actions.push(UiAction::Fill(FillAction::SetOn(!on)));
+            }
+        }
+        Err(why) => {
+            ui.add_enabled(false, egui::Button::selectable(false, text))
+                .on_disabled_hover_text(why);
+        }
+    }
+}
+
 /// The Masks section of [`draw_masks_tab`].
 fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameOutput) {
     use crate::app::MaskKind;
@@ -1104,16 +1107,23 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
                     (MaskKind::Radial, t.radial_gradient, t.radial_gradient_tip),
                     (MaskKind::Brush, t.brush_mask, t.brush_mask_tip),
                 ] {
+                    if kind == MaskKind::Brush && app.touchup_active() {
+                        touchup_brush_button(ui, app, label, out);
+                        continue;
+                    }
                     let armed = app.mask_tool() == Some(kind);
                     let add =
                         ui.add_enabled(room, egui::Button::selectable(armed, format!("+ {label}")));
                     if add.on_hover_text(tip).clicked() {
-                        // `+ Brush` starts a new mask, as Lightroom's does;
-                        // K keeps painting the picked one.
-                        if kind == MaskKind::Brush && !armed {
+                        // `+ Brush` always starts a new mask, as Lightroom's
+                        // does, so a second click lets go of the picked mask
+                        // rather than putting the Brush down.
+                        if kind == MaskKind::Brush {
                             out.actions.push(UiAction::SelectMask(None));
                         }
-                        out.actions.push(UiAction::ToggleMaskTool(kind));
+                        if !(kind == MaskKind::Brush && armed) {
+                            out.actions.push(UiAction::ToggleMaskTool(kind));
+                        }
                     }
                 }
                 // Lightroom's Select Subject and Select Sky. Greyed, with

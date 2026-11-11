@@ -41,12 +41,12 @@ make new ones.
    download that is interrupted picks up where it stopped.
 3. **Start ComfyUI Desktop** and leave it running.
 4. **Paint.** Open a photo, go to the Masks page, turn on **Touch Up**
-   (`Q`) and then **Generative**. Drag over what you want gone and let go.
+   (`Q`) with **+ Brush** lit. Drag over what you want gone and let go.
    Type a prompt first if you want something specific there. In a little
    while you get up to three variations: step through them with `‹` and
    `›`, ask for others with **Generate More**, or **Delete** the fill.
 
-If Generative is greyed out, hover over it: it says what is missing. A
+If **+ Brush** is greyed out under Touch Up, hover over it: it says what is missing. A
 fill is saved with your other edits, can be undone with `Cmd`+`Z`, and is
 included in exports.
 

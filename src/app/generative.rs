@@ -138,7 +138,7 @@ struct JobInput {
 
 #[derive(Default)]
 pub(crate) struct Generative {
-    /// The panel's Generative switch.
+    /// `+ Brush` lit under Touch Up.
     on: bool,
     prompt: String,
     painting: Option<Painting>,
@@ -925,6 +925,33 @@ mod tests {
         app.cycle_fill_variant(true);
         app.cycle_fill_variant(true);
         assert_eq!(app.fills_of(&photo)[0].chosen(), b.id());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn touch_up_from_the_brush_keeps_the_brush_painting_fills() {
+        use crate::app::MaskKind;
+        let (mut app, dir, _) = folder_app("fill-brush", 1);
+        app.tool = LoupeTool::Mask(MaskKind::Brush);
+        app.toggle_touchup();
+        assert!(app.touchup_active() && app.generative.on, "from the Brush");
+        app.toggle_touchup();
+        app.tool = LoupeTool::Mask(MaskKind::Linear);
+        app.toggle_touchup();
+        assert!(!app.generative.on, "from a gradient, clicks heal spots");
+        app.toggle_touchup();
+        app.tool = LoupeTool::None;
+        app.toggle_touchup();
+        assert!(app.generative.on, "Q from another page: the page's Brush");
+
+        let needs = crate::i18n::t().fill_needs_comfy.to_string();
+        assert_eq!(app.touchup_brush(), Err(needs.clone()), "ComfyUI off");
+        app.comfy.set_enabled(true);
+        let blocked = app.touchup_brush().unwrap_err();
+        assert!(
+            blocked != needs && blocked.contains("Settings"),
+            "{blocked}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

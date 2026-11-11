@@ -348,7 +348,7 @@ pub enum BulkKind {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, PartialEq)]
 pub enum FillAction {
-    /// The panel's Generative switch.
+    /// `+ Brush` lit under Touch Up.
     SetOn(bool),
     SetPrompt(String),
     /// A press on the photo at source UV: a stroke starts.

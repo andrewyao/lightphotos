@@ -129,7 +129,10 @@ impl App {
             return;
         }
 
-        if self.tool == LoupeTool::TouchUp {
+        // K, M and R pick their own tool from Touch Up, as they do from
+        // Lightroom's Healing, so they go on to the keys below.
+        let picks_tool = matches!(code, KeyCode::KeyK | KeyCode::KeyM | KeyCode::KeyR);
+        if self.tool == LoupeTool::TouchUp && !(picks_tool && !cmd && !alt) {
             match code {
                 // Esc first stops a generation, then drops its kept stroke,
                 // and only then leaves the tool.
@@ -165,9 +168,10 @@ impl App {
             return;
         }
 
-        // Esc puts the mask tool down, then lets go of the selected mask, and
-        // Delete removes that mask rather than the photo. With the Brush
-        // armed, the brackets size and feather it, as they do Touch Up's.
+        // Esc lets go of the selected mask, then puts a gradient tool down,
+        // which leaves the Brush, then leaves the Masks page. Delete removes
+        // the selected mask rather than the photo. With the Brush armed, the
+        // brackets size and feather it, as they do Touch Up's.
         let mask_selected = self.selected_mask().filter(|_| self.masks_shown());
         if self.mask_tool().is_some() || mask_selected.is_some() {
             match code {
@@ -182,12 +186,18 @@ impl App {
                     }
                     return;
                 }
+                KeyCode::Escape if mask_selected.is_some() => {
+                    self.mask_selected = None;
+                    self.request_redraw();
+                    return;
+                }
                 KeyCode::Escape => {
-                    if self.mask_tool().is_some() {
-                        self.tool = LoupeTool::None;
-                    } else {
-                        self.mask_selected = None;
+                    // From the Brush, Esc leaves the Masks page for the
+                    // sliders, as Lightroom's closes Masking.
+                    if self.brush_armed() && self.on_masks_page() {
+                        self.set_develop_tab(DevelopTab::Sliders);
                     }
+                    self.tool = LoupeTool::None;
                     self.request_redraw();
                     return;
                 }
@@ -1935,6 +1945,23 @@ mod tests {
         press(&mut app, ModifiersState::empty(), KeyCode::KeyK);
         assert_eq!(app.develop_tab(), DevelopTab::Masks);
         assert!(!app.touchup_active());
+    }
+
+    #[test]
+    fn tool_keys_leave_touch_up_for_their_tool() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyQ);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyK);
+        assert!(app.brush_armed(), "K arms the Brush from Touch Up");
+        assert!(app.masks_shown());
+
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyQ);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyM);
+        assert_eq!(app.mask_tool(), Some(super::super::masks::MaskKind::Linear));
+
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyQ);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyR);
+        assert!(app.crop_rect().is_some(), "R opens Crop from Touch Up");
     }
 
     #[test]

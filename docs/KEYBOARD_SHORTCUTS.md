@@ -110,7 +110,7 @@ In Touch Up:
 | `O` | Show or hide the spots and the fill pins |
 | `Shift`+`O` | Select the next spot |
 
-With the Generative brush on (desktop builds, with ComfyUI enabled in
+With `+ Brush` lit under Touch Up (desktop builds, with ComfyUI enabled in
 Settings):
 
 | Key | Action |

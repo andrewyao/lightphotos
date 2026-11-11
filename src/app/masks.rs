@@ -319,6 +319,21 @@ impl App {
     /// the mask, but the detection still records, so Redo brings the mask
     /// back with no second detection.
     pub(crate) fn poll_coverage(&mut self) {
+        // The Masks page always has a tool: whatever put one down (Esc,
+        // Touch Up off, a gradient drawn, another photo) leaves the Brush,
+        // except while a gradient or detected mask is picked.
+        let picked_other = self
+            .selected_mask()
+            .and_then(|i| self.current_masks().get(i))
+            .is_some_and(|m| m.strokes().is_none());
+        if self.tool == LoupeTool::None
+            && self.on_masks_page()
+            && !self.read_only()
+            && !picked_other
+        {
+            self.tool = LoupeTool::Mask(MaskKind::Brush);
+            self.request_redraw();
+        }
         // A stroke whose brush was put down mid-drag (Esc, another tool or
         // page) ends where it got to, so it is saved and never left open.
         let off = self
@@ -651,10 +666,14 @@ impl App {
     /// Whether the Loupe shows the mask overlay: the Masks page is open and
     /// Touch Up and compare aren't using the photo.
     pub(crate) fn masks_shown(&self) -> bool {
+        self.on_masks_page() && !self.touchup_active()
+    }
+
+    /// The Loupe shows the Masks page, with Touch Up or a mask tool.
+    pub(super) fn on_masks_page(&self) -> bool {
         self.mode == ViewMode::Loupe
             && self.develop_open
             && self.develop_tab == DevelopTab::Masks
-            && !self.touchup_active()
             && !self.compare
     }
 
@@ -680,8 +699,19 @@ impl App {
         self.request_redraw();
     }
 
+    /// Picks mask `i`, or none. As in Lightroom, a brush mask's pick arms
+    /// the Brush so the next stroke adds to it, and another kind's puts the
+    /// Brush down so a drag doesn't start a new brush mask.
     pub(super) fn select_mask(&mut self, i: Option<usize>) {
         self.mask_selected = i.filter(|&i| i < self.current_masks().len());
+        if let Some(picked) = self.mask_selected.and_then(|i| self.current_masks().get(i)) {
+            if picked.strokes().is_some() {
+                self.tool = LoupeTool::Mask(MaskKind::Brush);
+                self.touchup_selected = None;
+            } else if self.brush_armed() {
+                self.tool = LoupeTool::None;
+            }
+        }
         self.request_redraw();
     }
 
@@ -1122,13 +1152,72 @@ mod tests {
     }
 
     #[test]
-    fn k_arms_the_brush_on_the_masks_page_and_k_again_puts_it_down() {
-        let (mut app, dir, _) = brushing("brush-k", 1);
+    fn k_arms_the_brush_on_the_masks_page() {
+        let (app, dir, _) = brushing("brush-k", 1);
         assert!(app.brush_armed());
         assert!(app.develop_open && app.develop_tab == DevelopTab::Masks);
         assert!(app.masks_shown());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The defect: Esc, Touch Up off or a drawn gradient left the Masks
+    /// page with no tool, where a drag did nothing and Touch Up could be
+    /// switched on from nowhere.
+    #[test]
+    fn the_masks_page_always_has_a_tool_and_falls_back_to_the_brush() {
+        let (mut app, dir, _) = brushing("brush-always", 1);
+        let settle = |app: &mut App| {
+            app.poll_coverage();
+            app.brush_armed()
+        };
         app.handle_key(KeyCode::KeyK);
+        assert!(settle(&mut app), "K again keeps the Brush");
+        app.handle_key(KeyCode::KeyQ);
+        assert!(app.touchup_active());
+        app.handle_key(KeyCode::KeyQ);
+        assert!(settle(&mut app), "Touch Up off goes back to the Brush");
+        app.handle_key(KeyCode::KeyQ);
+        app.handle_key(KeyCode::Escape);
+        assert!(settle(&mut app), "Esc from Touch Up goes back to the Brush");
+        app.handle_key(KeyCode::KeyM);
+        assert_eq!(app.mask_tool(), Some(MaskKind::Linear));
+        app.handle_key(KeyCode::Escape);
+        assert!(
+            settle(&mut app),
+            "Esc from a gradient tool goes to the Brush"
+        );
+
+        app.handle_key(KeyCode::Escape);
+        assert_eq!(app.develop_tab, DevelopTab::Sliders, "Esc closes Masks");
+        assert_eq!(app.mode, ViewMode::Loupe, "and stays in the Loupe");
+        assert!(!settle(&mut app), "only the Masks page arms it");
+        app.set_develop_tab(DevelopTab::Masks);
+        assert!(settle(&mut app), "opening the Masks page arms the Brush");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn picking_a_brush_mask_arms_the_brush_and_another_kind_puts_it_down() {
+        let (mut app, dir, _) = brushing("brush-pick", 1);
+        paint(&mut app, &[[0.2, 0.5], [0.6, 0.5]]);
+        app.add_mask(Mask::radial([0.5, 0.5], [0.2, 0.2]));
+        app.select_mask(Some(1));
+        app.poll_coverage();
+        assert!(!app.brush_armed(), "a Radial's chip puts the Brush down");
+
+        app.select_mask(Some(0));
+        assert!(app.brush_armed(), "the brush mask's chip arms the Brush");
+        paint(&mut app, &[[0.3, 0.7], [0.7, 0.7]]);
+        assert_eq!(app.current_masks()[0].strokes().unwrap().len(), 2);
+
+        app.select_mask(Some(1));
         assert!(!app.brush_armed());
+        app.handle_key(KeyCode::Escape);
+        app.poll_coverage();
+        assert!(
+            app.brush_armed(),
+            "letting go of the Radial brings the Brush back"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

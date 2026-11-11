@@ -925,8 +925,9 @@ pub struct Strings {
     pub mask_retry: &'static str,
     pub export_masks_detecting: &'static str,
     pub touch_up_needs_full: &'static str,
-    pub generative: &'static str,
     pub generative_tip: &'static str,
+    /// Hover text on `+ Brush` under Touch Up where no fill can run.
+    pub fill_needs_comfy: &'static str,
     pub fill_prompt: &'static str,
     pub fill_prompt_hint: &'static str,
     pub fill_generating: &'static str,

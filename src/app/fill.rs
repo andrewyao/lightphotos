@@ -36,7 +36,7 @@ pub(crate) enum TouchStep {
 /// What the Touch Up panel and the Loupe draw for the Generative brush.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct GenerativeView<'a> {
-    /// The panel's switch is on.
+    /// `+ Brush` is lit under Touch Up.
     pub on: bool,
     /// A drag on the photo paints: the switch is on, Touch Up is open and
     /// ComfyUI can run the fill.
