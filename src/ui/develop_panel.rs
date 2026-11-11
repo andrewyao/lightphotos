@@ -503,6 +503,7 @@ fn draw_sliders_body(
                 s.default,
                 s.decimals,
                 focused,
+                rail_colors(s.id),
             );
             changed |= c;
             i
@@ -625,8 +626,10 @@ fn step_slider_row(
 }
 
 /// One Develop slider, its value typed or dragged in the readout. Double-
-/// clicking the track resets it to `default`. Returns (value changed, mouse
+/// clicking the track resets it to `default`. A `rail` paints the track as a
+/// gradient between its two colors. Returns (value changed, mouse
 /// interacted).
+#[allow(clippy::too_many_arguments)] // one call per slider kind; a struct would only rename them
 fn develop_slider(
     ui: &mut egui::Ui,
     label: &str,
@@ -635,6 +638,7 @@ fn develop_slider(
     default: f32,
     decimals: usize,
     focused: bool,
+    rail: Option<[egui::Color32; 2]>,
 ) -> (bool, bool) {
     // The readout and the track can't both borrow `field`, so the readout
     // edits a copy that is written back when it changes.
@@ -651,19 +655,37 @@ fn develop_slider(
     let track = egui::Slider::new(field, range)
         .clamping(egui::SliderClamping::Edits)
         .max_decimals(decimals);
-    let (track, value) = form::slider(
-        ui,
-        label,
-        |ui| {
-            ui.scope(|ui| {
-                ui.visuals_mut().button_frame = false;
-                ui.spacing_mut().button_padding.x = 0.0;
-                ui.add(readout)
-            })
-            .inner
-        },
-        track,
-    );
+    // A colored rail goes in a slot reserved under the slider, which then
+    // draws its own rail at zero height, so the knob stays on top.
+    let rail_height = ui.spacing().slider_rail_height;
+    let slot = rail.map(|_| ui.painter().add(egui::Shape::Noop));
+    let (track, value) = ui
+        .scope(|ui| {
+            if rail.is_some() {
+                ui.spacing_mut().slider_rail_height = 0.0;
+            }
+            form::slider(
+                ui,
+                label,
+                |ui| {
+                    ui.scope(|ui| {
+                        ui.visuals_mut().button_frame = false;
+                        ui.spacing_mut().button_padding.x = 0.0;
+                        ui.add(readout)
+                    })
+                    .inner
+                },
+                track,
+            )
+        })
+        .inner;
+    if let (Some(slot), Some(ends)) = (slot, rail) {
+        let rect = egui::Rect::from_center_size(
+            track.rect.center(),
+            egui::vec2(track.rect.width(), rail_height),
+        );
+        ui.painter().set(slot, gradient_rail(rect, ends));
+    }
     let mut changed = track.changed();
     if value.changed() {
         *field = typed;
@@ -687,6 +709,42 @@ fn develop_slider(
         || value.clicked()
         || value.dragged();
     (changed, interacted)
+}
+
+/// The rail colors of a slider that shifts color, as Lightroom shows them:
+/// the color the photo moves toward at each end.
+fn rail_colors(id: crate::develop::SliderId) -> Option<[egui::Color32; 2]> {
+    use crate::develop::SliderId;
+    match id {
+        SliderId::Temp => Some([
+            egui::Color32::from_rgb(70, 125, 230),
+            egui::Color32::from_rgb(235, 205, 60),
+        ]),
+        SliderId::Tint => Some([
+            egui::Color32::from_rgb(70, 185, 80),
+            egui::Color32::from_rgb(215, 75, 205),
+        ]),
+        _ => None,
+    }
+}
+
+/// A horizontal rail across `rect`, fading from `ends[0]` on the left to
+/// `ends[1]` on the right, with round caps in the end colors.
+fn gradient_rail(rect: egui::Rect, [left, right]: [egui::Color32; 2]) -> egui::Shape {
+    let r = rect.height() / 2.0;
+    let body = rect.shrink2(egui::vec2(r, 0.0));
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(body.left_top(), left);
+    mesh.colored_vertex(body.left_bottom(), left);
+    mesh.colored_vertex(body.right_top(), right);
+    mesh.colored_vertex(body.right_bottom(), right);
+    mesh.add_triangle(0, 1, 3);
+    mesh.add_triangle(0, 3, 2);
+    egui::Shape::Vec(vec![
+        egui::Shape::circle_filled(body.left_center(), r, left),
+        egui::Shape::circle_filled(body.right_center(), r, right),
+        egui::Shape::mesh(mesh),
+    ])
 }
 
 /// The white-balance picker's toggle: an eyedropper, painted so it can't fall
@@ -1011,11 +1069,21 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
                 0.0,
                 s.decimals,
                 false,
+                rail_colors(s.id),
             );
         }
         if let MaskShape::Radial { feather, .. } = &mut next.shape {
             let mut percent = *feather * 100.0;
-            develop_slider(ui, t.feather, &mut percent, 0.0..=100.0, 50.0, 0, false);
+            develop_slider(
+                ui,
+                t.feather,
+                &mut percent,
+                0.0..=100.0,
+                50.0,
+                0,
+                false,
+                None,
+            );
             *feather = (percent / 100.0).clamp(0.0, 1.0);
         }
         if next != *mask {
