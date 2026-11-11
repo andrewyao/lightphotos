@@ -511,8 +511,14 @@ pub(crate) struct App {
     /// `app/coverage.rs`.
     pub(crate) coverage: coverage::CoverageStore,
     /// The shown photo's fill patches, loading or loaded, for the Loupe.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) patches: fill::PatchStore,
+    /// The Settings ▸ ComfyUI choices, the server's liveness and the model
+    /// downloads. See `app/comfy.rs`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) comfy: comfy::Comfy,
+    /// Touch Up's Generative brush. See `app/generative.rs`.
+    #[cfg(not(target_arch = "wasm32"))]
+    generative: generative::Generative,
     /// The detected mask's coverage the Loupe tints right now, with its
     /// invert, so a frame that changes neither uploads nothing.
     mask_overlay: Option<(crate::develop::RasterId, bool)>,
@@ -533,9 +539,9 @@ pub(crate) struct App {
     kept_raster: Option<masks::KeptRaster>,
     /// O hides the spot circles in Touch Up to judge the fix unobstructed.
     touchup_spots_hidden: bool,
-    /// Per-image spot lists as they were before each Touch Up add or delete,
-    /// newest last, so Undo can step back through both.
-    touchup_undo: HashMap<PathBuf, Vec<Vec<TouchUp>>>,
+    /// Per-image spots or fills as they were before each Touch Up change,
+    /// newest last, so Undo can step back through them.
+    touchup_undo: HashMap<PathBuf, Vec<fill::TouchStep>>,
     develop_open: bool,
     develop_tab: DevelopTab,
     /// The shown photo's pixel sample and the histogram binned from it.
@@ -799,6 +805,8 @@ mod autotone;
 mod bulk_delete;
 mod bursts;
 mod catalog;
+#[cfg(not(target_arch = "wasm32"))]
+mod comfy;
 mod commands;
 mod control;
 mod coverage;
@@ -817,6 +825,8 @@ mod fill;
 mod folders;
 mod fonts;
 mod fullscreen;
+#[cfg(not(target_arch = "wasm32"))]
+mod generative;
 #[cfg(not(target_arch = "wasm32"))]
 mod geotag;
 #[cfg(not(target_arch = "wasm32"))]
@@ -842,7 +852,10 @@ mod score;
 mod session;
 mod sort;
 mod state;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use comfy::ModelState;
 pub(crate) use coverage::{Failure, MaskStatus};
+pub(crate) use fill::{GenerativeView, JobView};
 pub(crate) use masks::{BrushSettings, MaskKind, BRUSH_MAX_RADIUS};
 pub(crate) use presets::FolderState;
 pub(crate) use sort::{GridSort, SortOrder};
@@ -970,8 +983,11 @@ impl App {
             masks: HashMap::new(),
             detections: HashMap::new(),
             coverage: coverage::CoverageStore::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             patches: fill::PatchStore::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            comfy: comfy::Comfy::load(),
+            #[cfg(not(target_arch = "wasm32"))]
+            generative: generative::Generative::default(),
             mask_overlay: None,
             tool: LoupeTool::None,
             // Clamped up to TOUCHUP_MIN_PIXELS once an image is loaded.
@@ -1853,6 +1869,12 @@ impl App {
                 ui::UiAction::ToggleWbPicker => self.toggle_wb_picker(),
                 ui::UiAction::PickWhiteBalance(u, v) => self.pick_white_balance(u, v),
                 ui::UiAction::ToggleTouchUp => self.toggle_touchup(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::Fill(action) => self.fill_action(action),
+                #[cfg(target_arch = "wasm32")]
+                ui::UiAction::Fill(_) => {}
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::Comfy(action) => self.comfy_action(action),
                 ui::UiAction::ClickRail(item) => self.click_rail(item),
                 ui::UiAction::SetTouchUpRadius(r) => {
                     self.set_touchup_radius(r);

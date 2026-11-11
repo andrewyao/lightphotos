@@ -131,6 +131,16 @@ impl App {
 
         if self.tool == LoupeTool::TouchUp {
             match code {
+                // Esc first stops a generation, then drops its kept stroke,
+                // and only then leaves the tool.
+                #[cfg(not(target_arch = "wasm32"))]
+                KeyCode::Escape if self.generative_holds_esc() => self.cancel_generation(),
+                #[cfg(not(target_arch = "wasm32"))]
+                KeyCode::Enter | KeyCode::NumpadEnter => self.generate(),
+                #[cfg(not(target_arch = "wasm32"))]
+                KeyCode::Delete | KeyCode::Backspace if self.fill_picked() => {
+                    self.delete_picked_fill()
+                }
                 KeyCode::Escape => {
                     self.tool = LoupeTool::None;
                     self.touchup_selected = None;

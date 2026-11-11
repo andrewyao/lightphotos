@@ -842,7 +842,16 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     form::page_heading(ui, t.tab_masks, |_| {});
     form::page(ui, |ui| {
         let active = app.touchup_active();
-        let form = Form::new(ui, &[t.masks, t.touch_up, t.spots]).spacious();
+        let generative = app.generative_view();
+        let labels = [
+            t.masks,
+            t.touch_up,
+            t.spots,
+            t.generative,
+            t.fill_prompt,
+            t.fills,
+        ];
+        let form = Form::new(ui, &labels).spacious();
         draw_mask_section(ui, app, &form, out);
         form.section(ui, "", |ui| {
             form.row(ui, t.touch_up, |ui| {
@@ -850,6 +859,22 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     out.actions.push(UiAction::ToggleTouchUp);
                 }
             });
+            if let Some(g) = &generative {
+                form.row(ui, t.generative, |ui| {
+                    let usable = active && g.blocked.is_none();
+                    let switch = ui
+                        .add_enabled_ui(usable, |ui| toggle_switch(ui, g.on))
+                        .inner;
+                    let why = g.blocked.as_deref().unwrap_or(t.generative_tip);
+                    if switch
+                        .on_hover_text(why)
+                        .on_disabled_hover_text(why)
+                        .clicked()
+                    {
+                        out.actions.push(UiAction::Fill(FillAction::SetOn(!g.on)));
+                    }
+                });
+            }
         });
         ui.add_space(font_size::px(ui.style(), form::SLIDER_GAP));
         ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), form::SLIDER_GAP);
@@ -921,6 +946,140 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 });
             });
         }
+        if let Some(g) = generative.as_ref().filter(|g| g.on && active) {
+            draw_generative(ui, &form, g, out);
+        }
+    });
+}
+
+/// The Generative brush's rows: the prompt, the job in flight or the stroke
+/// kept from one that failed, the photo's fills, and the picked fill's
+/// variants.
+fn draw_generative(
+    ui: &mut egui::Ui,
+    form: &Form,
+    g: &crate::app::GenerativeView,
+    out: &mut FrameOutput,
+) {
+    use crate::app::JobView;
+    let t = t();
+    let mut push = |action: FillAction| out.actions.push(UiAction::Fill(action));
+    let generating = matches!(g.job, JobView::Generating { .. });
+    form.section(ui, "", |ui| {
+        form.row(ui, t.fill_prompt, |ui| {
+            let mut prompt = g.prompt.to_string();
+            let field = egui::TextEdit::singleline(&mut prompt)
+                .hint_text(t.fill_prompt_hint)
+                .desired_width(f32::INFINITY);
+            if ui.add(field).changed() {
+                push(FillAction::SetPrompt(prompt));
+            }
+        });
+        match &g.job {
+            JobView::Generating { done, of, .. } => {
+                form.row(ui, "", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(12.0));
+                        ui.label(
+                            t.fill_generating
+                                .replace("{done}", &(done + 1).min(*of).to_string())
+                                .replace("{of}", &of.to_string()),
+                        );
+                    });
+                    if form::button(ui, &Button::new(t.cancel, Role::Cancel))
+                        .on_hover_text("Esc")
+                        .clicked()
+                    {
+                        push(FillAction::Cancel);
+                    }
+                });
+            }
+            JobView::Kept { why } => {
+                form.row(ui, "", |ui| {
+                    match why {
+                        Some(why) => form::error(ui, why),
+                        None => form::hint(ui, t.fill_kept),
+                    }
+                    ui.horizontal(|ui| {
+                        let generate = Button {
+                            enabled: g.blocked.is_none(),
+                            ..Button::new(t.fill_generate, Role::Primary)
+                        };
+                        let generate = form::button(ui, &generate);
+                        let why = g.blocked.as_deref().unwrap_or("Enter");
+                        if generate
+                            .on_hover_text(why)
+                            .on_disabled_hover_text(why)
+                            .clicked()
+                        {
+                            push(FillAction::Generate);
+                        }
+                        if form::button(ui, &Button::new(t.fill_discard, Role::Cancel))
+                            .on_hover_text("Esc")
+                            .clicked()
+                        {
+                            push(FillAction::Discard);
+                        }
+                    });
+                });
+            }
+            JobView::Idle | JobView::Painting => {}
+        }
+        if g.fills.is_empty() {
+            return;
+        }
+        form.row(ui, t.fills, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for i in 0..g.fills.len() {
+                    let picked = g.picked.is_some_and(|p| p.index == i);
+                    if ui.selectable_label(picked, format!("{}", i + 1)).clicked() {
+                        push(FillAction::Select(i));
+                    }
+                }
+            });
+            let Some(picked) = g.picked else {
+                return;
+            };
+            ui.horizontal(|ui| {
+                let several = picked.variants > 1;
+                if ui
+                    .add_enabled(several, egui::Button::new("‹"))
+                    .on_hover_text(t.fill_previous)
+                    .clicked()
+                {
+                    push(FillAction::Cycle { forward: false });
+                }
+                ui.label(format!("{}/{}", picked.variant + 1, picked.variants));
+                if ui
+                    .add_enabled(several, egui::Button::new("›"))
+                    .on_hover_text(t.fill_next)
+                    .clicked()
+                {
+                    push(FillAction::Cycle { forward: true });
+                }
+            });
+            ui.horizontal(|ui| {
+                let more = Button {
+                    enabled: !generating && g.blocked.is_none(),
+                    ..Button::new(t.fill_generate_more, Role::Primary)
+                };
+                let more = form::button(ui, &more);
+                let more = match &g.blocked {
+                    Some(why) => more.on_disabled_hover_text(why),
+                    None => more,
+                };
+                if more.clicked() {
+                    push(FillAction::GenerateMore);
+                }
+                let delete = Button {
+                    enabled: !generating,
+                    ..Button::new(t.delete, Role::Danger)
+                };
+                if form::button(ui, &delete).clicked() {
+                    push(FillAction::Delete);
+                }
+            });
+        });
     });
 }
 

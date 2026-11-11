@@ -25,9 +25,7 @@
 
 mod app;
 mod autotone;
-// Wired into the app by the Generative Fill slice; until then only tests call it.
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(dead_code)]
 mod comfy;
 mod i18n;
 mod jobs;
@@ -440,10 +438,17 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let poll_at = poll_delay.map(|d| now + d);
         let slide_at = self.tick_slideshow(now);
+        // The next look at ComfyUI while Touch Up is open. A wake, not
+        // work in flight, so an idle app stays idle between probes.
+        #[cfg(not(target_arch = "wasm32"))]
+        let comfy_at = self.comfy_wake_at();
+        #[cfg(target_arch = "wasm32")]
+        let comfy_at = None;
         match poll_at
             .into_iter()
             .chain(self.repaint_at)
             .chain(slide_at)
+            .chain(comfy_at)
             .min()
         {
             Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
@@ -612,7 +617,11 @@ impl App {
         self.poll_selection_mask();
         self.poll_coverage();
         self.poll_fills();
-        let detecting = self.coverage.busy() || self.fills_loading();
+        #[cfg(not(target_arch = "wasm32"))]
+        let generating = self.poll_generative();
+        #[cfg(target_arch = "wasm32")]
+        let generating = false;
+        let detecting = self.coverage.busy() || self.fills_loading() || generating;
         let scanning_presets = self.poll_preset_scans();
         self.poll_remove_ca();
 

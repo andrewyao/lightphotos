@@ -214,11 +214,25 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
             },
         );
     }
+    let generative = app.generative_view();
+    let fill_pins = generative
+        .as_ref()
+        .map(|g| draw_fill_marks(ui, app, central, g))
+        .unwrap_or_default();
+    let paints = generative.as_ref().is_some_and(|g| g.armed);
     egui::Area::new(egui::Id::new("loupe_touchup"))
         .order(egui::Order::Foreground)
         .fixed_pos(central.min)
         .show(ui.ctx(), |ui| {
-            let (_id, resp) = ui.allocate_exact_size(central.size(), egui::Sense::click());
+            let sense = if paints {
+                egui::Sense::click_and_drag()
+            } else {
+                egui::Sense::click()
+            };
+            let (_id, resp) = ui.allocate_exact_size(central.size(), sense);
+            if paints {
+                generative_brush(ui, app, central, &resp, &fill_pins, out);
+            }
             if let Some(p) = resp.hover_pos() {
                 // The brush itself is the cursor: a circle the size of the
                 // spot a click would add.
@@ -253,7 +267,7 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
                     ));
                 }
             }
-            if resp.clicked() {
+            if resp.clicked() && !generative.as_ref().is_some_and(|g| g.on) {
                 if let Some(p) = resp.interact_pointer_pos() {
                     let (u, v) = app.loupe_screen_to_source(central, p);
                     let mut hit = None;
@@ -274,6 +288,118 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
                 }
             }
         });
+}
+
+/// How near a fill's pin, in points, a click picks it rather than painting.
+const FILL_PIN_REACH: f32 = 10.0;
+
+/// Draws a pin at the middle of each of the photo's fills, the picked one
+/// lit, and a spinner where a generation is running. Returns the pins'
+/// screen positions, in fill order.
+fn draw_fill_marks(
+    ui: &egui::Ui,
+    app: &App,
+    central: egui::Rect,
+    g: &crate::app::GenerativeView,
+) -> Vec<egui::Pos2> {
+    let painter = ui.painter_at(central);
+    let middle = |b: &[f32; 4]| {
+        app.loupe_source_to_screen(central, (b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5)
+    };
+    let pins: Vec<egui::Pos2> = g.fills.iter().map(middle).collect();
+    if app.touchup_spots_shown() {
+        let colors = theme::colors(ui.ctx());
+        for (i, &at) in pins.iter().enumerate() {
+            let picked = g.picked.is_some_and(|p| p.index == i);
+            // Dark under light, so the pin reads on bright and dark photos.
+            painter.circle_filled(at, 6.5, egui::Color32::from_black_alpha(160));
+            let fill = if picked {
+                colors.cursor
+            } else {
+                egui::Color32::WHITE
+            };
+            painter.circle_filled(at, 5.0, fill);
+        }
+    }
+    if let crate::app::JobView::Generating {
+        bbox: Some(bbox), ..
+    } = &g.job
+    {
+        let size = 28.0;
+        let rect = egui::Rect::from_center_size(middle(bbox), egui::vec2(size, size));
+        painter.circle_filled(
+            rect.center(),
+            size * 0.75,
+            egui::Color32::from_black_alpha(140),
+        );
+        egui::Spinner::new()
+            .size(size)
+            .color(egui::Color32::WHITE)
+            .paint_at(ui, rect);
+    }
+    pins
+}
+
+/// The Generative brush on the whole image: a press on a fill's pin picks
+/// that fill; any other press starts a stroke, which gains each place the
+/// pointer moves to and is sent when the button lets go.
+fn generative_brush(
+    ui: &egui::Ui,
+    app: &App,
+    central: egui::Rect,
+    resp: &egui::Response,
+    pins: &[egui::Pos2],
+    out: &mut FrameOutput,
+) {
+    let ctx = ui.ctx();
+    let uv = |p: egui::Pos2| {
+        let (u, v) = app.loupe_screen_to_source(central, p);
+        [u, v]
+    };
+    let mut push = |action: FillAction| out.actions.push(UiAction::Fill(action));
+    let down = ui.input(|i| i.pointer.primary_down());
+    let at = ctx.pointer_latest_pos();
+    let pin_at = |p: egui::Pos2| {
+        app.touchup_spots_shown()
+            .then(|| {
+                pins.iter()
+                    .position(|pin| pin.distance(p) <= FILL_PIN_REACH)
+            })
+            .flatten()
+    };
+    let painting = app
+        .generative_view()
+        .is_some_and(|g| matches!(g.job, crate::app::JobView::Painting));
+    if painting {
+        match at {
+            Some(p) if down => push(FillAction::Drag(uv(p))),
+            _ if down => {}
+            _ => push(FillAction::Release(
+                at.filter(|p| central.contains(*p)).map(uv),
+            )),
+        }
+    } else if down && resp.is_pointer_button_down_on() {
+        let origin = ctx
+            .input(|i| i.pointer.press_origin())
+            .or_else(|| resp.interact_pointer_pos());
+        if let Some(origin) = origin.filter(|o| pin_at(*o).is_none()) {
+            push(FillAction::Press(uv(origin)));
+            if let Some(p) = at.filter(|p| *p != origin) {
+                push(FillAction::Drag(uv(p)));
+            }
+        }
+    } else if resp.clicked() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            match pin_at(p) {
+                Some(i) => push(FillAction::Select(i)),
+                // A press and release inside one frame: a single dab.
+                None => {
+                    push(FillAction::Press(uv(p)));
+                    push(FillAction::Release(Some(uv(p))));
+                }
+            }
+        }
+    }
 }
 
 /// On-screen radius of a touch-up of `radius` centered at texture `center`,

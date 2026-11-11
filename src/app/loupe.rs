@@ -620,6 +620,12 @@ impl App {
     /// invert, while the Masks page shows the photo and the coverage is in
     /// memory. A brush's raster comes from the cache the render just filled.
     fn selected_mask_coverage(&self) -> Option<(std::sync::Arc<crate::develop::Coverage>, bool)> {
+        // A stroke painted for a generative fill tints the same way until
+        // its fill lands.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(coverage) = self.generative_coverage() {
+            return Some((coverage, false));
+        }
         if !self.masks_shown() {
             return None;
         }

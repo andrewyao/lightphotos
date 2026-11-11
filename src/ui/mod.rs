@@ -243,6 +243,11 @@ pub enum UiAction {
     TouchUpClick(f32, f32),
     SelectTouchUp(usize),
     DeleteTouchUp,
+    /// Touch Up's Generative brush and the fills it makes.
+    Fill(FillAction),
+    /// Settings ▸ ComfyUI.
+    #[cfg(not(target_arch = "wasm32"))]
+    Comfy(ComfyAction),
     /// Arms the mask tool for a shape, or puts it down if it is armed.
     ToggleMaskTool(crate::app::MaskKind),
     /// Puts the mask tool down, as a finished draw does.
@@ -335,6 +340,49 @@ pub enum BulkKind {
     AutoToneAll,
     /// Move to the Trash.
     Delete,
+}
+
+/// What the Generative brush's controls ask for.
+#[derive(Debug, PartialEq)]
+pub enum FillAction {
+    /// The panel's Generative switch.
+    SetOn(bool),
+    SetPrompt(String),
+    /// A press on the photo at source UV: a stroke starts.
+    Press([f32; 2]),
+    Drag([f32; 2]),
+    /// The pointer let go, at source UV when it is over the photo: the
+    /// stroke is sent.
+    Release(Option<[f32; 2]>),
+    /// Sends the kept stroke again.
+    Generate,
+    /// New variants for the picked fill.
+    GenerateMore,
+    /// Stops the running generation.
+    Cancel,
+    /// Drops the kept stroke.
+    Discard,
+    Select(usize),
+    /// The picked fill's next variant, or the one before.
+    Cycle {
+        forward: bool,
+    },
+    Delete,
+}
+
+/// What Settings ▸ ComfyUI asks for. A model is named by its file.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, PartialEq)]
+pub enum ComfyAction {
+    SetEnabled(bool),
+    /// The Server field's text changed.
+    EditServer(String),
+    /// The Server field lost focus.
+    CommitServer,
+    ChooseModelsFolder,
+    SetFeature(&'static str, bool),
+    Download(&'static str),
+    CancelDownload(&'static str),
 }
 
 impl UiAction {
