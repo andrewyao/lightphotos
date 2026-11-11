@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
+use crate::develop::fill::{Fill, MAX_FILLS};
 use crate::develop::{Adjustments, Detections, Mask, MaskShape, TouchUp, MAX_MASKS};
 use crate::geotag::GeoTag;
 use crate::scoring::quality::QualityScore;
@@ -97,6 +98,14 @@ pub struct ImageRecord {
     /// written outside the undo history.
     #[serde(default, skip_serializing_if = "Detections::is_empty")]
     pub detections: Detections,
+    /// Generative fills, composited at the Touch Up stage. Their pixels
+    /// live in `.lightphotos/fills/`.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "readable_fills"
+    )]
+    pub fills: Vec<Fill>,
     /// Manual rotation in 90° clockwise steps, `0..=3`.
     #[serde(
         default,
@@ -141,7 +150,7 @@ pub struct UnknownFields(std::collections::BTreeMap<String, Box<RawValue>>);
 
 impl UnknownFields {
     /// The fields `ImageRecord` reads. A test keeps this honest.
-    const KNOWN: [&'static str; 11] = [
+    const KNOWN: [&'static str; 12] = [
         "rating",
         "flag",
         "label",
@@ -149,6 +158,7 @@ impl UnknownFields {
         "touchups",
         "masks",
         "detections",
+        "fills",
         "rotation",
         "score",
         "edited",
@@ -250,6 +260,22 @@ where
     let mut touchups = Vec::<TouchUp>::deserialize(deserializer)?;
     touchups.truncate(crate::develop::MAX_TOUCHUPS);
     Ok(touchups)
+}
+
+/// The first [`MAX_FILLS`] fills a sidecar holds that [`Fill`] accepts. A
+/// bad entry, or a `fills` that isn't a list, costs those fills and nothing
+/// else in the record.
+fn readable_fills<'de, D>(deserializer: D) -> Result<Vec<Fill>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    let entries = serde_json::from_str::<Vec<Box<RawValue>>>(raw.get()).unwrap_or_default();
+    Ok(entries
+        .iter()
+        .filter_map(|e| serde_json::from_str::<Fill>(e.get()).ok())
+        .take(MAX_FILLS)
+        .collect())
 }
 
 /// A photo's masks as its sidecar holds them: the ones this build reads, and
@@ -435,6 +461,7 @@ impl ImageRecord {
             &self.touchups,
             &self.masks,
             &self.detections,
+            &self.fills,
             self.rotation,
         )
     }
@@ -461,6 +488,7 @@ impl ImageRecord {
         !self.adjustments.is_identity()
             || !self.touchups.is_empty()
             || !self.masks.known.is_empty()
+            || !self.fills.is_empty()
             || self.rotation != 0
     }
 
@@ -782,6 +810,7 @@ mod tests {
                 );
                 d
             },
+            fills: vec![sample_fill()],
             rotation: 1,
             score: Some(StoredScore {
                 score: sample_score(),
@@ -795,7 +824,7 @@ mod tests {
         };
         assert_eq!(
             fields.len(),
-            8,
+            9,
             "set every field of ImageRecord here, got {fields:?}"
         );
 
@@ -810,6 +839,119 @@ mod tests {
         }
 
         assert!(ImageRecord::default().is_empty());
+    }
+
+    fn sample_fill() -> Fill {
+        let ids = ["0123456789abcdef", "fedcba9876543210"].map(|s| s.parse().unwrap());
+        let mut fill = Fill::new([0.1, 0.2, 0.4, 0.5], ids.to_vec(), "a red boat".into()).unwrap();
+        fill.choose(1);
+        fill
+    }
+
+    #[test]
+    fn a_record_with_only_fills_round_trips_and_counts_as_an_edit() {
+        let rec = ImageRecord {
+            fills: vec![sample_fill()],
+            ..Default::default()
+        };
+        assert!(!rec.is_empty());
+        let bytes = serde_json::to_vec(&rec).unwrap();
+        let read = parse_record(&bytes, || Some(5)).unwrap();
+        assert_eq!(read.fills, rec.fills);
+        assert_eq!(read.fills[0].chosen(), rec.fills[0].chosen());
+        assert_eq!(read.edited, Some(5), "a fill is an edit, so it has a time");
+        assert!(read.unknown.is_empty(), "fills is a known field");
+    }
+
+    #[test]
+    fn a_hostile_fills_list_is_capped_and_its_bad_entries_dropped() {
+        let id = |n: u32| format!("\"{n:016x}\"");
+        let good = format!(r#"{{"bbox":[0.1,0.1,0.2,0.2],"variants":[{}]}}"#, id(1));
+        let mut entries = vec![
+            format!(
+                r#"{{"bbox":[0.1,0.1,0.2,0.2],"variants":[{},{},{},{}],"chosen":9,"prompt":"{}"}}"#,
+                id(1),
+                id(2),
+                id(3),
+                id(4),
+                "x".repeat(1 << 19)
+            ),
+            r#"{"bbox":[0.5,0.1,0.2,0.2],"variants":["0000000000000001"]}"#.to_string(),
+            r#"{"bbox":[0.1,0.1,0.2,1e40],"variants":["0000000000000001"]}"#.to_string(),
+            r#"{"bbox":[0.1,0.1,0.2,0.2],"variants":[]}"#.to_string(),
+            r#"{"bbox":"nope","variants":["0000000000000001"]}"#.to_string(),
+            "7".to_string(),
+        ];
+        entries.extend(std::iter::repeat_n(good, 20));
+        let body = format!(r#"{{"rating":4,"fills":[{}]}}"#, entries.join(","));
+        let rec = parse_record(body.as_bytes(), || None).unwrap();
+        assert_eq!(rec.rating, Some(4), "the rating survives");
+        assert_eq!(rec.fills.len(), MAX_FILLS);
+        let first = &rec.fills[0];
+        assert_eq!(first.variants().len(), crate::develop::fill::MAX_VARIANTS);
+        assert_eq!(
+            first.chosen_index(),
+            0,
+            "an out-of-range choice shows the first"
+        );
+        assert_eq!(
+            first.prompt().chars().count(),
+            crate::develop::fill::MAX_PROMPT_CHARS
+        );
+        assert!(rec.fills[1..]
+            .iter()
+            .all(|f| f.bbox() == [0.1, 0.1, 0.2, 0.2]));
+
+        let not_a_list = parse_record(br#"{"rating":4,"fills":"lots"}"#, || None).unwrap();
+        assert_eq!((not_a_list.rating, not_a_list.fills.len()), (Some(4), 0));
+    }
+
+    #[test]
+    fn a_sidecar_from_before_fills_loads_and_signs_the_same() {
+        let bytes = br#"{"rating":2,"adjustments":{"exposure":0.5},"rotation":1}"#;
+        let rec = parse_record(bytes, || None).unwrap();
+        assert!(rec.fills.is_empty());
+        assert!(rec.unknown.is_empty());
+        assert!(!serde_json::to_string(&rec).unwrap().contains("fills"));
+        let mut fills = rec.clone();
+        assert_eq!(
+            rec.edit_signature(),
+            crate::develop::edit_signature_with_touchups(
+                &rec.adjustments,
+                &[],
+                &[],
+                &Detections::default(),
+                &[],
+                1
+            )
+        );
+        fills.fills = vec![sample_fill()];
+        let with = fills.edit_signature();
+        assert_ne!(rec.edit_signature(), with);
+
+        let mut other_choice = fills.clone();
+        other_choice.fills[0].choose(0);
+        assert_ne!(other_choice.edit_signature(), with, "the chosen variant");
+
+        let mut moved = fills.clone();
+        moved.fills = vec![Fill::new(
+            [0.1, 0.2, 0.4, 0.6],
+            sample_fill().variants().to_vec(),
+            "a red boat".into(),
+        )
+        .unwrap()];
+        moved.fills[0].choose(1);
+        assert_ne!(moved.edit_signature(), with, "the rect");
+
+        let mut reworded = fills.clone();
+        reworded.fills = vec![Fill::new(
+            [0.1, 0.2, 0.4, 0.5],
+            sample_fill().variants().to_vec(),
+            "something else".into(),
+        )
+        .unwrap()];
+        reworded.fills[0].choose(1);
+        assert_eq!(reworded.edit_signature(), with, "the prompt doesn't render");
     }
 
     #[test]
@@ -1018,6 +1160,7 @@ mod tests {
                 &[],
                 &[],
                 &Detections::default(),
+                &[],
                 0
             )
         );
@@ -1048,6 +1191,7 @@ mod tests {
                 &[],
                 &gradient.masks,
                 &Detections::default(),
+                &[],
                 0
             )
         );
@@ -1196,6 +1340,7 @@ mod tests {
             crate::develop::DetectTarget::Sky,
             "5be1c0a39d2f7e14".parse().ok(),
         );
+        rec.fills = vec![sample_fill()];
         rec.rotation = 1;
         rec.score = Some(StoredScore {
             score: sample_score(),

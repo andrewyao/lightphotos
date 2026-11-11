@@ -332,6 +332,7 @@ impl App {
             self.detections
                 .get(path)
                 .unwrap_or(&develop::Detections::default()),
+            self.folder_store.fills(path),
             rot,
         )
     }

@@ -636,6 +636,11 @@ impl FolderStore {
         self.record(path).and_then(|r| r.rating)
     }
 
+    /// `path`'s generative fills; none for a photo without a record here.
+    pub fn fills(&self, path: &Path) -> &[crate::develop::fill::Fill] {
+        self.record(path).map_or(&[], |r| &r.fills)
+    }
+
     /// Set the rating, clamped to `0..=MAX_RATING`. `0` clears it.
     pub fn set(&mut self, path: &Path, stars: u8) {
         let stars = stars.min(MAX_RATING);

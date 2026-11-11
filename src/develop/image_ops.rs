@@ -1341,6 +1341,7 @@ mod tests {
                 &[t],
                 &[],
                 &crate::develop::Detections::default(),
+                &[],
                 0,
             )
         };

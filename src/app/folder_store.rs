@@ -199,6 +199,13 @@ impl App {
                         .filter(|(_, r)| !r.detections.is_empty())
                         .map(|(name, r)| (name.clone(), r.detections.clone()))
                         .collect();
+                    let fills: HashMap<std::ffi::OsString, Vec<crate::develop::fill::Fill>> =
+                        loaded
+                            .images
+                            .iter()
+                            .filter(|(_, r)| !r.fills.is_empty())
+                            .map(|(name, r)| (name.clone(), r.fills.clone()))
+                            .collect();
                     let _ = tx.send((for_thread.clone(), token, mark, loaded));
                     // Sweep after sending, because the UI waits on the folder store
                     // and nothing waits on the sweeps. Not in a read-only folder:
@@ -207,6 +214,13 @@ impl App {
                         crate::jobs::thumbnail::sweep_orphans(&for_thread);
                         crate::develop::coverage::sweep_orphans(&for_thread, |photo, id| {
                             named.get(photo).is_some_and(|d| d.names(id))
+                        });
+                        // Every variant a fill lists, chosen or not, keeps
+                        // its file; dropping a variant from the fill frees it.
+                        crate::develop::fill::sweep_orphans(&for_thread, |photo, id| {
+                            fills
+                                .get(photo)
+                                .is_some_and(|f| f.iter().any(|f| f.variants().contains(&id)))
                         });
                     }
                 });

@@ -896,6 +896,7 @@ pub fn edit_signature_with_touchups(
     touchups: &[TouchUp],
     masks: &[Mask],
     detections: &Detections,
+    fills: &[fill::Fill],
     rot: u8,
 ) -> u64 {
     use crate::hash::Fnv1a;
@@ -1052,6 +1053,18 @@ pub fn edit_signature_with_touchups(
                     h.write(&((v * 100_000.0).round() as i32).to_le_bytes());
                 }
             }
+        }
+    }
+
+    // Only a photo with fills writes, so older hashes hold. The unchosen
+    // variants and the prompt don't change the render.
+    if !fills.is_empty() {
+        h.write(&[14]);
+        for f in fills {
+            for v in f.bbox() {
+                h.write(&((v * 100_000.0).round() as i32).to_le_bytes());
+            }
+            h.write(&f.chosen().to_le_bytes());
         }
     }
 
@@ -1684,7 +1697,7 @@ mod tests {
     }
 
     fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
-        edit_signature_with_touchups(adj, &[], &[], &Detections::default(), rot)
+        edit_signature_with_touchups(adj, &[], &[], &Detections::default(), &[], rot)
     }
 
     /// 0 and 1 stay fixed, so the boost never clips or crushes, and mid-gray
