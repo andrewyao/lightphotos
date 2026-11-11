@@ -810,6 +810,7 @@ pub(crate) use group_compare::{
 };
 mod export;
 mod faces;
+mod fill;
 mod folders;
 mod fonts;
 mod fullscreen;

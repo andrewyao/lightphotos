@@ -233,10 +233,14 @@ impl Folder {
         let masks = rec
             .mask_set(&path)
             .map_err(|e| format!("cannot render {e}"))?;
+        let fills = lightphotos::develop::fill::FillSet::read(&path, &rec.fills);
         let jpeg = export::export_file(
             &path,
             &rec.adjustments,
-            &rec.touchups,
+            lightphotos::develop::image_ops::Retouch {
+                fills: &fills,
+                touchups: &rec.touchups,
+            },
             &masks,
             rec.rotation,
             &output,

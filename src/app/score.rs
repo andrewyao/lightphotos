@@ -82,6 +82,7 @@ impl App {
                 let touchups = self.touchups.get(&path).cloned().unwrap_or_default();
                 let rot = self.rotations.get(&path).copied().unwrap_or(0);
                 let edits = self.edit_sig_for(&path);
+                let fills = self.fill_input(&path);
                 // A photo whose detected mask is still detecting scores
                 // later, with the mask, rather than now without it.
                 let Some(masks) = self.mask_input(&path) else {
@@ -94,6 +95,7 @@ impl App {
                     pool.submit(ScoreRequest {
                         path,
                         adj,
+                        fills,
                         touchups,
                         masks,
                         rot,

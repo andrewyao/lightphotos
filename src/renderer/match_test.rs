@@ -11,7 +11,7 @@ use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat}
 use crate::develop::color::hue_rgb;
 use crate::develop::color::BandShift;
 use crate::develop::curve::Curve;
-use crate::develop::image_ops::bake_edited_probe;
+use crate::develop::image_ops::{bake_edited_probe, Retouch};
 use crate::develop::{
     Adjustments, BaseProbe, CaScale, ColorAxis, ColorGrade, ColorMixer, Coverage, Crop,
     DetectTarget, GpuAdjust, GpuTouchUp, Grain, GrayMix, Mask, MaskSet, MaskShape, Section,
@@ -737,8 +737,11 @@ fn measure(r: &mut Renderer, fixture: &Fixture, case: &Case, probe: BaseProbe) -
     let gpu = r.read_offscreen_blocking().expect("offscreen readback");
     assert_eq!((gpu.width, gpu.height), (w, h));
 
-    let (cw, ch, cpu) =
-        bake_edited_probe(&fixture.img, &case.adj, &case.touchups, &masks, 0, probe);
+    let retouch = Retouch {
+        touchups: &case.touchups,
+        ..Retouch::NONE
+    };
+    let (cw, ch, cpu) = bake_edited_probe(&fixture.img, &case.adj, retouch, &masks, 0, probe);
     let crop = case.adj.crop.unwrap_or(Crop {
         left: 0.0,
         top: 0.0,

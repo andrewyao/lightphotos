@@ -6,6 +6,7 @@
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::base::Fields;
+use crate::develop::fill::{Compositor, FillSet};
 use crate::develop::{self, local, Adjustments, BaseLayer, BaseProbe, Crop, MaskSet, TouchUp};
 use half::f16;
 
@@ -280,6 +281,22 @@ pub fn bilinear_sampler(
     Some(move |u, v| src.at_uv(u, v))
 }
 
+/// What the Touch Up stage draws on the source pixels, before any slider:
+/// the generative fills, then the spot heals over them, so a spot can fix a
+/// fill.
+#[derive(Clone, Copy)]
+pub struct Retouch<'a> {
+    pub fills: &'a FillSet,
+    pub touchups: &'a [TouchUp],
+}
+
+impl Retouch<'static> {
+    pub const NONE: Self = Retouch {
+        fills: &FillSet::EMPTY,
+        touchups: &[],
+    };
+}
+
 /// Burn edits into an opaque sRGB8 RGBA buffer: crop, then touch-ups and tone
 /// per pixel, then rotate by `rot` 90-degree clockwise steps. Returns
 /// `(w, h, rgba)`. Each pixel reads the source the way `fs_main` in
@@ -291,11 +308,11 @@ pub fn bilinear_sampler(
 pub fn bake_edited(
     img: &DecodedImage,
     adj: &Adjustments,
-    touchups: &[TouchUp],
+    retouch: Retouch,
     masks: &MaskSet,
     rot: u8,
 ) -> (u32, u32, Vec<u8>) {
-    bake_edited_probe(img, adj, touchups, masks, rot, BaseProbe::Off)
+    bake_edited_probe(img, adj, retouch, masks, rot, BaseProbe::Off)
 }
 
 /// [`bake_edited`] at any sample depth. At 16 bits the decode is still
@@ -305,11 +322,11 @@ pub fn bake_edited(
 pub fn bake_edited_as<S: Sample>(
     img: &DecodedImage,
     adj: &Adjustments,
-    touchups: &[TouchUp],
+    retouch: Retouch,
     masks: &MaskSet,
     rot: u8,
 ) -> (u32, u32, Vec<S>) {
-    bake_samples(img, adj, touchups, masks, rot, BaseProbe::Off)
+    bake_samples(img, adj, retouch, masks, rot, BaseProbe::Off)
 }
 
 /// [`bake_edited`] with a layer drawn in place of the photo as `probe`
@@ -318,23 +335,23 @@ pub fn bake_edited_as<S: Sample>(
 pub fn bake_edited_probe(
     img: &DecodedImage,
     adj: &Adjustments,
-    touchups: &[TouchUp],
+    retouch: Retouch,
     masks: &MaskSet,
     rot: u8,
     probe: BaseProbe,
 ) -> (u32, u32, Vec<u8>) {
-    bake_samples(img, adj, touchups, masks, rot, probe)
+    bake_samples(img, adj, retouch, masks, rot, probe)
 }
 
 fn bake_samples<S: Sample>(
     img: &DecodedImage,
     adj: &Adjustments,
-    touchups: &[TouchUp],
+    retouch: Retouch,
     masks: &MaskSet,
     rot: u8,
     probe: BaseProbe,
 ) -> (u32, u32, Vec<S>) {
-    bake_with_copy(img, adj, touchups, masks, rot, probe, None)
+    bake_with_copy(img, adj, retouch, masks, rot, probe, None)
 }
 
 /// [`bake_samples`] with denoise's copy in half floats when `half_copy`
@@ -342,7 +359,7 @@ fn bake_samples<S: Sample>(
 fn bake_with_copy<S: Sample>(
     img: &DecodedImage,
     adj: &Adjustments,
-    touchups: &[TouchUp],
+    retouch: Retouch,
     masks: &MaskSet,
     rot: u8,
     probe: BaseProbe,
@@ -371,7 +388,9 @@ fn bake_with_copy<S: Sample>(
     let dev = develop::Develop::framed(adj, w, h);
     let global = develop::LocalAmounts::of(adj);
     let masks = masks.on_photo(w as f32 / h as f32);
-    let pre = |x: u32, y: u32| pre_at(&src, touchups, x, y);
+    let Retouch { fills, touchups } = retouch;
+    let fills = fills.on(img.pixel_format);
+    let pre = |x: u32, y: u32| pre_at(&src, &fills, touchups, x, y);
     // Each layer only for an edit or probe that reads it.
     let base = if probe.reads_base() {
         BaseLayer::build(w, h, Fields::All, pre)
@@ -403,7 +422,8 @@ fn bake_with_copy<S: Sample>(
                 None if exact => src.at_px(px64, py64),
                 None => src.at_uv(u, v),
             };
-            let pre = apply_touchups(&src, touchups, u, v, lin);
+            // Fills first, so a spot heal can fix one.
+            let pre = apply_touchups(&src, touchups, u, v, fills.apply(u, v, lin));
             let base_here = base.as_ref().map(|b| b.at_uv(u, v));
             let fine_here = fine.as_ref().map(|f| f.at_uv(u, v));
             // The probe shows a layer itself, so nothing reads it after.
@@ -421,7 +441,7 @@ fn bake_with_copy<S: Sample>(
                     };
                     let blur = develop::sharpen::blur(|dx, dy| {
                         let (tu, tv) = (u + dx as f32 * step.0, v + dy as f32 * step.1);
-                        apply_touchups(&src, spots, tu, tv, src.at_uv(tu, tv))
+                        apply_touchups(&src, spots, tu, tv, fills.apply(tu, tv, src.at_uv(tu, tv)))
                     });
                     sharpen.apply(out, pre, blur)
                 }
@@ -454,9 +474,10 @@ fn bake_with_copy<S: Sample>(
 }
 
 /// The pre-tone pixel the base and fine layers average: texel `(x, y)` at
-/// its center with CA removed and the touch-ups blended, without denoise.
+/// its center with CA removed and the fills and touch-ups blended, without
+/// denoise.
 /// Must match `preAt` in base.wgsl.
-fn pre_at(src: &Source, touchups: &[TouchUp], x: u32, y: u32) -> [f32; 3] {
+fn pre_at(src: &Source, fills: &Compositor, touchups: &[TouchUp], x: u32, y: u32) -> [f32; 3] {
     let (w, h) = (src.img.width, src.img.height);
     let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
     // A texel center reads that texel exactly, so skip the bilinear.
@@ -465,7 +486,7 @@ fn pre_at(src: &Source, touchups: &[TouchUp], x: u32, y: u32) -> [f32; 3] {
     } else {
         src.at_uv(u, v)
     };
-    apply_touchups(src, touchups, u, v, px)
+    apply_touchups(src, touchups, u, v, fills.apply(u, v, px))
 }
 
 /// One pixel in `format`, its `bytes_per_pixel` bytes, as sRGB8 the way the
@@ -797,7 +818,7 @@ mod tests {
             chromatic_aberration: Some(crate::develop::chroma::measure(&img)),
             ..Adjustments::default()
         };
-        let (w, h, out) = bake_edited(&img, &adj, &[], &MaskSet::default(), 0);
+        let (w, h, out) = bake_edited(&img, &adj, Retouch::NONE, &MaskSet::default(), 0);
         assert_eq!((w, h), (1200, 800));
         let after = worst_fringe(&out, w, h);
         assert!(before > 20, "the fixture should fringe: {before}");
@@ -814,7 +835,7 @@ mod tests {
             r#"{"chromatic_aberration": {"red": 1e39, "blue": -1e39}}"#,
         ] {
             let adj: Adjustments = serde_json::from_str(json).unwrap();
-            let (w, h, out) = bake_edited(&img, &adj, &[], &MaskSet::default(), 0);
+            let (w, h, out) = bake_edited(&img, &adj, Retouch::NONE, &MaskSet::default(), 0);
             assert_eq!((w, h, out.len()), (9, 7, 9 * 7 * 4));
         }
     }
@@ -834,11 +855,18 @@ mod tests {
         let coverage = std::sync::Arc::new(Coverage::fit(4, 1, &[255, 255, 0, 0]).unwrap());
         let mut m = crate::develop::Mask::detected(DetectTarget::Subject);
         m.amounts.exposure = -2.0;
-        let plain = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0).2;
+        let plain = bake_edited(
+            &img,
+            &Adjustments::default(),
+            Retouch::NONE,
+            &MaskSet::default(),
+            0,
+        )
+        .2;
         let set = MaskSet::new(&[m.clone()], |t| {
             (t == DetectTarget::Subject).then(|| coverage.clone())
         });
-        let masked = bake_edited(&img, &Adjustments::default(), &[], &set, 0).2;
+        let masked = bake_edited(&img, &Adjustments::default(), Retouch::NONE, &set, 0).2;
         let px = |buf: &[u8], x: usize, y: usize| buf[(y * 64 + x) * 4 + 1];
         for y in [3, 20, 37] {
             for x in 0..40 {
@@ -850,7 +878,7 @@ mod tests {
         }
         let pending = MaskSet::new(&[m.clone()], |_| None);
         assert_eq!(
-            bake_edited(&img, &Adjustments::default(), &[], &pending, 0).2,
+            bake_edited(&img, &Adjustments::default(), Retouch::NONE, &pending, 0).2,
             plain,
             "a detected mask with no coverage yet renders nothing"
         );
@@ -861,8 +889,22 @@ mod tests {
         let img = crate::develop::chroma::fixture::photo(60, 40, develop::CaScale::default());
         let mut left = crate::develop::Mask::linear([0.2, 0.5], [0.4, 0.5]);
         left.amounts.exposure = 1.0;
-        let plain = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0).2;
-        let masked = bake_edited(&img, &Adjustments::default(), &[], &only(left.clone()), 0).2;
+        let plain = bake_edited(
+            &img,
+            &Adjustments::default(),
+            Retouch::NONE,
+            &MaskSet::default(),
+            0,
+        )
+        .2;
+        let masked = bake_edited(
+            &img,
+            &Adjustments::default(),
+            Retouch::NONE,
+            &only(left.clone()),
+            0,
+        )
+        .2;
         let px = |buf: &[u8], x: usize, y: usize| buf[(y * 60 + x) * 4 + 1];
         for y in [5, 20, 35] {
             assert!(
@@ -882,20 +924,29 @@ mod tests {
             ..Adjustments::default()
         };
         assert_eq!(
-            bake_edited(&img, &cropped, &[], &only(left), 0),
-            bake_edited(&img, &cropped, &[], &MaskSet::default(), 0)
+            bake_edited(&img, &cropped, Retouch::NONE, &only(left), 0),
+            bake_edited(&img, &cropped, Retouch::NONE, &MaskSet::default(), 0)
         );
     }
 
     #[test]
     fn zero_scales_bake_byte_identical_to_no_correction() {
         let img = crate::develop::chroma::fixture::photo(60, 40, develop::CaScale::default());
-        let off = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
+        let off = bake_edited(
+            &img,
+            &Adjustments::default(),
+            Retouch::NONE,
+            &MaskSet::default(),
+            0,
+        );
         let zero = Adjustments {
             chromatic_aberration: Some(develop::CaScale::default()),
             ..Adjustments::default()
         };
-        assert_eq!(bake_edited(&img, &zero, &[], &MaskSet::default(), 0), off);
+        assert_eq!(
+            bake_edited(&img, &zero, Retouch::NONE, &MaskSet::default(), 0),
+            off
+        );
     }
 
     #[test]
@@ -954,7 +1005,13 @@ mod tests {
                 pixel_format: format,
             });
             assert_eq!(
-                bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0),
+                bake_edited(
+                    &img,
+                    &Adjustments::default(),
+                    Retouch::NONE,
+                    &MaskSet::default(),
+                    0
+                ),
                 (0, 0, vec![])
             );
             assert!(bilinear_sampler(&img, develop::CaScale::default()).is_none());
@@ -966,7 +1023,13 @@ mod tests {
     #[test]
     fn a_linear_f16_image_bakes_to_its_raw_display_value() {
         let img = f16_gray(0.18, PixelFormat::LinearF16);
-        let (w, h, out) = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
+        let (w, h, out) = bake_edited(
+            &img,
+            &Adjustments::default(),
+            Retouch::NONE,
+            &MaskSet::default(),
+            0,
+        );
         assert_eq!((w, h), (2, 2));
         let lin = half::f16::from_f32(0.18).to_f32();
         let d = develop::apply_raw_display(&Adjustments::default(), [lin; 3]);
@@ -977,8 +1040,13 @@ mod tests {
             "the two curves must differ here"
         );
         assert_eq!(out, [want, want, want, 255].repeat(4));
-        let (_, _, deep) =
-            bake_edited_as::<u16>(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
+        let (_, _, deep) = bake_edited_as::<u16>(
+            &img,
+            &Adjustments::default(),
+            Retouch::NONE,
+            &MaskSet::default(),
+            0,
+        );
         assert_eq!(deep[0], (d[0] * 65535.0).round() as u16);
     }
 
@@ -1080,8 +1148,8 @@ mod tests {
         };
         let masks = MaskSet::default();
         for probe in [BaseProbe::Mid, BaseProbe::Dark, BaseProbe::Fine] {
-            let moved = bake_samples::<u16>(&img, &off, &[], &masks, 0, probe)
-                != bake_samples::<u16>(&img, &on, &[], &masks, 0, probe);
+            let moved = bake_samples::<u16>(&img, &off, Retouch::NONE, &masks, 0, probe)
+                != bake_samples::<u16>(&img, &on, Retouch::NONE, &masks, 0, probe);
             assert!(!moved, "{probe:?} moved when denoise turned on");
         }
     }
@@ -1099,7 +1167,8 @@ mod tests {
             ..Default::default()
         };
         let masks = MaskSet::default();
-        let bake = |half| bake_with_copy::<u16>(&img, &on, &[], &masks, 0, BaseProbe::Off, half);
+        let bake =
+            |half| bake_with_copy::<u16>(&img, &on, Retouch::NONE, &masks, 0, BaseProbe::Off, half);
         assert!(
             bake(None) == bake(Some(false)),
             "16-bit denoise read half floats"
@@ -1135,6 +1204,233 @@ mod tests {
             rgba: px.repeat(4),
             pixel_format: format,
         })
+    }
+
+    const FORMATS: [PixelFormat; 3] = [
+        PixelFormat::Srgb8,
+        PixelFormat::TonedF16,
+        PixelFormat::LinearF16,
+    ];
+
+    /// A 16x16 photo that shows as `srgb` everywhere with no edits.
+    fn flat(format: PixelFormat, srgb: [u8; 3]) -> DecodedImage {
+        let px: Vec<u8> = match format {
+            PixelFormat::Srgb8 => vec![srgb[0], srgb[1], srgb[2], 255],
+            _ => develop::fill::from_comfy(srgb, format)
+                .into_iter()
+                .chain([1.0])
+                .flat_map(|c| half::f16::from_f32(c).to_le_bytes())
+                .collect(),
+        };
+        DecodedImage::new_tracked(DecodedImageFields {
+            width: 16,
+            height: 16,
+            rgba: px.repeat(256),
+            pixel_format: format,
+        })
+    }
+
+    const RED: [u8; 3] = [200, 40, 30];
+
+    /// `patches` as a fill set, each over its rect.
+    fn fills_of(patches: &[([f32; 4], develop::fill::Patch)]) -> FillSet {
+        use develop::fill::Fill;
+        let records: Vec<Fill> = patches
+            .iter()
+            .map(|(bbox, p)| Fill::new(*bbox, vec![p.id()], String::new()).unwrap())
+            .collect();
+        FillSet::new(&records, |id| {
+            let (_, patch) = patches.iter().find(|(_, p)| p.id() == id)?;
+            Some(std::sync::Arc::new(patch.clone()))
+        })
+    }
+
+    /// An 8x8 red patch over the photo's middle half: opaque inside,
+    /// feathered over its outer two rings. One patch texel per photo pixel.
+    fn red_fill() -> FillSet {
+        let mut rgba = Vec::new();
+        for i in 0..64u32 {
+            let (x, y) = (i % 8, i / 8);
+            let ring = x.min(y).min(7 - x).min(7 - y);
+            rgba.extend(RED);
+            rgba.push([64, 160, 255, 255][ring as usize]);
+        }
+        let patch = develop::fill::Patch::new(8, 8, rgba).unwrap();
+        fills_of(&[([0.25, 0.25, 0.75, 0.75], patch)])
+    }
+
+    fn with_fills(fills: &FillSet) -> Retouch<'_> {
+        Retouch {
+            fills,
+            ..Retouch::NONE
+        }
+    }
+
+    fn rgb_at(rgba: &[u8], x: usize, y: usize) -> [u8; 3] {
+        let i = (y * 16 + x) * 4;
+        [rgba[i], rgba[i + 1], rgba[i + 2]]
+    }
+
+    fn within_one(a: [u8; 3], b: [u8; 3]) -> bool {
+        a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= 1)
+    }
+
+    #[test]
+    fn a_fill_draws_its_patch_inside_its_rect_and_nothing_outside() {
+        let id = Adjustments::default();
+        for format in FORMATS {
+            let img = flat(format, [128; 3]);
+            let plain = bake_edited(&img, &id, Retouch::NONE, &MaskSet::default(), 0).2;
+            let (w, h, filled) =
+                bake_edited(&img, &id, with_fills(&red_fill()), &MaskSet::default(), 0);
+            assert_eq!((w, h), (16, 16));
+            let gray = rgb_at(&plain, 8, 8);
+            assert!(within_one(gray, [128; 3]), "{format:?}: {gray:?}");
+            for y in 0..16 {
+                for x in 0..16 {
+                    let (got, was) = (rgb_at(&filled, x, y), rgb_at(&plain, x, y));
+                    let inside = (4..12).contains(&x) && (4..12).contains(&y);
+                    let opaque = (6..10).contains(&x) && (6..10).contains(&y);
+                    if !inside {
+                        assert_eq!(got, was, "{format:?} ({x}, {y}) is outside the rect");
+                    } else if opaque {
+                        assert!(within_one(got, RED), "{format:?} ({x}, {y}): {got:?}");
+                    } else {
+                        // Feathered: between the photo and the patch.
+                        assert!(
+                            got[0] > was[0] + 5 && got[0] < RED[0] - 5,
+                            "{format:?} ({x}, {y}): {got:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The sliders grade a fill as they grade a photo that had those pixels
+    /// all along: the fill goes in before develop, not over its result.
+    #[test]
+    fn a_fill_is_developed_with_the_rest_of_the_photo() {
+        let brighter = Adjustments {
+            exposure: 1.0,
+            temp: 30.0,
+            ..Adjustments::default()
+        };
+        for format in FORMATS {
+            let bake = |img: &DecodedImage, adj: &Adjustments, fills: &FillSet| {
+                bake_edited(img, adj, with_fills(fills), &MaskSet::default(), 0).2
+            };
+            let gray = flat(format, [128; 3]);
+            let filled = rgb_at(&bake(&gray, &brighter, &red_fill()), 8, 8);
+            let always_red = rgb_at(&bake(&flat(format, RED), &brighter, &FillSet::EMPTY), 8, 8);
+            assert!(within_one(filled, always_red), "{format:?}: {filled:?}");
+            let ungraded = rgb_at(&bake(&gray, &Adjustments::default(), &red_fill()), 8, 8);
+            assert!(filled[0] > ungraded[0] + 20, "{format:?}: {filled:?}");
+        }
+    }
+
+    #[test]
+    fn a_one_texel_patch_fills_a_rect_that_touches_the_photos_edges() {
+        let texel = |rgb: [u8; 3]| {
+            develop::fill::Patch::new(1, 1, vec![rgb[0], rgb[1], rgb[2], 255]).unwrap()
+        };
+        let blue = [20, 60, 220];
+        // The whole photo red, then its right half blue on top.
+        let fills = fills_of(&[
+            ([0.0, 0.0, 1.0, 1.0], texel(RED)),
+            ([0.5, 0.0, 1.0, 1.0], texel(blue)),
+        ]);
+        for format in FORMATS {
+            let img = flat(format, [128; 3]);
+            let out = bake_edited(
+                &img,
+                &Adjustments::default(),
+                with_fills(&fills),
+                &MaskSet::default(),
+                0,
+            )
+            .2;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let want = if x < 8 { RED } else { blue };
+                    let got = rgb_at(&out, x, y);
+                    assert!(within_one(got, want), "{format:?} ({x}, {y}): {got:?}");
+                }
+            }
+        }
+    }
+
+    /// A spot heal copies the photo over a fill, so it can fix one.
+    #[test]
+    fn a_touch_up_draws_over_a_fill() {
+        let img = flat(PixelFormat::Srgb8, [128; 3]);
+        let spot = TouchUp {
+            // Pixel (8, 8)'s center, reaching 1.6 pixels.
+            center: [0.53125, 0.53125],
+            radius: 0.1,
+            source: [0.1, 0.1],
+            feather: 0.02,
+            delta: [0.0; 3],
+            opacity: 1.0,
+        };
+        let out = bake_edited(
+            &img,
+            &Adjustments::default(),
+            Retouch {
+                fills: &red_fill(),
+                touchups: &[spot],
+            },
+            &MaskSet::default(),
+            0,
+        )
+        .2;
+        assert_eq!(
+            rgb_at(&out, 8, 8),
+            [128; 3],
+            "the spot's center is the photo"
+        );
+        assert!(
+            within_one(rgb_at(&out, 6, 6), RED),
+            "outside the spot, the fill"
+        );
+    }
+
+    /// A fill whose patch file is gone or damaged is left out and the bake
+    /// goes on, where a missing mask coverage fails it.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_bake_goes_on_without_a_patch_file_it_cannot_read() {
+        use develop::fill::{Fill, FillInput, Patch};
+        let dir =
+            std::env::temp_dir().join(format!("lightphotos-bake-fill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("a.jpg");
+        let patch = Patch::new(1, 1, vec![200, 40, 30, 255]).unwrap();
+        let fill = Fill::new([0.0, 0.0, 1.0, 1.0], vec![patch.id()], String::new()).unwrap();
+        let img = flat(PixelFormat::Srgb8, [128; 3]);
+        let bake = || {
+            let fills = FillInput::OnDisk(vec![fill.clone()]).resolve(&photo);
+            let out = bake_edited(
+                &img,
+                &Adjustments::default(),
+                with_fills(&fills),
+                &MaskSet::default(),
+                0,
+            );
+            assert_eq!((out.0, out.1), (16, 16));
+            (fills.len(), rgb_at(&out.2, 8, 8))
+        };
+        assert_eq!(bake(), (0, [128; 3]), "missing");
+        develop::fill::write(&photo, &patch).unwrap();
+        assert_eq!(bake(), (1, RED), "present");
+        let file = dir
+            .join(".lightphotos/fills")
+            .join(format!("a.jpg.{}.png", patch.id()));
+        let bytes = std::fs::read(&file).unwrap();
+        std::fs::write(&file, &bytes[..bytes.len() / 2]).unwrap();
+        assert_eq!(bake(), (0, [128; 3]), "truncated");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1183,7 +1479,13 @@ mod tests {
             rgba: src.clone(),
             pixel_format: PixelFormat::Srgb8,
         });
-        let (w, h, out) = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
+        let (w, h, out) = bake_edited(
+            &img,
+            &Adjustments::default(),
+            Retouch::NONE,
+            &MaskSet::default(),
+            0,
+        );
         assert_eq!((w, h), (2, 2));
         assert_eq!(out, src);
     }
@@ -1206,7 +1508,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let (w, h, out) = bake_edited(&img, &adj, &[], &MaskSet::default(), 0);
+        let (w, h, out) = bake_edited(&img, &adj, Retouch::NONE, &MaskSet::default(), 0);
         assert_eq!((w, h), (2, 1));
         assert_eq!(&out[0..4], &px(3));
         assert_eq!(&out[4..8], &px(4));
@@ -1226,7 +1528,7 @@ mod tests {
                 straighten,
                 ..Default::default()
             };
-            bake_edited(&img, &adj, &[], &MaskSet::default(), 0)
+            bake_edited(&img, &adj, Retouch::NONE, &MaskSet::default(), 0)
         };
         let end = bake(45.0);
         assert_ne!(end, bake(0.0), "the end of the range does turn the photo");
@@ -1249,7 +1551,7 @@ mod tests {
             denoise: 0.0,
             ..Default::default()
         };
-        let (w, h, out) = bake_edited(&img, &adj, &[], &MaskSet::default(), 0);
+        let (w, h, out) = bake_edited(&img, &adj, Retouch::NONE, &MaskSet::default(), 0);
         assert_eq!((w, h), (2, 2));
         assert_eq!(out, src);
     }
@@ -1267,12 +1569,18 @@ mod tests {
             rgba: src,
             pixel_format: PixelFormat::Srgb8,
         });
-        let (_, _, out0) = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
+        let (_, _, out0) = bake_edited(
+            &img,
+            &Adjustments::default(),
+            Retouch::NONE,
+            &MaskSet::default(),
+            0,
+        );
         let denoised = Adjustments {
             denoise: 100.0,
             ..Default::default()
         };
-        let (_, _, out100) = bake_edited(&img, &denoised, &[], &MaskSet::default(), 0);
+        let (_, _, out100) = bake_edited(&img, &denoised, Retouch::NONE, &MaskSet::default(), 0);
         let center = 4 * 4;
         assert_eq!(out0[center], 255);
         assert!(
@@ -1307,7 +1615,10 @@ mod tests {
         let (_, _, out) = bake_edited(
             &img,
             &Adjustments::default(),
-            &[touchup],
+            Retouch {
+                touchups: &[touchup],
+                ..Retouch::NONE
+            },
             &MaskSet::default(),
             0,
         );
@@ -1315,7 +1626,17 @@ mod tests {
 
         let at = |opacity: f32| {
             let t = TouchUp { opacity, ..touchup };
-            bake_edited(&img, &Adjustments::default(), &[t], &MaskSet::default(), 0).2[2 * 4]
+            bake_edited(
+                &img,
+                &Adjustments::default(),
+                Retouch {
+                    touchups: &[t],
+                    ..Retouch::NONE
+                },
+                &MaskSet::default(),
+                0,
+            )
+            .2[2 * 4]
         };
         assert_eq!(at(0.0), 255, "a transparent spot leaves the photo alone");
         assert!(
@@ -1373,7 +1694,7 @@ mod tests {
             denoise: 50.0,
             ..Default::default()
         };
-        let (w, h, out) = bake_edited(&img, &adj, &[], &MaskSet::default(), 0);
+        let (w, h, out) = bake_edited(&img, &adj, Retouch::NONE, &MaskSet::default(), 0);
         assert_eq!((w, h), (3, 3));
         assert_eq!(out.len(), 3 * 3 * 4);
     }

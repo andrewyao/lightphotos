@@ -37,8 +37,17 @@ pub fn score_file(
         ..rec.adjustments
     };
     let masks = rec.mask_set(path)?;
-    let (w, h, rgba) =
-        crate::develop::image_ops::bake_edited(&img, &adj, &rec.touchups, &masks, rec.rotation);
+    let fills = crate::develop::fill::FillSet::read(path, &rec.fills);
+    let (w, h, rgba) = crate::develop::image_ops::bake_edited(
+        &img,
+        &adj,
+        crate::develop::image_ops::Retouch {
+            fills: &fills,
+            touchups: &rec.touchups,
+        },
+        &masks,
+        rec.rotation,
+    );
     if w == 0 || h == 0 {
         return Err("the edited preview is empty".into());
     }

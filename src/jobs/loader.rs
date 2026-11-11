@@ -20,6 +20,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use crate::decode::image_decode::{self, DecodedImage, ImageMetadata};
+use crate::develop::fill::FillInput;
 use crate::develop::{Adjustments, MaskInput, TouchUp};
 use crate::jobs::cache_limits::CacheLimits;
 use crate::jobs::thumbnail::{Origin, ThumbCache};
@@ -126,6 +127,7 @@ struct BakeJob {
     adj: Adjustments,
     touchups: Vec<TouchUp>,
     masks: MaskInput,
+    fills: FillInput,
     rot: u8,
 }
 
@@ -137,7 +139,10 @@ impl BakeJob {
             Ok(masks) => crate::develop::image_ops::bake_edited(
                 &self.img,
                 &self.adj,
-                &self.touchups,
+                crate::develop::image_ops::Retouch {
+                    fills: &self.fills.resolve(&self.path),
+                    touchups: &self.touchups,
+                },
                 &masks,
                 self.rot,
             ),
@@ -1708,6 +1713,7 @@ impl Loader {
         adj: Adjustments,
         touchups: &[TouchUp],
         masks: MaskInput,
+        fills: FillInput,
         rot: u8,
     ) {
         let key = (path.to_path_buf(), px);
@@ -1724,6 +1730,7 @@ impl Loader {
             adj,
             touchups: touchups.to_vec(),
             masks,
+            fills,
             rot,
         };
         if self.workers == 0 {
@@ -2157,6 +2164,7 @@ mod tests {
             adj: Adjustments::default(),
             touchups: Vec::new(),
             masks: MaskInput::none(),
+            fills: FillInput::none(),
             rot: 0,
         }))
     }
@@ -2240,6 +2248,7 @@ mod tests {
             Adjustments::default(),
             &[],
             MaskInput::none(),
+            FillInput::none(),
             1,
         );
         loader.request_bake(
@@ -2250,6 +2259,7 @@ mod tests {
             Adjustments::default(),
             &[],
             MaskInput::none(),
+            FillInput::none(),
             1,
         );
         loader.request_bake(
@@ -2260,6 +2270,7 @@ mod tests {
             Adjustments::default(),
             &[],
             MaskInput::none(),
+            FillInput::none(),
             1,
         );
         assert_eq!(queued_bakes(&loader), [(a, 2)]);
@@ -2277,6 +2288,7 @@ mod tests {
             Adjustments::default(),
             &[],
             MaskInput::none(),
+            FillInput::none(),
             1,
         );
         loader.request_bake(
@@ -2287,6 +2299,7 @@ mod tests {
             Adjustments::default(),
             &[],
             MaskInput::none(),
+            FillInput::none(),
             1,
         );
         loader.retain_bakes(|(p, _)| p == &kept);
@@ -2300,6 +2313,7 @@ mod tests {
             Adjustments::default(),
             &[],
             MaskInput::none(),
+            FillInput::none(),
             1,
         );
         assert_eq!(queued_bakes(&loader).len(), 2);
@@ -2316,6 +2330,7 @@ mod tests {
             Adjustments::default(),
             &[],
             MaskInput::none(),
+            FillInput::none(),
             1,
         );
         let baked = loader.take_baked();
@@ -2336,6 +2351,7 @@ mod tests {
             Adjustments::default(),
             &[],
             MaskInput::none(),
+            FillInput::none(),
             1,
         );
         let job = loader
@@ -2361,6 +2377,7 @@ mod tests {
             Adjustments::default(),
             &[],
             MaskInput::none(),
+            FillInput::none(),
             1,
         );
         assert!(queued_bakes(&loader).is_empty());
@@ -2372,6 +2389,7 @@ mod tests {
             Adjustments::default(),
             &[],
             MaskInput::none(),
+            FillInput::none(),
             1,
         );
         assert_eq!(queued_bakes(&loader), [(a, 2)]);

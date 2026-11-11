@@ -488,7 +488,13 @@ impl App {
             let touchups = self.touchups.get(path).map(Vec::as_slice).unwrap_or(&[]);
             let masks = self.masks.get(path).map(Vec::as_slice).unwrap_or(&[]);
             let rot = self.rotations.get(path).copied().unwrap_or(0);
-            if adj.is_identity() && touchups.is_empty() && masks.is_empty() && rot % 4 == 0 {
+            let fills = self.folder_store.fills(path);
+            if adj.is_identity()
+                && touchups.is_empty()
+                && masks.is_empty()
+                && fills.is_empty()
+                && rot % 4 == 0
+            {
                 if let Some(id) = renderer.upload_thumb(img.width, img.height, &img.rgba) {
                     let tex = ThumbTexture {
                         id,
@@ -504,7 +510,8 @@ impl App {
             } else if let Some(masks) =
                 super::masks::mask_input_of(&self.masks, &self.detections, &mut self.coverage, path)
             {
-                loader.request_bake(path, *px, *sig, img, adj, touchups, masks, rot);
+                let fills = super::fill::fill_input_of(&self.folder_store, path);
+                loader.request_bake(path, *px, *sig, img, adj, touchups, masks, fills, rot);
             }
         }
 

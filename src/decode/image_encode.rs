@@ -1051,7 +1051,7 @@ mod tests {
                 std::sync::Arc::new(src),
                 false,
                 &Default::default(),
-                &[],
+                crate::develop::image_ops::Retouch::NONE,
                 &crate::develop::MaskSet::default(),
                 0,
                 crate::export::Output {

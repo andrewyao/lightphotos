@@ -199,7 +199,11 @@ impl WebExportJob {
             std::sync::Arc::new(self.bytes),
             self.is_raw,
             &self.adj,
-            &self.touchups,
+            // No fills: nothing in the browser reads their patch files yet.
+            crate::develop::image_ops::Retouch {
+                fills: &crate::develop::fill::FillSet::EMPTY,
+                touchups: &self.touchups,
+            },
             &self.masks,
             self.rot,
             self.output,

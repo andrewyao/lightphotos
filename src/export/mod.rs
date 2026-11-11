@@ -22,8 +22,13 @@ use std::time::SystemTime;
 
 use crate::decode::image_encode::{Embedded, Encoding, JpegOptions, JpegPreset, Pixels};
 use crate::decode::{image_decode, image_encode};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::develop::fill::FillInput;
+use crate::develop::image_ops::Retouch;
 use crate::develop::sharpen::OutputSharpening;
-use crate::develop::{Adjustments, MaskSet, TouchUp};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::develop::TouchUp;
+use crate::develop::{Adjustments, MaskSet};
 use metadata::{Keep, SourceMeta};
 
 /// Subfolder of the current folder that exports go to, on every platform.
@@ -320,7 +325,7 @@ pub fn bake_export_from_shared_vec(
     src_bytes: std::sync::Arc<Vec<u8>>,
     is_raw: bool,
     adj: &Adjustments,
-    touchups: &[TouchUp],
+    retouch: Retouch,
     masks: &MaskSet,
     rot: u8,
     output: Output,
@@ -338,7 +343,7 @@ pub fn bake_export_from_shared_vec(
     render(
         &img,
         adj,
-        touchups,
+        retouch,
         masks,
         rot,
         &output,
@@ -358,7 +363,7 @@ static TIFF16_GATE: Mutex<()> = Mutex::new(());
 fn render(
     img: &image_decode::DecodedImage,
     adj: &Adjustments,
-    touchups: &[TouchUp],
+    retouch: Retouch,
     masks: &MaskSet,
     rot: u8,
     output: &Output,
@@ -381,11 +386,11 @@ fn render(
         Ok(FileMeta { exif: block, xmp })
     };
     if output.format == ExportFormat::Tiff16 {
-        let (w, h, rgba) = bake_sized::<u16>(img, adj, touchups, masks, rot, output);
+        let (w, h, rgba) = bake_sized::<u16>(img, adj, retouch, masks, rot, output);
         let prepared = image_encode::Prepared::new(w, h, Pixels::Rgba16(&rgba))?;
         return prepared.encode(Encoding::Tiff, meta(w, h)?.embedded());
     }
-    let (w, h, rgba) = bake_sized::<u8>(img, adj, touchups, masks, rot, output);
+    let (w, h, rgba) = bake_sized::<u8>(img, adj, retouch, masks, rot, output);
     let prepared = image_encode::Prepared::new(w, h, Pixels::Rgba8(&rgba))?;
     let meta = meta(w, h)?;
     if output.format != ExportFormat::Jpeg {
@@ -565,13 +570,13 @@ fn predict_quality(
 fn bake_sized<S: crate::develop::image_ops::Sample>(
     img: &image_decode::DecodedImage,
     adj: &Adjustments,
-    touchups: &[TouchUp],
+    retouch: Retouch,
     masks: &MaskSet,
     rot: u8,
     output: &Output,
 ) -> (u32, u32, Vec<S>) {
     let (w, h, rgba) =
-        crate::develop::image_ops::bake_edited_as::<S>(img, adj, touchups, masks, rot);
+        crate::develop::image_ops::bake_edited_as::<S>(img, adj, retouch, masks, rot);
     let (w, h, mut rgba) = crate::develop::image_ops::fit_long_edge(w, h, rgba, output.max_px);
     output.sharpen.apply(w, h, &mut rgba);
     (w, h, rgba)
@@ -600,6 +605,7 @@ pub struct ExportJob {
     pub adj: Adjustments,
     pub touchups: Vec<TouchUp>,
     pub masks: crate::develop::MaskInput,
+    pub fills: FillInput,
     pub rot: u8,
     pub output: Output,
     /// The location the photo's sidecar keeps, written when the file has
@@ -706,10 +712,15 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
         .clone()
         .resolve(&job.src)
         .map_err(|e| e.to_string())?;
+    // A fill whose patch file is gone or bad is left out, not an error.
+    let fills = job.fills.clone().resolve(&job.src);
     let file = export_file(
         &job.src,
         &job.adj,
-        &job.touchups,
+        Retouch {
+            fills: &fills,
+            touchups: &job.touchups,
+        },
         &masks,
         job.rot,
         &job.output,
@@ -758,7 +769,7 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
 pub fn export_file(
     src: &Path,
     adj: &Adjustments,
-    touchups: &[TouchUp],
+    retouch: Retouch,
     masks: &MaskSet,
     rot: u8,
     output: &Output,
@@ -768,7 +779,7 @@ pub fn export_file(
     render(
         &img,
         adj,
-        touchups,
+        retouch,
         masks,
         rot,
         output,
@@ -818,6 +829,7 @@ mod tests {
             adj: Default::default(),
             touchups: Vec::new(),
             masks: crate::develop::MaskInput::none(),
+            fills: FillInput::none(),
             rot: 0,
             output: Output::FULL,
             location: None,
@@ -891,6 +903,7 @@ mod tests {
             adj,
             touchups: Vec::new(),
             masks: crate::develop::MaskInput::none(),
+            fills: FillInput::none(),
             rot: 1,
             output: Output {
                 max_px: 50,
@@ -967,7 +980,16 @@ mod tests {
         };
         assert_eq!(decode_px(200, adj.crop), 1602, "about half the source");
 
-        let jpeg = export_file(&src, &adj, &[], &MaskSet::default(), 1, &output, None).unwrap();
+        let jpeg = export_file(
+            &src,
+            &adj,
+            Retouch::NONE,
+            &MaskSet::default(),
+            1,
+            &output,
+            None,
+        )
+        .unwrap();
         std::fs::write(dir.join("out.jpg"), &jpeg).unwrap();
         let out = image_decode::decode(&dir.join("out.jpg"), u32::MAX).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1003,7 +1025,7 @@ mod tests {
             let jpeg = render(
                 &gradient(64, 48),
                 &Adjustments::default(),
-                &[],
+                Retouch::NONE,
                 &MaskSet::default(),
                 0,
                 &output,
@@ -1049,7 +1071,7 @@ mod tests {
         let (pw, ph, plain) = bake_sized::<u8>(
             &img,
             &Adjustments::default(),
-            &[],
+            Retouch::NONE,
             &MaskSet::default(),
             0,
             &small,
@@ -1057,7 +1079,7 @@ mod tests {
         let (sw, sh, sharpened) = bake_sized::<u8>(
             &img,
             &Adjustments::default(),
-            &[],
+            Retouch::NONE,
             &MaskSet::default(),
             0,
             &sharp,
@@ -1109,7 +1131,7 @@ mod tests {
             let bytes = render(
                 &img,
                 &Adjustments::default(),
-                &[],
+                Retouch::NONE,
                 &MaskSet::default(),
                 1,
                 &output,
@@ -1143,10 +1165,22 @@ mod tests {
             exposure: 0.37,
             ..Adjustments::default()
         };
-        let (w, h, deep) =
-            bake_sized::<u16>(&img, &adj, &[], &MaskSet::default(), 0, &Output::FULL);
-        let (_, _, shallow) =
-            bake_sized::<u8>(&img, &adj, &[], &MaskSet::default(), 0, &Output::FULL);
+        let (w, h, deep) = bake_sized::<u16>(
+            &img,
+            &adj,
+            Retouch::NONE,
+            &MaskSet::default(),
+            0,
+            &Output::FULL,
+        );
+        let (_, _, shallow) = bake_sized::<u8>(
+            &img,
+            &adj,
+            Retouch::NONE,
+            &MaskSet::default(),
+            0,
+            &Output::FULL,
+        );
         assert_eq!((w, h), (256, 4));
         let between = deep.iter().filter(|&&v| v % 257 != 0).count();
         assert!(
@@ -1187,7 +1221,7 @@ mod tests {
             render(
                 &img,
                 &Adjustments::default(),
-                &[],
+                Retouch::NONE,
                 &MaskSet::default(),
                 0,
                 &Output {
@@ -1341,7 +1375,7 @@ mod tests {
                 let bytes = render(
                     &img,
                     &Adjustments::default(),
-                    &[],
+                    Retouch::NONE,
                     &MaskSet::default(),
                     0,
                     &output,
@@ -1401,7 +1435,7 @@ mod tests {
         let jpeg = render(
             &gradient(16, 12),
             &Adjustments::default(),
-            &[],
+            Retouch::NONE,
             &MaskSet::default(),
             0,
             &output,
@@ -1451,6 +1485,7 @@ mod tests {
             adj: Default::default(),
             touchups: Vec::new(),
             masks: crate::develop::MaskInput::none(),
+            fills: FillInput::none(),
             rot: 0,
             output: Output {
                 format: ExportFormat::Tiff16,
@@ -1504,7 +1539,7 @@ mod tests {
         let jpeg = render(
             &gradient(8, 8),
             &Adjustments::default(),
-            &[],
+            Retouch::NONE,
             &MaskSet::default(),
             0,
             &output,
@@ -1555,7 +1590,7 @@ mod tests {
             std::sync::Arc::new(png),
             false,
             &Adjustments::default(),
-            &[],
+            Retouch::NONE,
             &MaskSet::default(),
             0,
             Output::FULL,
@@ -1590,7 +1625,7 @@ mod tests {
             std::sync::Arc::new(png),
             false,
             &Adjustments::default(),
-            &[],
+            Retouch::NONE,
             &MaskSet::default(),
             1,
             Output::FULL,

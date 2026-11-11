@@ -318,13 +318,13 @@ impl BaseLayer {
 /// The four texels around `uv * size - 0.5` of a `w x h` field, clamped at
 /// the edge and blended in f32, as `textureSample` filters and `baseAt` in
 /// loupe_common.wgsl loads. `at` gets coordinates inside the field.
-pub(crate) fn bilinear(
+pub(crate) fn bilinear<const N: usize>(
     w: u32,
     h: u32,
     u: f32,
     v: f32,
-    at: impl Fn(i64, i64) -> [f32; 3],
-) -> [f32; 3] {
+    at: impl Fn(i64, i64) -> [f32; N],
+) -> [f32; N] {
     let (w, h) = (w as i64, h as i64);
     let sx = u * w as f32 - 0.5;
     let sy = v * h as f32 - 0.5;

@@ -18,6 +18,7 @@ use std::ffi::OsStr;
 use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -337,6 +338,300 @@ pub fn sweep_orphans(dir: &Path, named: impl Fn(&OsStr, RasterId) -> bool) {
     super::side_file::sweep_orphans(dir, FILLS_DIR, named);
 }
 
+/// One photo's fills as they draw: each rect with the patch it shows, in
+/// sidecar order, later on top. A fill whose patch isn't in hand is left
+/// out, so the photo shows through there.
+#[derive(Clone, Debug, Default)]
+pub struct FillSet {
+    layers: Vec<([f32; 4], Arc<Patch>)>,
+}
+
+impl FillSet {
+    pub const EMPTY: FillSet = FillSet { layers: Vec::new() };
+
+    /// The first [`MAX_FILLS`] of `fills`, each with the chosen patch
+    /// `patch` hands back for its id.
+    pub fn new(fills: &[Fill], mut patch: impl FnMut(RasterId) -> Option<Arc<Patch>>) -> FillSet {
+        let layers = fills
+            .iter()
+            .take(MAX_FILLS)
+            .filter_map(|f| Some((f.bbox, patch(f.chosen)?)))
+            .collect();
+        FillSet { layers }
+    }
+
+    /// `fills` with their chosen patches read from beside `photo`. A patch
+    /// that is missing or unreadable is logged and its fill left out: the
+    /// bake still succeeds, showing the photo there.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read(photo: &Path, fills: &[Fill]) -> FillSet {
+        FillSet::new(fills, |id| match read(photo, id) {
+            Ok(patch) => Some(Arc::new(patch)),
+            Err(e) => {
+                eprintln!("[fill] {}: {e}", photo.display());
+                None
+            }
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    /// Identity of what draws: each rect and patch id, in order. 0 for none.
+    pub fn key(&self) -> u64 {
+        if self.layers.is_empty() {
+            return 0;
+        }
+        let mut h = crate::hash::Fnv1a::new();
+        for (bbox, patch) in &self.layers {
+            for c in bbox {
+                h.write(&c.to_bits().to_le_bytes());
+            }
+            h.write(&patch.id.to_le_bytes());
+        }
+        h.finish()
+    }
+
+    /// The fills ready to composite onto pixels decoded as `format`.
+    pub fn on(&self, format: PixelFormat) -> Compositor<'_> {
+        Compositor {
+            layers: &self.layers,
+            lut: from_comfy_lut(format),
+        }
+    }
+
+    /// Every patch in one RGBA8 image no wider or taller than `max_side`,
+    /// for the Loupe's texture. Patches sit on shelves in layer order; if
+    /// they don't fit, all are halved until they do.
+    pub fn atlas(&self, max_side: u32) -> Atlas {
+        // Sixteen patches of 2048 fit 8192 square, four to a shelf, so a
+        // larger texture is never needed.
+        let max_side = max_side.clamp(1, MAX_PATCH_SIDE * 4);
+        let packed = (0..=MAX_PATCH_SIDE.ilog2()).find_map(|shift| {
+            let sizes: Vec<(u32, u32)> = self
+                .layers
+                .iter()
+                .map(|(_, p)| ((p.width >> shift).max(1), (p.height >> shift).max(1)))
+                .collect();
+            shelf_pack(&sizes, max_side)
+        });
+        let Some((width, height, rects)) = packed else {
+            return Atlas::empty(self.layers.len());
+        };
+        let mut rgba = vec![0u8; width as usize * height as usize * 4];
+        for ((_, patch), &[x, y, w, h]) in self.layers.iter().zip(&rects) {
+            let scaled;
+            let pixels = if (w, h) == (patch.width, patch.height) {
+                &patch.rgba
+            } else {
+                scaled = box_shrink(patch, w, h);
+                &scaled
+            };
+            let row_len = w as usize * 4;
+            for (row, src) in pixels.chunks_exact(row_len).enumerate() {
+                let at = ((y as usize + row) * width as usize + x as usize) * 4;
+                if let Some(dst) = rgba.get_mut(at..at + row_len) {
+                    dst.copy_from_slice(src);
+                }
+            }
+        }
+        Atlas {
+            width,
+            height,
+            rgba,
+            rects,
+        }
+    }
+
+    /// One [`GpuFill`] per layer, pointing into `atlas`.
+    pub fn gpu_fills(&self, atlas: &Atlas) -> Vec<GpuFill> {
+        self.layers
+            .iter()
+            .zip(&atlas.rects)
+            .map(|((bbox, _), rect)| GpuFill {
+                bbox: *bbox,
+                atlas_rect: rect.map(|c| c as f32),
+            })
+            .collect()
+    }
+}
+
+/// [`FillSet::atlas`]'s image and where each layer's patch sits in it.
+pub struct Atlas {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height * 4` bytes, as [`Patch::rgba`].
+    pub rgba: Vec<u8>,
+    /// `(x, y, width, height)` in atlas texels, one per layer. A size of 0
+    /// is a patch that didn't fit; it draws nothing.
+    pub rects: Vec<[u32; 4]>,
+}
+
+impl Atlas {
+    /// One clear texel, since a texture can't be empty, and no room for
+    /// any of `layers` patches.
+    fn empty(layers: usize) -> Atlas {
+        Atlas {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+            rects: vec![[0; 4]; layers],
+        }
+    }
+}
+
+/// `sizes` placed left to right on shelves inside `max_side` square: the
+/// used `(width, height)` and each rect, or `None` if they don't fit.
+fn shelf_pack(sizes: &[(u32, u32)], max_side: u32) -> Option<(u32, u32, Vec<[u32; 4]>)> {
+    let (mut x, mut y, mut shelf, mut used) = (0u32, 0u32, 0u32, 0u32);
+    let mut rects = Vec::with_capacity(sizes.len());
+    for &(w, h) in sizes {
+        if w > max_side {
+            return None;
+        }
+        if x.checked_add(w)? > max_side {
+            y = y.checked_add(shelf)?;
+            (x, shelf) = (0, 0);
+        }
+        rects.push([x, y, w, h]);
+        x = x.checked_add(w)?;
+        shelf = shelf.max(h);
+        used = used.max(x);
+    }
+    let height = y.checked_add(shelf)?;
+    (height <= max_side).then_some((used.max(1), height.max(1), rects))
+}
+
+/// `patch` shrunk to `w x h` (each at least 1 and no larger than the
+/// patch), every output texel the average of the source box it covers.
+fn box_shrink(patch: &Patch, w: u32, h: u32) -> Vec<u8> {
+    let (sw, sh) = (patch.width as usize, patch.height as usize);
+    let (w, h) = (w as usize, h as usize);
+    let span = |o: usize, d: usize, s: usize| {
+        let start = o * s / d;
+        (start, ((o + 1) * s).div_ceil(d).clamp(start + 1, s))
+    };
+    let mut out = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        let (y0, y1) = span(y, h, sh);
+        for x in 0..w {
+            let (x0, x1) = span(x, w, sw);
+            let mut sum = [0u32; 4];
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let px = patch.rgba.get((sy * sw + sx) * 4..).unwrap_or(&[]);
+                    for (s, &c) in sum.iter_mut().zip(px) {
+                        *s += c as u32;
+                    }
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            out.extend(sum.map(|s| ((s + n / 2) / n) as u8));
+        }
+    }
+    out
+}
+
+/// One fill as laid out in the GPU storage buffer. Must match `Fill` in
+/// loupe_common.wgsl.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuFill {
+    /// Source UV `(u0, v0, u1, v1)`.
+    pub bbox: [f32; 4],
+    /// The patch's `(x, y, width, height)` in atlas texels.
+    pub atlas_rect: [f32; 4],
+}
+
+/// [`from_comfy`] for every byte value: the curve is per channel, so one
+/// table serves all three. A bake builds it once, and the Loupe uploads it.
+pub fn from_comfy_lut(format: PixelFormat) -> [f32; 256] {
+    std::array::from_fn(|c| from_comfy([c as u8; 3], format)[0])
+}
+
+/// A [`FillSet`] with the table that decodes its patches for one pixel
+/// format.
+pub struct Compositor<'a> {
+    layers: &'a [([f32; 4], Arc<Patch>)],
+    lut: [f32; 256],
+}
+
+impl Compositor<'_> {
+    /// Draw each fill over `rgb`, the linear source pixel at UV `(u, v)`.
+    /// Inside a fill's rect its patch is read bilinearly, the four texels
+    /// around `t * size - 0.5` clamped at the edge, each decoded to linear
+    /// light before blending, then mixed over `rgb` by its alpha. Outside
+    /// every rect `rgb` comes back as it was. Must match `applyFills` in
+    /// loupe_common.wgsl.
+    pub fn apply(&self, u: f32, v: f32, rgb: [f32; 3]) -> [f32; 3] {
+        let mut out = rgb;
+        for (bbox, patch) in self.layers {
+            let [u0, v0, u1, v1] = *bbox;
+            // Also false for a NaN.
+            if !(u0 <= u && u <= u1 && v0 <= v && v <= v1) {
+                continue;
+            }
+            let w = patch.width as usize;
+            let texel = |x: i64, y: i64| {
+                let i = (y as usize * w + x as usize) * 4;
+                match patch.rgba.get(i..i + 4) {
+                    Some(&[r, g, b, a]) => [
+                        self.lut[r as usize],
+                        self.lut[g as usize],
+                        self.lut[b as usize],
+                        a as f32 / 255.0,
+                    ],
+                    _ => [0.0; 4],
+                }
+            };
+            let [r, g, b, a] = super::base::bilinear(
+                patch.width,
+                patch.height,
+                (u - u0) / (u1 - u0),
+                (v - v0) / (v1 - v0),
+                texel,
+            );
+            for (o, s) in out.iter_mut().zip([r, g, b]) {
+                *o = *o * (1.0 - a) + s * a;
+            }
+        }
+        out
+    }
+}
+
+/// What a bake job carries, as [`super::MaskInput`] carries masks: native
+/// jobs read the patches on their worker, so a queued export holds no
+/// pixels and the UI thread decodes no PNG.
+#[derive(Clone)]
+pub enum FillInput {
+    Ready(FillSet),
+    #[cfg(not(target_arch = "wasm32"))]
+    OnDisk(Vec<Fill>),
+}
+
+impl FillInput {
+    pub fn none() -> FillInput {
+        FillInput::Ready(FillSet::default())
+    }
+
+    /// The fills with their patches, read from beside `photo` if needed.
+    /// Never fails: see [`FillSet::read`].
+    pub fn resolve(self, photo: &std::path::Path) -> FillSet {
+        // Only the native variant reads beside the photo.
+        let _ = photo;
+        match self {
+            FillInput::Ready(set) => set,
+            #[cfg(not(target_arch = "wasm32"))]
+            FillInput::OnDisk(fills) => FillSet::read(photo, &fills),
+        }
+    }
+}
+
 /// A source pixel, as the Touch Up stage sees it (linear light, decoded
 /// from the file's encoding), to the display sRGB a generator works in: the
 /// photo as the Loupe shows it with no edits. `Srgb8` gives back the file's
@@ -587,6 +882,115 @@ mod tests {
             to_comfy([f32::NAN, f32::INFINITY, -1.0], PixelFormat::LinearF16)[2],
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod set_tests {
+    use super::*;
+
+    /// An opaque `w x h` patch of gray `v`.
+    fn flat(w: u32, h: u32, v: u8) -> Arc<Patch> {
+        Arc::new(Patch::new(w, h, [v, v, v, 255].repeat((w * h) as usize)).unwrap())
+    }
+
+    fn set_of(patches: &[Arc<Patch>]) -> FillSet {
+        let fills: Vec<Fill> = patches
+            .iter()
+            .map(|p| Fill::new([0.1, 0.1, 0.9, 0.9], vec![p.id()], String::new()).unwrap())
+            .collect();
+        FillSet::new(&fills, |id| patches.iter().find(|p| p.id() == id).cloned())
+    }
+
+    #[test]
+    fn a_set_leaves_out_a_fill_without_its_patch_and_keys_on_what_draws() {
+        let (a, b) = (flat(2, 2, 10), flat(2, 2, 20));
+        let fills: Vec<Fill> = [&a, &b]
+            .iter()
+            .map(|p| Fill::new([0.1, 0.1, 0.9, 0.9], vec![p.id()], String::new()).unwrap())
+            .collect();
+        let both = set_of(&[a.clone(), b.clone()]);
+        let only_b = FillSet::new(&fills, |id| (id == b.id()).then(|| b.clone()));
+        assert_eq!((both.len(), only_b.len()), (2, 1));
+        assert_eq!(FillSet::default().key(), 0);
+        assert_ne!(both.key(), only_b.key());
+        assert_ne!(
+            both.key(),
+            set_of(&[b, a]).key(),
+            "order is what draws on top"
+        );
+        // Where `only_b` draws, it is patch b alone.
+        let px = only_b.on(PixelFormat::Srgb8).apply(0.5, 0.5, [0.0; 3]);
+        assert_eq!(px, from_comfy([20; 3], PixelFormat::Srgb8));
+        assert_eq!(
+            only_b
+                .on(PixelFormat::Srgb8)
+                .apply(f32::NAN, 0.5, [0.25; 3]),
+            [0.25; 3],
+            "a NaN coordinate is outside every rect"
+        );
+    }
+
+    /// Each rect's texels in the atlas, by their red byte.
+    fn texels(atlas: &Atlas, [x, y, w, h]: [u32; 4]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for row in y..y + h {
+            for col in x..x + w {
+                out.push(atlas.rgba[((row * atlas.width + col) * 4) as usize]);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_atlas_holds_every_patch_whole_and_apart() {
+        let patches: Vec<Arc<Patch>> = [(5, 3), (4, 7), (6, 2), (3, 3)]
+            .iter()
+            .enumerate()
+            .map(|(i, &(w, h))| flat(w, h, 10 * (i as u8 + 1)))
+            .collect();
+        let set = set_of(&patches);
+        // 10 wide: two patches to a shelf.
+        let atlas = set.atlas(10);
+        assert!(atlas.width <= 10 && atlas.height <= 10);
+        assert_eq!(atlas.rgba.len(), (atlas.width * atlas.height * 4) as usize);
+        assert_eq!(
+            atlas.rects,
+            [[0, 0, 5, 3], [5, 0, 4, 7], [0, 7, 6, 2], [6, 7, 3, 3]]
+        );
+        for (i, (rect, p)) in atlas.rects.iter().zip(&patches).enumerate() {
+            assert_eq!((rect[2], rect[3]), (p.width(), p.height()));
+            let want = vec![10 * (i as u8 + 1); (rect[2] * rect[3]) as usize];
+            assert_eq!(texels(&atlas, *rect), want, "patch {i}");
+        }
+        let gpu = set.gpu_fills(&atlas);
+        assert_eq!(gpu.len(), 4);
+        assert_eq!(gpu[1].atlas_rect, [5.0, 0.0, 4.0, 7.0]);
+        assert_eq!(gpu[1].bbox, [0.1, 0.1, 0.9, 0.9]);
+    }
+
+    #[test]
+    fn patches_too_large_for_the_texture_are_halved_until_they_fit() {
+        let set = set_of(&[flat(64, 64, 200), flat(64, 16, 100)]);
+        let atlas = set.atlas(40);
+        assert_eq!(atlas.rects, [[0, 0, 32, 32], [0, 32, 32, 8]]);
+        assert!(texels(&atlas, atlas.rects[0]).iter().all(|&v| v == 200));
+        assert!(texels(&atlas, atlas.rects[1]).iter().all(|&v| v == 100));
+        // A texture of one texel holds one patch at 1x1, and not two.
+        assert_eq!(set_of(&[flat(64, 64, 200)]).atlas(1).rects, [[0, 0, 1, 1]]);
+        let none = set.atlas(1);
+        assert_eq!((none.width, none.height), (1, 1));
+        assert_eq!(none.rects, [[0; 4]; 2], "size 0 draws nothing");
+        let empty = FillSet::default().atlas(8192);
+        assert_eq!((empty.width, empty.height, empty.rgba.len()), (1, 1, 4));
+    }
+
+    #[test]
+    fn sixteen_of_the_largest_patches_fit_the_smallest_webgpu_texture() {
+        let sizes = [(MAX_PATCH_SIDE, MAX_PATCH_SIDE); MAX_FILLS];
+        let (w, h, rects) = shelf_pack(&sizes, 8192).unwrap();
+        assert_eq!((w, h), (8192, 8192));
+        assert_eq!(rects[15], [6144, 6144, 2048, 2048]);
     }
 }
 

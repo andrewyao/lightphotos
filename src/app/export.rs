@@ -692,6 +692,7 @@ impl App {
                     detections: self.detections.get(&src).cloned().unwrap_or_default(),
                 }
             },
+            fills: self.fill_input(&src),
             rot: self.rotations.get(&src).copied().unwrap_or(0),
             location: self
                 .folder_store

@@ -271,6 +271,7 @@ impl Run {
                 adj: Default::default(),
                 touchups: Vec::new(),
                 masks: crate::develop::MaskInput::none(),
+                fills: crate::develop::fill::FillInput::none(),
                 rot: 0,
                 edits: 0,
             };
@@ -430,8 +431,13 @@ impl Run {
                 continue;
             };
             let t0 = Instant::now();
-            let baked =
-                crate::develop::image_ops::bake_edited(&img, &adj, &[], &Default::default(), 0);
+            let baked = crate::develop::image_ops::bake_edited(
+                &img,
+                &adj,
+                Retouch::NONE,
+                &Default::default(),
+                0,
+            );
             bakes.push(t0.elapsed());
             std::hint::black_box(baked);
         }
@@ -470,6 +476,7 @@ impl Run {
                 adj,
                 &[],
                 crate::develop::MaskInput::none(),
+                crate::develop::fill::FillInput::none(),
                 0,
             );
             frame += t.elapsed();
@@ -558,6 +565,7 @@ impl Run {
                 adj: crate::develop::Adjustments::default(),
                 touchups: Vec::new(),
                 masks: crate::develop::MaskInput::none(),
+                fills: crate::develop::fill::FillInput::none(),
                 rot: 0,
                 output: crate::export::Output::FULL,
                 location: None,
@@ -889,6 +897,7 @@ impl BackgroundScoring {
                         adj: Default::default(),
                         touchups: Vec::new(),
                         masks: crate::develop::MaskInput::none(),
+                        fills: crate::develop::fill::FillInput::none(),
                         rot: 0,
                         edits: 0,
                     });
