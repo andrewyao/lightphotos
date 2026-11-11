@@ -107,7 +107,7 @@ pub(crate) struct Comfy {
     probed_at: Option<Instant>,
     /// The model files found in place by the last scan or download.
     installed: HashSet<&'static str>,
-    scan: Option<Receiver<Vec<&'static str>>>,
+    scan: Option<Receiver<Option<Scanned>>>,
     queue: VecDeque<&'static ModelFile>,
     running: Option<RunningDownload>,
     failed: HashMap<&'static str, String>,
@@ -138,16 +138,59 @@ fn load_pref(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// ComfyUI Desktop's models folder, the one its Help ▸ Open Model Folder
-/// shows, for the picker to start in.
+/// Where the picker starts: ComfyUI Desktop's models folder when one is
+/// found, else `~/Documents`.
 pub(crate) fn suggested_models_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(
-        PathBuf::from(home)
-            .join("Documents")
-            .join("ComfyUI")
-            .join("models"),
-    )
+    detect_models_dir().or_else(|| {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+        Some(PathBuf::from(home).join("Documents"))
+    })
+}
+
+/// ComfyUI Desktop's models folder, from its own settings. `None` when no
+/// install is found. Reads small files, so it runs on the scan thread.
+fn detect_models_dir() -> Option<PathBuf> {
+    // The platform's app-support folder, the parent of our own.
+    let support = crate::persist::prefs::config_dir()?.parent()?.to_path_buf();
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    detect_models_dir_in(&support, home.as_deref().map(Path::new))
+}
+
+/// The most of a ComfyUI settings file read. They are a few KB.
+const MAX_COMFY_SETTINGS_BYTES: usize = 1 << 20;
+
+/// Looks, in order, at the current Comfy Desktop's `settings.json`
+/// (`modelsDirs`), the older ComfyUI Desktop's `config.json` (`basePath`,
+/// whose `models` folder it used) and `~/Documents/ComfyUI/models`. The first
+/// that names an existing folder wins.
+fn detect_models_dir_in(support: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let json = |file: PathBuf| -> Option<serde_json::Value> {
+        let bytes = crate::paths::read_capped(&file, MAX_COMFY_SETTINGS_BYTES).ok()??;
+        serde_json::from_slice(&bytes).ok()
+    };
+    let desktop = json(support.join("Comfy Desktop").join("settings.json")).and_then(|s| {
+        let first = s.get("modelsDirs")?.as_array()?.first()?.as_str()?;
+        Some(PathBuf::from(first))
+    });
+    let legacy = || {
+        json(support.join("ComfyUI").join("config.json")).and_then(|c| {
+            let base = c.get("basePath")?.as_str()?;
+            Some(PathBuf::from(base).join("models"))
+        })
+    };
+    let documents = || home.map(|h| h.join("Documents").join("ComfyUI").join("models"));
+    [desktop, legacy(), documents()]
+        .into_iter()
+        .flatten()
+        .find(|dir| dir.is_absolute() && dir.is_dir())
+}
+
+/// A finished scan of the models folder.
+struct Scanned {
+    dir: PathBuf,
+    /// The folder came from [`detect_models_dir`], not the user's choice.
+    detected: bool,
+    found: Vec<&'static str>,
 }
 
 fn probe(server: Option<String>, wanted: Vec<&'static ComfyFeature>) -> Probed {
@@ -433,21 +476,36 @@ impl Comfy {
 
     /// Looks in the models folder, off the frame, for every feature's files.
     pub(crate) fn scan_models(&mut self) {
-        let Some(dir) = self.models_dir.clone().filter(|_| self.enabled) else {
+        if !self.enabled {
             self.installed.clear();
             return;
-        };
+        }
+        let chosen = self.models_dir.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("comfy-models".into())
             .spawn(move || {
-                let found: Vec<&'static str> = FEATURES
+                let (dir, detected) = match chosen {
+                    Some(dir) => (dir, false),
+                    None => match detect_models_dir() {
+                        Some(dir) => (dir, true),
+                        None => {
+                            let _ = tx.send(None);
+                            return;
+                        }
+                    },
+                };
+                let found = FEATURES
                     .iter()
                     .flat_map(|f| f.models)
                     .filter(|m| download::installed(m, &dir))
                     .map(|m| m.file)
                     .collect();
-                let _ = tx.send(found);
+                let _ = tx.send(Some(Scanned {
+                    dir,
+                    detected,
+                    found,
+                }));
             });
         match spawned {
             Ok(_) => self.scan = Some(rx),
@@ -564,9 +622,20 @@ impl Comfy {
         }
         if let Some(rx) = &self.scan {
             match rx.try_recv() {
-                Ok(found) => {
-                    self.installed = found.into_iter().collect();
+                Ok(scanned) => {
                     self.scan = None;
+                    match scanned {
+                        // A choice made while the scan ran wins over a found folder.
+                        Some(s) if s.detected && self.models_dir.is_some() => self.scan_models(),
+                        Some(s) => {
+                            if s.detected {
+                                save_pref(MODELS_PREF, &s.dir.to_string_lossy());
+                                self.models_dir = Some(s.dir);
+                            }
+                            self.installed = s.found.into_iter().collect();
+                        }
+                        None => self.installed.clear(),
+                    }
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => self.scan = None,
@@ -608,6 +677,76 @@ mod tests {
 
     fn fill() -> &'static ComfyFeature {
         features::feature(GENERATIVE_FILL).unwrap()
+    }
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("lp-comfy-detect-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn finds_the_models_folder_comfy_desktop_is_set_to() {
+        let root = fresh_dir("desktop");
+        let models = root.join("ComfyUI-Shared").join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        let support = root.join("support");
+        std::fs::create_dir_all(support.join("Comfy Desktop")).unwrap();
+        let settings = serde_json::json!({ "modelsDirs": [models] });
+        std::fs::write(
+            support.join("Comfy Desktop").join("settings.json"),
+            settings.to_string(),
+        )
+        .unwrap();
+        // The Documents folder exists too, and loses to the app's own setting.
+        std::fs::create_dir_all(root.join("Documents/ComfyUI/models")).unwrap();
+        assert_eq!(detect_models_dir_in(&support, Some(&root)), Some(models));
+    }
+
+    #[test]
+    fn falls_back_past_missing_or_hostile_settings() {
+        let root = fresh_dir("fallback");
+        let support = root.join("support");
+        std::fs::create_dir_all(support.join("Comfy Desktop")).unwrap();
+        std::fs::create_dir_all(support.join("ComfyUI")).unwrap();
+        // A folder that doesn't exist, a relative path and garbage are all skipped.
+        std::fs::write(
+            support.join("Comfy Desktop").join("settings.json"),
+            r#"{"modelsDirs":["/no/such/lightphotos/models"]}"#,
+        )
+        .unwrap();
+        std::fs::write(support.join("ComfyUI").join("config.json"), "{not json").unwrap();
+        assert_eq!(detect_models_dir_in(&support, Some(&root)), None);
+
+        std::fs::write(
+            support.join("Comfy Desktop").join("settings.json"),
+            r#"{"modelsDirs":["relative/models"]}"#,
+        )
+        .unwrap();
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(legacy.join("models")).unwrap();
+        let config = serde_json::json!({ "basePath": legacy });
+        std::fs::write(
+            support.join("ComfyUI").join("config.json"),
+            config.to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            detect_models_dir_in(&support, Some(&root)),
+            Some(legacy.join("models"))
+        );
+
+        std::fs::write(
+            support.join("ComfyUI").join("config.json"),
+            r#"{"basePath":7}"#,
+        )
+        .unwrap();
+        let documents = root.join("Documents/ComfyUI/models");
+        std::fs::create_dir_all(&documents).unwrap();
+        assert_eq!(detect_models_dir_in(&support, Some(&root)), Some(documents));
+        assert_eq!(detect_models_dir_in(&support, None), None);
     }
 
     fn settle(comfy: &mut Comfy) {

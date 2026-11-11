@@ -825,7 +825,7 @@ pub static ZH_HANS: Strings = Strings {
     comfy_server_hint: "留空则在 127.0.0.1:8000 或 127.0.0.1:8188 查找 ComfyUI。",
     comfy_models: "模型文件夹",
     comfy_models_unset: "未选择",
-    comfy_models_hint: "ComfyUI 的模型文件夹。ComfyUI Desktop 将它放在 Documents/ComfyUI/models。",
+    comfy_models_hint: "ComfyUI 的模型文件夹。",
     comfy_choose: "选择…",
     comfy_models_picker_title: "选择 ComfyUI 的模型文件夹",
     comfy_features: "功能",

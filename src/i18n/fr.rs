@@ -982,7 +982,7 @@ pub static FR: Strings = Strings {
     comfy_server_hint: "Laissez vide pour chercher ComfyUI sur 127.0.0.1:8000 ou 127.0.0.1:8188.",
     comfy_models: "Dossier des modèles",
     comfy_models_unset: "Non choisi",
-    comfy_models_hint: "Le dossier des modèles de ComfyUI. ComfyUI Desktop le place dans Documents/ComfyUI/models.",
+    comfy_models_hint: "Le dossier des modèles de ComfyUI. Si aucun n'est choisi, LightPhotos prend celui de ComfyUI Desktop.",
     comfy_choose: "Choisir…",
     comfy_models_picker_title: "Choisir le dossier des modèles de ComfyUI",
     comfy_features: "Fonctions",

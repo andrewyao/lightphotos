@@ -833,7 +833,7 @@ pub static KO: Strings = Strings {
     comfy_server_hint: "비워 두면 127.0.0.1:8000 또는 127.0.0.1:8188에서 ComfyUI를 찾아요.",
     comfy_models: "모델 폴더",
     comfy_models_unset: "선택 안 됨",
-    comfy_models_hint: "ComfyUI의 모델 폴더예요. ComfyUI Desktop은 Documents/ComfyUI/models에 둬요.",
+    comfy_models_hint: "ComfyUI의 모델 폴더예요.",
     comfy_choose: "선택…",
     comfy_models_picker_title: "ComfyUI의 모델 폴더 선택",
     comfy_features: "기능",

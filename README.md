@@ -34,11 +34,11 @@ make new ones.
 1. **Enable it.** Install ComfyUI Desktop. In LightPhotos, open Settings
    (`Cmd`+`,`), tick **Enable ComfyUI**, and tick **Generative Fill** under
    Features. Leave **Server** empty unless ComfyUI runs on an unusual port.
-2. **Download the models.** Click **Choose…** beside Models folder and pick
-   ComfyUI's models folder, which ComfyUI Desktop keeps in
-   `Documents/ComfyUI/models` (its Help menu has Open Model Folder). Then
-   click **Download** next to each of the four model files, about 7 GB in
-   all. A download that is interrupted picks up where it stopped.
+2. **Download the models.** LightPhotos finds the models folder ComfyUI
+   Desktop is set to and shows it beside Models folder. If it shows Not
+   chosen, or you want another folder, click **Choose…**. Then click
+   **Download** next to each of the four model files, about 7 GB in all. A
+   download that is interrupted picks up where it stopped.
 3. **Start ComfyUI Desktop** and leave it running.
 4. **Paint.** Open a photo, go to the Masks page, turn on **Touch Up**
    (`Q`) and then **Generative**. Drag over what you want gone and let go.

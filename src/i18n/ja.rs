@@ -849,7 +849,7 @@ pub static JA: Strings = Strings {
     comfy_server_hint: "空欄にすると 127.0.0.1:8000 または 127.0.0.1:8188 で ComfyUI を探します。",
     comfy_models: "モデルフォルダ",
     comfy_models_unset: "未選択",
-    comfy_models_hint: "ComfyUI のモデルフォルダです。ComfyUI Desktop では Documents/ComfyUI/models にあります。",
+    comfy_models_hint: "ComfyUI のモデルフォルダです。",
     comfy_choose: "選択…",
     comfy_models_picker_title: "ComfyUI のモデルフォルダを選択",
     comfy_features: "機能",
