@@ -1721,7 +1721,12 @@ mod tests {
     }
 
     #[test]
-    fn malformed_requests_are_errors_not_panics() {
+    fn malformed_requests_are_rejected_at_parse_and_do_not_panic() {
+        // Each of these must be refused by `parse` itself: bad JSON, a missing
+        // or non-string id, an out-of-range or unknown field, or an extra key.
+        // Asserting `is_err` (not "any non-Develop is an error") means a
+        // regressed `deny_unknown_fields`, `Stars`, slider name or value check
+        // would make the matching line fail.
         for text in [
             "",
             "{",
@@ -1736,20 +1741,25 @@ mod tests {
             r#"{"id":"photo.rate","params":{"stars":2,"bogus":1}}"#,
             r#"{"id":"photo.rate","params":{"stars":2},"extra":1}"#,
             r#"{"id":"develop.set","params":{"controls":{"exposur":1}}}"#,
-            r#"{"id":"develop.set","params":{"controls":{"exposure":1e39}}}"#,
             r#"{"id":"develop.set","params":{"controls":{"exposure":{"by":"x"}}}}"#,
             r#"{"id":"crop.set","params":{"crop":{"left":0}}}"#,
             r#"{"id":"select","params":{"photos":"some"}}"#,
             "{\"id\":\"photo.label\",\"params\":{\"label\":\"\u{1F600}\"}}",
         ] {
-            let parsed = Command::parse(text);
-            let checked = match &parsed {
-                Ok(Command::Develop(p)) => p.validate(),
-                Ok(_) => Err(CommandError::NoPhotos),
-                Err(e) => Err(e.clone()),
-            };
-            assert!(checked.is_err(), "{text:?} gave {parsed:?}");
+            assert!(
+                Command::parse(text).is_err(),
+                "{text:?} parsed but should have been rejected"
+            );
         }
+
+        // A finite but out-of-range value parses into a well-formed command and
+        // is then refused by `validate`, naming the range.
+        let Ok(Command::Develop(p)) =
+            Command::parse(r#"{"id":"develop.set","params":{"controls":{"exposure":1e39}}}"#)
+        else {
+            panic!("develop.set with a finite value parses");
+        };
+        assert!(matches!(p.validate(), Err(CommandError::OutOfRange { .. })));
     }
 
     #[test]

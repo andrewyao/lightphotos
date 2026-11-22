@@ -20,7 +20,8 @@ use objc2_vision::{VNDetectFaceLandmarksRequest, VNFaceLandmarkRegion2D};
 use crate::scoring::vision;
 
 /// Landmark points in Vision's normalized space: origin bottom-left, both axes
-/// 0..1 over the whole image, not the face box.
+/// 0..1 over the face's bounding box (not the whole image), as
+/// `VNFaceLandmarkRegion2D.normalizedPoints` reports them.
 pub type Points = Vec<(f32, f32)>;
 
 /// One face as Vision reports it, before any scoring.
@@ -40,11 +41,17 @@ pub struct RawFace {
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
 pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
-    // SAFETY: `new` takes no arguments; objc2 marks it unsafe only because
-    // every Vision method is. It returns an owned, initialized request.
-    let request = unsafe { VNDetectFaceLandmarksRequest::new() };
-    vision::perform(vision::Source::File(path), &[request.as_super().as_super()])?;
-    Ok(faces_from(&request))
+    // Worker threads have no autorelease pool of their own, and Vision
+    // autoreleases freely; without one each photo would leak until the
+    // long-lived FacePool worker exits. `faces_from` copies out plain data,
+    // so nothing crosses the pool boundary.
+    objc2::rc::autoreleasepool(|_| {
+        // SAFETY: `new` takes no arguments; objc2 marks it unsafe only because
+        // every Vision method is. It returns an owned, initialized request.
+        let request = unsafe { VNDetectFaceLandmarksRequest::new() };
+        vision::perform(vision::Source::File(path), &[request.as_super().as_super()])?;
+        Ok(faces_from(&request))
+    })
 }
 
 /// The faces a finished landmarks request found.
@@ -240,10 +247,12 @@ impl FaceQuality {
 /// Height over width of one eye contour: high when open, near 0 when blinking.
 /// `None` for fewer than 3 points or a degenerate contour.
 ///
-/// `aspect_wh` is image width / height. Vision normalizes x and y by different
-/// lengths, so y is rescaled into x's units first. The widest point pair is
-/// taken as the eye corners, which ignores Vision's point order (it differs
-/// between the 65- and 76-point sets) and handles a tilted head.
+/// `aspect_wh` is the width / height, in pixels, of whatever the points are
+/// normalized over (for Vision's eye points, the face box; see
+/// [`face_box_aspect_wh`]). Vision normalizes x and y by different lengths, so
+/// y is rescaled into x's units first. The widest point pair is taken as the
+/// eye corners, which ignores Vision's point order (it differs between the 65-
+/// and 76-point sets) and handles a tilted head.
 pub fn eye_openness(points: &[(f32, f32)], aspect_wh: f32) -> Option<f32> {
     if points.len() < 3 || aspect_wh.is_nan() || aspect_wh <= 0.0 {
         return None;
@@ -279,14 +288,43 @@ pub fn eye_openness(points: &[(f32, f32)], aspect_wh: f32) -> Option<f32> {
     Some((hi - lo) / width)
 }
 
+/// A face must span at least this fraction of the frame on both axes before
+/// its eyes decide the blink signal. The score runs on a ~1024 px preview, so
+/// a bystander or a face a few tens of pixels wide has landmarks too coarse to
+/// trust; without this, one such face could mark a whole frame "eyes closed".
+const MIN_BLINK_FACE_SIZE: f32 = 0.04;
+
+/// Whether `face` is large enough for its eye landmarks to call a blink.
+fn big_enough_for_blink(face: &RawFace) -> bool {
+    let (_, _, bw, bh) = face.bounding_box;
+    bw >= MIN_BLINK_FACE_SIZE && bh >= MIN_BLINK_FACE_SIZE
+}
+
+/// The pixel aspect (width / height) of `face`'s box, for `eye_openness` to
+/// rescale y into x units. Vision's eye points are normalized to the face
+/// box, not the whole image, so the box's own pixel aspect is what makes the
+/// openness ratio frame-independent. It is the box's normalized w:h times the
+/// image aspect `aspect_wh`. Falls back to the image aspect for a degenerate
+/// box.
+fn face_box_aspect_wh(face: &RawFace, aspect_wh: f32) -> f32 {
+    let (_, _, bw, bh) = face.bounding_box;
+    if bw > 0.0 && bh > 0.0 {
+        (bw / bh) * aspect_wh
+    } else {
+        aspect_wh
+    }
+}
+
 /// Score all faces in a photo, keeping the least-open eye.
 pub fn face_quality(faces: &[RawFace], aspect_wh: f32) -> FaceQuality {
     let min_eye_openness = faces
         .iter()
+        .filter(|f| big_enough_for_blink(f))
         .flat_map(|f| {
+            let aspect = face_box_aspect_wh(f, aspect_wh);
             [
-                eye_openness(&f.left_eye, aspect_wh),
-                eye_openness(&f.right_eye, aspect_wh),
+                eye_openness(&f.left_eye, aspect),
+                eye_openness(&f.right_eye, aspect),
             ]
         })
         .flatten()
@@ -781,6 +819,25 @@ mod tests {
         );
     }
 
+    // Vision's eye points are normalized to the face box, not the image, so
+    // the box's own pixel aspect is what makes openness frame-independent. A
+    // real face box is roughly square in pixels: in a 3:2 landscape frame
+    // (aspect_wh 1.5) a box 0.1 wide and 0.15 tall is 300x300 px, and an eye
+    // whose box ratio is 0.3 must score 0.3, not 0.3/1.5.
+    #[test]
+    fn openness_uses_the_face_box_aspect_not_the_image_aspect() {
+        let eye = eye_contour(0.5, 0.5, 0.15, 0.045); // box ratio 0.3
+        let face = RawFace {
+            bounding_box: (0.3, 0.3, 0.1, 0.15),
+            confidence: 0.9,
+            left_eye: eye.clone(),
+            right_eye: eye,
+        };
+        let q = face_quality(&[face], 3000.0 / 2000.0);
+        let o = q.min_eye_openness.expect("one face with eye landmarks");
+        assert!((o - 0.3).abs() < 1e-3, "box-aspect openness was {o}");
+    }
+
     #[test]
     fn openness_survives_head_roll() {
         let upright = eye_contour(0.5, 0.5, 0.05, 0.015);
@@ -823,6 +880,28 @@ mod tests {
         let worst = q.min_eye_openness.expect("two faces with eye landmarks");
         assert!((worst - 0.0333).abs() < 1e-3, "worst eye was {worst}");
         assert_eq!(q.eye_state(), Some(EyeState::Closed));
+    }
+
+    // A tiny bystander's noisy landmarks must not drag a group shot into the
+    // eyes-closed filter when the prominent subject's eyes are open.
+    #[test]
+    fn a_tiny_face_cannot_mark_a_frame_eyes_closed() {
+        let open = eye_contour(0.5, 0.6, 0.03, 0.010);
+        let blink = eye_contour(0.1, 0.1, 0.03, 0.001);
+        let big = face_with_eyes(open.clone(), open); // box 0.2 x 0.2
+        let tiny = RawFace {
+            bounding_box: (0.05, 0.05, 0.02, 0.02),
+            confidence: 0.9,
+            left_eye: blink.clone(),
+            right_eye: blink,
+        };
+        let q = face_quality(&[big, tiny], 1.0);
+        assert_eq!(q.faces, 2, "both faces still count");
+        assert_eq!(
+            q.eye_state(),
+            Some(EyeState::Open),
+            "the tiny blinker is ignored"
+        );
     }
 
     #[test]

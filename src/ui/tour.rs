@@ -140,7 +140,7 @@ fn callout(ui: &mut egui::Ui, index: usize, out: &mut FrameOutput) {
             .strong(),
     );
     ui.add_space(font_size::px(ui.style(), 6.0));
-    ui.label(body);
+    ui.label(crate::i18n::keys(body).as_ref());
     if TourStep::ALL[index] == TourStep::RailLoupe {
         loupe_icons(ui);
     }

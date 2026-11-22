@@ -654,7 +654,8 @@ pub fn capture_stamp(path: &Path) -> Option<CaptureStamp> {
     }) {
         return Some(stamp);
     }
-    let t = dict_string(&props, key!(kCGImagePropertyTIFFDateTime))?;
+    let t = dict_dictionary(&props, key!(kCGImagePropertyTIFFDictionary))
+        .and_then(|tiff| dict_string(tiff, key!(kCGImagePropertyTIFFDateTime)))?;
     CaptureStamp::new(
         &t,
         exif_str(key!(kCGImagePropertyExifOffsetTime)).as_deref(),
@@ -853,8 +854,9 @@ pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
 }
 
 /// EXIF orientation `1..=8` of `path`, `1` when absent. [`decode`] already
-/// applies it. Use it to align output computed in stored orientation, such as
-/// Vision's segmentation masks.
+/// applies it, and so does Vision when handed a file. Use it to turn a stored
+/// pixel size into the upright display size (see `facequality::upright_size`),
+/// not to re-rotate anything Vision already returned upright.
 #[cfg(target_os = "macos")]
 pub fn orientation_of(path: &Path) -> u8 {
     open_image_source(path)

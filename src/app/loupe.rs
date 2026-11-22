@@ -701,13 +701,22 @@ impl App {
 
     /// Store a finished mask, unless the Loupe has moved to another photo.
     pub(crate) fn poll_selection_mask(&mut self) {
+        // The worker runs one photo at a time. If it finished the photo we
+        // have since navigated away from, its result is discarded here and
+        // the request for the photo now on screen was refused while it was
+        // busy, so ask again once it is free.
+        let mut freed_for_stale = false;
         while let Ok((path, result)) = self.selection_rx.try_recv() {
             if self.selection_pending.as_ref() == Some(&path) {
                 self.selection_pending = None;
+                freed_for_stale = true;
             }
             if self.want.as_ref() != Some(&path) {
                 continue;
             }
+            // The freed worker's result was for the photo on screen, so it
+            // needs no re-request (even "no subject", which is a real answer).
+            freed_for_stale = false;
             match result {
                 Ok(mask) => self.current_selection = Some((path, mask)),
                 // "No subject found" is a normal result, so show no error.
@@ -715,6 +724,9 @@ impl App {
             }
             self.sync_selection_overlay();
             self.request_redraw();
+        }
+        if freed_for_stale {
+            self.request_selection_mask();
         }
     }
 
@@ -1396,6 +1408,31 @@ mod tests {
         app.edits.insert(paths[1].clone(), adj);
         app.fit_to_window();
         assert!((app.zoom() - 0.2).abs() < 1e-6);
+    }
+
+    /// Navigating while the previous photo is still segmenting: its result is
+    /// discarded as stale, and the photo now on screen, refused while the one
+    /// worker was busy, is asked for again.
+    #[test]
+    fn a_stale_selection_result_re_requests_the_current_photo() {
+        let (mut app, dir, paths) = crate::app::test_support::folder_app("selection-restale", 2);
+        app.mode = ViewMode::Loupe;
+        app.selection_on = true;
+        // A is still segmenting while the Loupe has moved on to B.
+        app.want = Some(paths[1].clone());
+        app.selection_pending = Some(paths[0].clone());
+
+        app.selection_tx
+            .send((paths[0].clone(), Err("no subject".into())))
+            .unwrap();
+        app.poll_selection_mask();
+
+        assert_eq!(
+            app.selection_pending.as_deref(),
+            Some(paths[1].as_path()),
+            "the photo on screen is requested once the worker is free"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The control and the backend must appear on the same platforms, so this

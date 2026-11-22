@@ -263,6 +263,16 @@ pub fn parse(xmp: &str) -> Result<Imported, String> {
         }
     }
 
+    // A preset whose every field is one this build can't map (crop, lens,
+    // local or masked corrections, calibration, absolute white balance, a
+    // legacy PV2010 preset...) would land as a named no-op look with no hint
+    // that nothing came across. Refuse it instead, so the import reports the
+    // file rather than silently adding an empty preset. Monochrome and a tone
+    // curve both move `adj`, so they are not refused.
+    if adj.is_identity() {
+        return Err("no develop settings this build can carry".into());
+    }
+
     Ok(Imported {
         name: label(body, "Name"),
         group: label(body, "Group"),
@@ -686,8 +696,9 @@ mod tests {
         let at = |amount: &str| {
             parse(&packet(
                 &format!(
-                    "crs:Sharpness=\"{amount}\" crs:SharpenRadius=\"+1.0\" \
-                     crs:SharpenDetail=\"25\" crs:SharpenEdgeMasking=\"0\""
+                    "crs:Exposure2012=\"+0.5\" crs:Sharpness=\"{amount}\" \
+                     crs:SharpenRadius=\"+1.0\" crs:SharpenDetail=\"25\" \
+                     crs:SharpenEdgeMasking=\"0\""
                 ),
                 "",
             ))
@@ -865,9 +876,11 @@ mod tests {
     /// or a differently-prefixed attribute.
     #[test]
     fn a_key_does_not_match_inside_a_longer_or_differently_prefixed_one() {
+        // A real mapped field (contrast) keeps the preset from being refused
+        // as empty, so the near-miss keys can be shown not to match.
         let attr = parse(&packet(
             "crs:Exposure2012Reference=\"+2.0\" crs:SaturationAdjustmentRed=\"0\" \
-             xcrs:Vibrance=\"50\"",
+             xcrs:Vibrance=\"50\" crs:Contrast2012=\"+10\"",
             "",
         ))
         .unwrap();
@@ -876,7 +889,7 @@ mod tests {
         assert_eq!(attr.adj.vibrance, 0.0);
 
         let elem = parse(&packet(
-            "",
+            "crs:Contrast2012=\"+10\"",
             "<crs:Exposure2012Reference>+2.0</crs:Exposure2012Reference>\
              <crs:SaturationAdjustmentRed>0</crs:SaturationAdjustmentRed>",
         ))
@@ -888,9 +901,14 @@ mod tests {
     /// Catches an invented Kelvin conversion.
     #[test]
     fn absolute_temperature_and_tint_are_dropped_not_converted() {
-        let got = parse(&packet("crs:Temperature=\"5500\" crs:Tint=\"+10\"", "")).unwrap();
+        let got = parse(&packet(
+            "crs:Temperature=\"5500\" crs:Tint=\"+10\" crs:Exposure2012=\"+0.5\"",
+            "",
+        ))
+        .unwrap();
         assert_eq!(got.adj.temp, 0.0);
         assert_eq!(got.adj.tint, 0.0);
+        assert_eq!(got.adj.exposure, 0.5, "the mapped field still carries");
         assert_eq!(got.dropped, ["Temperature", "Tint"]);
     }
 
@@ -938,7 +956,11 @@ mod tests {
         assert_eq!(got.adj.saturation, -100.0);
         assert!(got.monochrome);
 
-        let colour = parse(&packet("crs:ConvertToGrayscale=\"False\"", "")).unwrap();
+        let colour = parse(&packet(
+            "crs:ConvertToGrayscale=\"False\" crs:Exposure2012=\"+0.5\"",
+            "",
+        ))
+        .unwrap();
         assert_eq!(colour.adj.saturation, 0.0);
         assert!(!colour.monochrome);
     }
@@ -960,13 +982,21 @@ mod tests {
             lum.dropped
         );
 
-        let untouched = parse(&packet("crs:ColorNoiseReduction=\"25\"", "")).unwrap();
+        let untouched = parse(&packet(
+            "crs:ColorNoiseReduction=\"25\" crs:Exposure2012=\"+0.5\"",
+            "",
+        ))
+        .unwrap();
         assert_eq!(
             untouched.adj.denoise, 0.0,
             "a preset that never touched noise must not arrive denoised"
         );
 
-        let moved = parse(&packet("crs:ColorNoiseReduction=\"45\"", "")).unwrap();
+        let moved = parse(&packet(
+            "crs:ColorNoiseReduction=\"45\" crs:Exposure2012=\"+0.5\"",
+            "",
+        ))
+        .unwrap();
         assert_eq!(
             moved.adj.denoise, 0.0,
             "colour noise reduction has no field here"
@@ -982,18 +1012,38 @@ mod tests {
     #[test]
     fn a_zero_unsupported_field_is_not_reported_while_a_nonzero_one_is() {
         let zero = parse(&packet(
-            "crs:Temperature=\"0\" crs:Tint=\"+0\" crs:CropAngle=\"0\"",
+            "crs:Temperature=\"0\" crs:Tint=\"+0\" crs:CropAngle=\"0\" crs:Exposure2012=\"+0.5\"",
             "",
         ))
         .unwrap();
         assert!(zero.dropped.is_empty(), "{:?}", zero.dropped);
 
         let set = parse(&packet(
-            "crs:CropAngle=\"+15\" crs:Temperature=\"0\" crs:Tint=\"-3\"",
+            "crs:CropAngle=\"+15\" crs:Temperature=\"0\" crs:Tint=\"-3\" crs:Exposure2012=\"+0.5\"",
             "",
         ))
         .unwrap();
         assert_eq!(set.dropped, ["Tint", "CropAngle"]);
+    }
+
+    /// PERSIST-A-02: a preset whose every field is one this build can't map
+    /// is refused, rather than imported as a named no-op look. A preset that
+    /// carries even one mapped field, or a monochrome conversion, still
+    /// imports.
+    #[test]
+    fn a_preset_that_maps_nothing_is_refused() {
+        // Only unsupported fields (absolute white balance, crop angle).
+        assert!(parse(&packet(
+            "crs:Temperature=\"5500\" crs:CropAngle=\"+15\"",
+            ""
+        ))
+        .is_err());
+        // A crs: preset that set nothing we read at all.
+        assert!(parse(&packet("crs:AlreadyApplied=\"true\"", "")).is_err());
+        // One mapped field is enough to carry.
+        assert!(parse(&packet("crs:Exposure2012=\"+0.5\"", "")).is_ok());
+        // Monochrome carries the black-and-white conversion.
+        assert!(parse(&packet("crs:ConvertToGrayscale=\"True\"", "")).is_ok());
     }
 
     /// Catches a parser that turns a stray file into an empty preset.
@@ -1109,7 +1159,7 @@ mod tests {
         assert_eq!(got.adj.exposure, 0.4);
 
         let empty = parse(&packet(
-            "crs:PresetType=\"Normal\" crs:Exposure2012=\"0\"",
+            "crs:PresetType=\"Normal\" crs:Exposure2012=\"+0.5\"",
             "<crs:Group><rdf:Alt><rdf:li xml:lang=\"x-default\"/></rdf:Alt></crs:Group>\
              <crs:Look crs:Name=\"\"/>",
         ))
@@ -1132,7 +1182,7 @@ mod tests {
     fn only_a_normal_preset_type_is_a_develop_preset() {
         assert!(parse(&exported("Normal", "Warm Film", "Mine")).is_ok());
         assert!(
-            parse(&packet("crs:Exposure2012=\"0\"", "")).is_ok(),
+            parse(&packet("crs:Exposure2012=\"+0.5\"", "")).is_ok(),
             "an older preset with no PresetType is a develop preset"
         );
         let err = parse(&exported("Look", "Vivid", "Looks"))
@@ -1214,7 +1264,7 @@ mod tests {
     fn an_unparseable_mapped_value_is_dropped_and_left_at_zero() {
         let got = parse(&packet(
             "crs:Saturation=\"lots\" crs:Exposure2012=\"\" crs:Temperature=\"5000\" \
-             crs:CropAngle=\"+5\" crs:LuminanceSmoothing=\"NaN\"",
+             crs:CropAngle=\"+5\" crs:LuminanceSmoothing=\"NaN\" crs:Contrast2012=\"+10\"",
             "<crs:Vibrance/>",
         ))
         .unwrap();
@@ -1222,6 +1272,7 @@ mod tests {
         assert_eq!(got.adj.saturation, 0.0);
         assert_eq!(got.adj.vibrance, 0.0);
         assert_eq!(got.adj.denoise, 0.0);
+        assert_eq!(got.adj.contrast, 10.0, "the one parseable field carries");
         assert_eq!(
             got.dropped,
             [
@@ -1240,7 +1291,7 @@ mod tests {
     #[test]
     fn the_name_is_the_first_alt_item_or_none() {
         let named = parse(&packet(
-            "crs:Exposure2012=\"0\"",
+            "crs:Exposure2012=\"+0.5\"",
             "<crs:Name><rdf:Alt>\
              <rdf:li xml:lang=\"x-default\">  Golden Hour  </rdf:li>\
              <rdf:li xml:lang=\"fr\">Heure dor\u{e9}e</rdf:li>\
@@ -1249,11 +1300,11 @@ mod tests {
         .unwrap();
         assert_eq!(named.name.as_deref(), Some("Golden Hour"));
 
-        let unnamed = parse(&packet("crs:Exposure2012=\"0\"", "")).unwrap();
+        let unnamed = parse(&packet("crs:Exposure2012=\"+0.5\"", "")).unwrap();
         assert_eq!(unnamed.name, None);
 
         let blank = parse(&packet(
-            "crs:Exposure2012=\"0\"",
+            "crs:Exposure2012=\"+0.5\"",
             "<crs:Name><rdf:Alt><rdf:li xml:lang=\"x-default\"> </rdf:li></rdf:Alt></crs:Name>",
         ))
         .unwrap();
@@ -1272,7 +1323,7 @@ mod tests {
             format!("<crs:{name}><rdf:Seq>{lis}</rdf:Seq></crs:{name}>")
         }
         let linear = parse(&packet(
-            "crs:Exposure2012=\"0\"",
+            "crs:Exposure2012=\"+0.5\"",
             &format!(
                 "{}{}",
                 curve("ToneCurvePV2012", &["0, 0", "128, 128", "255, 255"]),

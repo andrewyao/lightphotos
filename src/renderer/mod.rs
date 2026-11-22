@@ -116,6 +116,9 @@ fn touch_bind_group(
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
+mod error_test;
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod match_test;
 mod raw_render;
 
@@ -262,6 +265,47 @@ pub struct EguiPaint {
     pub screen_descriptor: egui_wgpu::ScreenDescriptor,
 }
 
+/// A GPU fault the renderer caught instead of letting wgpu's default handler
+/// panic the UI thread. The app polls [`Renderer::take_error`] after each
+/// frame and shows the user a message. See REND-01.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuError {
+    /// Out of GPU memory, usually an image too large for this GPU.
+    OutOfMemory,
+    /// A validation or internal error, or a lost device: the image on screen
+    /// can't be trusted, so the app drops it.
+    Device,
+}
+
+/// Where the uncaptured-error and device-lost callbacks record a fault for the
+/// frame loop to collect. wgpu's callbacks are `'static` and can't borrow the
+/// `Renderer`, so the sink is shared through an `Arc`.
+#[derive(Default)]
+struct GpuErrorSink(std::sync::Mutex<Option<GpuError>>);
+
+impl GpuErrorSink {
+    fn record(&self, e: GpuError) {
+        // A poisoned lock still holds a valid `Option`; recover it rather than
+        // cascade a panic (CLAUDE.md).
+        let mut slot = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Keep the most actionable: out-of-memory lets the app say "too large",
+        // so it wins over a generic device error that it would follow.
+        if slot.is_none() || e == GpuError::OutOfMemory {
+            *slot = Some(e);
+        }
+    }
+
+    fn take(&self) -> Option<GpuError> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
 pub struct Renderer {
     /// The loupe backdrop, sRGB-encoded since the surface does no encoding of
     /// its own. The theme sets it.
@@ -373,6 +417,10 @@ pub struct Renderer {
     /// next one in a slide show, and the viewports that frame drew into.
     fade_from: Option<(egui::TextureId, wgpu::Texture)>,
     last_viewports: [Option<(u32, u32, u32, u32)>; 2],
+
+    /// Faults caught by the uncaptured-error and device-lost callbacks, which
+    /// the frame loop drains with [`take_error`](Self::take_error).
+    error_sink: Arc<GpuErrorSink>,
 }
 
 impl Renderer {
@@ -523,6 +571,27 @@ impl Renderer {
         config: wgpu::SurfaceConfiguration,
         max_dim: u32,
     ) -> Self {
+        // Without this, any wgpu validation or out-of-memory error reaches
+        // wgpu's default handler, which panics the thread that issued the GPU
+        // call (the UI thread) and on wasm leaves the canvas permanently
+        // blank. Record the fault instead; the frame loop drains it through
+        // `take_error` and shows the user a message. See REND-01.
+        let error_sink = Arc::new(GpuErrorSink::default());
+        let sink = Arc::clone(&error_sink);
+        device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
+            eprintln!("[lightphotos] wgpu error: {e}");
+            let kind = match e {
+                wgpu::Error::OutOfMemory { .. } => GpuError::OutOfMemory,
+                wgpu::Error::Validation { .. } | wgpu::Error::Internal { .. } => GpuError::Device,
+            };
+            sink.record(kind);
+        }));
+        let sink = Arc::clone(&error_sink);
+        device.set_device_lost_callback(move |reason, msg| {
+            eprintln!("[lightphotos] wgpu device lost: {reason:?}: {msg}");
+            sink.record(GpuError::Device);
+        });
+
         let format = config.format;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shader"),
@@ -1086,7 +1155,15 @@ impl Renderer {
             thumb_textures: HashMap::new(),
             fade_from: None,
             last_viewports: [None; 2],
+            error_sink,
         }
+    }
+
+    /// Takes the GPU fault the error or device-lost callbacks recorded, if
+    /// any, clearing it. The frame loop calls this after each `render` and,
+    /// on `Some`, drops the current image and tells the user. See REND-01.
+    pub fn take_error(&self) -> Option<GpuError> {
+        self.error_sink.take()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1198,7 +1275,12 @@ impl Renderer {
         let expected = (width as usize)
             .checked_mul(height as usize)?
             .checked_mul(4)?;
-        if width == 0 || height == 0 || rgba.len() != expected {
+        if width == 0
+            || height == 0
+            || width > self.max_dim
+            || height > self.max_dim
+            || rgba.len() != expected
+        {
             return None;
         }
 
@@ -1303,6 +1385,31 @@ impl Renderer {
                 &self.mip_pipeline_linear,
             ),
         };
+        // `DecodedImage`'s pixels and format are public, and a decoder path
+        // that skips `fit_within` or returns a short buffer would otherwise
+        // reach wgpu validation (a panic without REND-01's handler). Refuse it
+        // here: drop the image and record a fault the frame loop surfaces.
+        let fits = (w <= self.max_dim && h <= self.max_dim)
+            && (w as usize)
+                .checked_mul(h as usize)
+                .and_then(|p| p.checked_mul(bytes_per_pixel as usize))
+                == Some(img.rgba.len());
+        if !fits {
+            eprintln!(
+                "set_image: refusing {w}x{h} (max {}, {} bytes, {bytes_per_pixel} bpp)",
+                self.max_dim,
+                img.rgba.len(),
+            );
+            let too_large = w > self.max_dim || h > self.max_dim;
+            self.error_sink.record(if too_large {
+                GpuError::OutOfMemory
+            } else {
+                GpuError::Device
+            });
+            self.clear_image();
+            return;
+        }
+
         if self.image_pixel_format != img.pixel_format {
             self.image_pixel_format = img.pixel_format;
             self.write_fill_lut();
@@ -1607,7 +1714,14 @@ impl Renderer {
     ) -> Option<egui::TextureId> {
         let rgba = crate::develop::image_ops::to_srgb8(img);
         let (w, h) = (img.width, img.height);
-        if rgba.len() < (4 * w * h) as usize {
+        // `w`, `h` and the length are input-derived; keep the arithmetic in
+        // `usize` and reject a buffer that can't fill the texture or a size
+        // past what this GPU allows, rather than reaching wgpu validation.
+        let expected = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|p| p.checked_mul(4));
+        if w == 0 || h == 0 || w > self.max_dim || h > self.max_dim || expected != Some(rgba.len())
+        {
             return None;
         }
         let mip_count = if mipped {
@@ -1829,6 +1943,12 @@ impl Renderer {
     /// Uploads the spots. The app calls this on every slider change, so the
     /// base layer rebuilds only when the spots differ from the last upload.
     pub fn set_touchups(&mut self, touchups: &[GpuTouchUp]) {
+        // The GPU buffer holds exactly `MAX_TOUCHUPS` spots; a longer slice
+        // (an unenforced cross-module invariant) would overrun it, so cap it
+        // here as `set_masks` and `set_fills` cap their own slices.
+        let touchups = touchups
+            .get(..crate::develop::MAX_TOUCHUPS)
+            .unwrap_or(touchups);
         let bytes: &[u8] = bytemuck::cast_slice(touchups);
         if bytes == bytemuck::cast_slice::<GpuTouchUp, u8>(&self.touchups) {
             return;
@@ -2116,16 +2236,37 @@ impl Renderer {
             }
         }
 
+        // A `Suboptimal` frame still draws, but its swapchain no longer matches
+        // the surface, so present it and reconfigure for the next one.
+        let mut suboptimal = false;
         let frame = match (&self.offscreen, &self.surface) {
             (Some(_), _) | (None, None) => None,
             (None, Some(surface)) => match surface.get_current_texture() {
-                C::Success(f) | C::Suboptimal(f) => Some(f),
+                C::Success(f) => Some(f),
+                C::Suboptimal(f) => {
+                    suboptimal = true;
+                    Some(f)
+                }
+                // The surface config is stale or the surface was lost: wgpu
+                // needs a `configure` before the next acquire. (A truly lost
+                // surface wants `Instance::create_surface`, but the renderer
+                // keeps neither the instance nor the window; reconfigure is the
+                // best recovery it can attempt.) The caller retries on a timer.
                 C::Outdated | C::Lost => {
                     surface.configure(&self.device, &self.config);
                     self.free_egui_textures(&egui);
                     return false;
                 }
-                C::Timeout | C::Occluded | C::Validation => {
+                // Transient: skip this frame and let the caller retry.
+                C::Timeout | C::Occluded => {
+                    self.free_egui_textures(&egui);
+                    return false;
+                }
+                // A validation fault, already caught by REND-01's error scope.
+                // Retrying can't fix it, so record it for the frame loop to
+                // surface to the user rather than spin redrawing forever.
+                C::Validation => {
+                    self.error_sink.record(GpuError::Device);
                     self.free_egui_textures(&egui);
                     return false;
                 }
@@ -2219,6 +2360,14 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         if let Some(frame) = frame {
             frame.present();
+        }
+        // A presented `Suboptimal` frame leaves the swapchain mismatched (some
+        // drivers keep delivering a mis-sized one after a resize); reconfigure
+        // so the next acquire is `Success`.
+        if suboptimal {
+            if let Some(surface) = &self.surface {
+                surface.configure(&self.device, &self.config);
+            }
         }
         #[cfg(target_arch = "wasm32")]
         crate::web::analytics::presented();

@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::app::{grid_working_range, load_order, strip_working_range};
+use crate::develop::image_ops::Retouch;
 use crate::jobs::loader::Loader;
 use crate::jobs::thumbnail::THUMB_PX;
 use crate::navigation::Playlist;

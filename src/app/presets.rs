@@ -1221,7 +1221,11 @@ pub(in crate::app) mod tests {
         let (mut app, dir, paths, presets) = page_app("page-click");
         let t = crate::i18n::t();
 
-        std::fs::write(presets.join("Film/Fresh.xmp"), lr_preset("Fresh", "0", "0")).unwrap();
+        std::fs::write(
+            presets.join("Film/Fresh.xmp"),
+            lr_preset("Fresh", "+0.5", "0"),
+        )
+        .unwrap();
         let (asked, page) = open_page(&mut app);
         assert!(asked, "the icon asks for the Presets page");
         assert!(
@@ -1371,6 +1375,30 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&presets);
     }
 
+    /// A very long library preset name must not push its ⋯ menu off the panel.
+    /// The menu is laid out first and the name truncates to fit (UI-B-03).
+    /// Before the fix the ⋯ was clipped away entirely in a narrow (700pt)
+    /// window, so `pos_of` would not find it; now it paints inside the panel.
+    #[test]
+    fn a_long_library_preset_keeps_its_menu_on_the_panel() {
+        use crate::app::test_support::settled_at;
+        let (mut app, dir, _, presets) = page_app("page-long-name");
+        app.presets
+            .add(&"Cinematic ".repeat(40), tone(0.2, 0.0), Vec::new());
+        app.side_page = crate::app::SidePage::Presets;
+        let window = egui::vec2(700.0, 800.0);
+        let _ = settled_at(&mut app, window);
+        let page = settled_at(&mut app, window);
+        let menu = page.pos_of("\u{22ef}");
+        assert!(
+            menu.x < window.x,
+            "the ⋯ menu landed at x={} (off the panel)",
+            menu.x
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&presets);
+    }
+
     /// Catches a folder group named like the library sharing its header's
     /// state, which opened it with the library.
     #[test]
@@ -1381,7 +1409,8 @@ pub(in crate::app) mod tests {
             "<crs:Group><rdf:Alt><rdf:li xml:lang=\"x-default\">{}</rdf:li></rdf:Alt></crs:Group>",
             t.my_presets
         );
-        let mine = lr_preset("Mine", "0", "0").replace("<crs:Name>", &format!("{group}<crs:Name>"));
+        let mine =
+            lr_preset("Mine", "+0.5", "0").replace("<crs:Name>", &format!("{group}<crs:Name>"));
         std::fs::write(presets.join("Mine.xmp"), mine).unwrap();
 
         let (_, page) = open_page(&mut app);

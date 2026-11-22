@@ -41,8 +41,19 @@ impl Rect {
         format!("{} {} {} {}", self.x, self.y, self.w, self.h)
     }
 
-    fn intersects(self, o: Rect) -> bool {
-        self.x < o.x + o.w && o.x < self.x + self.w && self.y < o.y + o.h && o.y < self.y + self.h
+    /// The part of `self` that lies within `o`, or `None` when they are
+    /// disjoint (a shared edge, zero area, counts as disjoint).
+    fn overlap(self, o: Rect) -> Option<Rect> {
+        let x = self.x.max(o.x);
+        let y = self.y.max(o.y);
+        let right = (self.x + self.w).min(o.x + o.w);
+        let bottom = (self.y + self.h).min(o.y + o.h);
+        (right > x && bottom > y).then_some(Rect {
+            x,
+            y,
+            w: right - x,
+            h: bottom - y,
+        })
     }
 
     fn of_monitor(m: &MonitorHandle) -> Rect {
@@ -66,6 +77,33 @@ fn default_size(monitor: Option<(f64, f64)>) -> (f64, f64) {
     }
 }
 
+/// The smallest on-screen strip (logical points) a restored window must still
+/// show, so a grab-able edge and title bar stay reachable.
+const MIN_VISIBLE: (f64, f64) = (120.0, 48.0);
+
+/// Fits a `saved` rectangle to the connected `monitors`: clamps its size to
+/// [`MAX_SHARE`] of the monitor it sits on most, and accepts it only if, after
+/// that clamp, it still shows at least [`MIN_VISIBLE`] on that monitor. Returns
+/// `None` when nothing qualifies (no monitor, a stale off-screen rect, or a
+/// hostile size like `1e300`), so the caller falls back to the default.
+fn fit_saved(saved: Rect, monitors: &[Rect]) -> Option<Rect> {
+    let area = |r: Rect| r.w * r.h;
+    let best = monitors
+        .iter()
+        .copied()
+        .filter_map(|m| saved.overlap(m).map(|ov| (m, area(ov))))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(m, _)| m)?;
+    let clamped = Rect {
+        x: saved.x,
+        y: saved.y,
+        w: saved.w.min(best.w * MAX_SHARE),
+        h: saved.h.min(best.h * MAX_SHARE),
+    };
+    let visible = clamped.overlap(best)?;
+    (visible.w >= MIN_VISIBLE.0 && visible.h >= MIN_VISIBLE.1).then_some(clamped)
+}
+
 /// Places `attrs` at the saved rectangle while it still overlaps a connected
 /// monitor, and otherwise sizes it to the default.
 pub(crate) fn apply(attrs: WindowAttributes, event_loop: &ActiveEventLoop) -> WindowAttributes {
@@ -75,7 +113,7 @@ pub(crate) fn apply(attrs: WindowAttributes, event_loop: &ActiveEventLoop) -> Wi
         .collect();
     let saved = crate::persist::prefs::load(PREF_KEY)
         .and_then(|s| Rect::parse(&s))
-        .filter(|r| monitors.iter().any(|m| r.intersects(*m)));
+        .and_then(|r| fit_saved(r, &monitors));
     if let Some(r) = saved {
         return attrs
             .with_inner_size(LogicalSize::new(r.w, r.h))
@@ -149,26 +187,77 @@ mod tests {
     }
 
     #[test]
-    fn only_an_overlapping_rect_intersects() {
+    fn a_fully_visible_rect_is_kept_as_saved() {
         let screen = Rect {
             x: 0.0,
             y: 0.0,
             w: 1512.0,
             h: 982.0,
         };
-        let at = |x, y| Rect {
-            x,
-            y,
+        let saved = Rect {
+            x: 100.0,
+            y: 50.0,
             w: 1300.0,
             h: 850.0,
         };
-        assert!(at(100.0, 50.0).intersects(screen));
-        assert!(at(-1200.0, 50.0).intersects(screen), "partly off the left");
-        assert!(!at(1512.0, 50.0).intersects(screen), "just past the right");
-        assert!(
-            !at(-3000.0, 0.0).intersects(screen),
-            "on a detached monitor"
-        );
+        assert_eq!(fit_saved(saved, &[screen]), Some(saved));
+    }
+
+    #[test]
+    fn a_rect_on_a_detached_monitor_falls_back() {
+        let screen = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1512.0,
+            h: 982.0,
+        };
+        let off = Rect {
+            x: -3000.0,
+            y: 0.0,
+            w: 1300.0,
+            h: 850.0,
+        };
+        assert_eq!(fit_saved(off, &[screen]), None);
+        assert_eq!(fit_saved(off, &[]), None, "no monitor at all");
+    }
+
+    #[test]
+    fn a_sliver_overlap_is_rejected_so_the_window_is_not_lost_off_screen() {
+        let screen = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1512.0,
+            h: 982.0,
+        };
+        // Title bar off the top, only ~20 pt of the window peeking onto the
+        // screen: not enough to grab, so fall back to the default.
+        let barely = Rect {
+            x: 400.0,
+            y: -830.0,
+            w: 1300.0,
+            h: 850.0,
+        };
+        assert!(barely.overlap(screen).is_some(), "it does touch the screen");
+        assert_eq!(fit_saved(barely, &[screen]), None);
+    }
+
+    #[test]
+    fn a_hostile_or_oversized_size_is_clamped_to_the_monitor() {
+        let screen = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1512.0,
+            h: 982.0,
+        };
+        let huge = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1e300,
+            h: 1e300,
+        };
+        let got = fit_saved(huge, &[screen]).expect("origin is on-screen");
+        assert_eq!((got.w, got.h), (1512.0 * MAX_SHARE, 982.0 * MAX_SHARE));
+        assert!(got.w.is_finite() && got.h.is_finite());
     }
 
     #[test]

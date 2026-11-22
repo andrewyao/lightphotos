@@ -274,6 +274,19 @@ impl EditHistory {
         !self.done.is_empty() || self.open.is_some()
     }
 
+    /// Whether the open step holds anything yet. A running batch holds the
+    /// open step open before it lands a result; until one does, the step is
+    /// empty and an undo should take back the previous step, not the batch.
+    pub(super) fn has_open_edits(&self) -> bool {
+        self.open.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
+    /// Whether a finished step is waiting to be undone, apart from any open
+    /// one. When none is, an undo's only effect is to stop a running batch.
+    pub(super) fn has_done_steps(&self) -> bool {
+        !self.done.is_empty()
+    }
+
     pub(crate) fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }

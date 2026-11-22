@@ -675,6 +675,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Cmd+Z while a batch runs but has landed nothing must take back the
+    /// previous, unrelated step and leave the batch going, not cancel it and
+    /// undo the older step at once.
+    #[test]
+    fn undo_before_a_batch_lands_keeps_it_running_and_undoes_the_prior_step() {
+        let (mut app, dir, a, b) = grid_with_two_photos("autotone-undo-prior");
+        app.loader = Some(crate::jobs::loader::Loader::new(
+            16384,
+            crate::jobs::cache_limits::CacheLimits::PLATFORM,
+        ));
+        // A hand edit, sealed as its own step, before the batch starts.
+        app.put_edit(
+            &a,
+            Adjustments {
+                exposure: 1.0,
+                ..Default::default()
+            },
+        );
+        app.save_edit_unless_dragging();
+
+        // Start the batch; no thumbnail has landed, so nothing is toned.
+        app.auto_tone_batch(vec![a.clone(), b.clone()], DeferredAutoToneMode::Replace);
+        app.save_edit_unless_dragging();
+        assert!(app.autotone.is_running());
+
+        assert_eq!(app.undo_edit(), 1, "Cmd+Z takes back the prior hand edit");
+        assert!(!app.edits.contains_key(&a), "the hand edit is undone");
+        assert!(
+            app.autotone.is_running(),
+            "a batch that has landed nothing keeps running"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_cancelled_batch_ends_its_step() {
         let (mut app, dir, a, b) = batch_with_loader("autotone-undo-cancel");

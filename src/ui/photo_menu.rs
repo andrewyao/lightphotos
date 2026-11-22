@@ -124,14 +124,9 @@ fn photo_menu(ui: &mut egui::Ui, app: &App, cell: Option<usize>, out: &mut Frame
             }
         });
         ui.menu_button(m.color_label, |ui| {
-            let labels = [
-                (ColorLabel::Red, m.label_red),
-                (ColorLabel::Yellow, m.label_yellow),
-                (ColorLabel::Green, m.label_green),
-                (ColorLabel::Blue, m.label_blue),
-            ];
             let current = (n == 1).then(|| app.selected_label()).flatten();
-            for (label, name) in labels {
+            for label in ColorLabel::ALL {
+                let name = super::label_name(label);
                 if ui.selectable_label(current == Some(label), name).clicked() {
                     out.actions.push(UiAction::ToggleLabel(label));
                 }

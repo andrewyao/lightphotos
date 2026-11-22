@@ -264,7 +264,7 @@ pub static KO: Strings = Strings {
         HelpSection {
             title: "탐색",
             rows: &[
-                ("Enter or Space", "선택한 사진 열기 (그리드에서)"),
+                ("Enter 또는 Space", "선택한 사진 열기 (그리드에서)"),
                 ("E", "선택한 사진 열기 (그리드에서)"),
                 ("G", "그리드로 돌아가기"),
                 ("F", "전체 화면, 사진만 표시. F나 Esc로 나가기 (편집 화면에서)"),
@@ -298,9 +298,9 @@ pub static KO: Strings = Strings {
             title: "선택",
             rows: &[
                 ("Cmd+A", "현재 폴더의 모든 사진 선택 (그리드에서)"),
-                ("Shift+Click", "범위 선택"),
-                ("Cmd+Click", "개별 선택 전환"),
-                ("Shift+arrows", "선택 확장 (그리드)"),
+                ("Shift+클릭", "범위 선택"),
+                ("Cmd+클릭", "개별 선택 전환"),
+                ("Shift+방향키", "선택 확장 (그리드)"),
                 ("Cmd+D", "전체 선택 해제"),
                 ("Cmd+G", "선택한 사진을 스택으로 묶기"),
                 ("Cmd+Shift+G", "선택한 스택 해제"),
@@ -325,15 +325,15 @@ pub static KO: Strings = Strings {
         HelpSection {
             title: "확대/축소와 이동 (편집 화면에서)",
             rows: &[
-                ("Space or Z", "확대/축소 순환: 맞춤, 2배 맞춤, 100%"),
-                ("Cmd++ or Cmd+=", "확대 (20% 단위)"),
+                ("Space 또는 Z", "확대/축소 순환: 맞춤, 2배 맞춤, 100%"),
+                ("Cmd++ 또는 Cmd+=", "확대 (20% 단위)"),
                 ("Cmd+-", "축소 (20% 단위)"),
                 ("\u{2191} / \u{2193}", "확대 / 축소 (10% 단위)"),
-                ("Scroll", "포인터 위치에서 확대/축소"),
-                ("Drag", "이동"),
-                ("Space+Drag", "이동"),
-                ("Shift+Scroll", "좌우로 이동"),
-                ("Alt+Scroll", "상하로 이동"),
+                ("스크롤", "포인터 위치에서 확대/축소"),
+                ("드래그", "이동"),
+                ("Space+드래그", "이동"),
+                ("Shift+스크롤", "좌우로 이동"),
+                ("Alt+스크롤", "상하로 이동"),
             ],
         },
         HelpSection {
@@ -351,7 +351,7 @@ pub static KO: Strings = Strings {
                 ("V", "흑백으로 전환하거나 컬러로 되돌리기"),
                 ("Cmd+Shift+C", "이 사진의 조정 복사"),
                 ("Cmd+Shift+V", "선택한 사진에 조정 붙여넣기"),
-                ("Double-click slider", "슬라이더 초기화"),
+                ("슬라이더 더블 클릭", "슬라이더 초기화"),
                 (
                     "Delete",
                     if WEB {
@@ -365,7 +365,7 @@ pub static KO: Strings = Strings {
         HelpSection {
             title: "자르기",
             rows: &[
-                ("Enter or R", "자르기 적용"),
+                ("Enter 또는 R", "자르기 적용"),
                 ("Esc", "자르기 취소"),
                 ("Cmd+[ / Cmd+]", "-90 / +90도 회전"),
             ],
@@ -373,10 +373,10 @@ pub static KO: Strings = Strings {
         HelpSection {
             title: "대표 사진 선택",
             rows: &[
-                ("Click or drag the photo", "초점 영역 이동"),
-                ("Shift+scroll on the area", "초점 영역 크기 조절"),
-                ("Drag a tile", "초점 영역 이동"),
-                ("Cmd+Click / Shift+Click a tile", "타일 더 선택"),
+                ("사진 클릭 또는 드래그", "초점 영역 이동"),
+                ("영역에서 Shift+스크롤", "초점 영역 크기 조절"),
+                ("타일 드래그", "초점 영역 이동"),
+                ("타일 Cmd+클릭 / Shift+클릭", "타일 더 선택"),
             ],
         },
         HelpSection {
@@ -394,12 +394,12 @@ pub static KO: Strings = Strings {
             title: "브러시 마스크",
             rows: &[
                 ("K", "브러시 켜기 / 끄기. 선택한 브러시 마스크에 칠해요"),
-                ("Drag", "칠하기. 획마다 실행 취소 한 단계"),
-                ("Alt+Drag", "지우기"),
+                ("드래그", "칠하기. 획마다 실행 취소 한 단계"),
+                ("Alt+드래그", "지우기"),
                 ("[ / ]", "브러시 크기"),
-                ("Scroll", "브러시 크기"),
+                ("스크롤", "브러시 크기"),
                 ("Shift+[ / ]", "브러시 페더"),
-                ("Shift+Scroll", "브러시 페더"),
+                ("Shift+스크롤", "브러시 페더"),
                 ("Esc", "브러시 내려놓기"),
             ],
         },
@@ -408,9 +408,9 @@ pub static KO: Strings = Strings {
             rows: &[
                 ("Q", "잡티 제거 켜기 / 끄기"),
                 ("[ / ]", "브러시 크기"),
-                ("Scroll", "브러시 크기"),
+                ("스크롤", "브러시 크기"),
                 ("Shift+[ / ]", "브러시 페더"),
-                ("Shift+Scroll", "브러시 페더"),
+                ("Shift+스크롤", "브러시 페더"),
                 ("O", "잡티 표시 또는 숨기기"),
                 ("Shift+O", "다음 잡티 선택"),
                 ("Delete", "선택한 잡티 삭제"),
@@ -619,6 +619,8 @@ pub static KO: Strings = Strings {
         |n, total, e| format!("{n}/{total}장 이동 \u{2014} 마지막 오류: {e}")
     },
     delete_in_progress: "다른 삭제 작업이 아직 진행 중이에요\u{2026}",
+    delete_worker_failed: "삭제를 시작할 수 없어요.",
+    startup_failed: "LightPhotos를 시작할 수 없어요.",
     group_refused_loading: "이 폴더의 스택을 아직 불러오는 중이에요. 잠시 후 다시 시도하세요.",
     group_name_unsaveable: "여기 있는 파일 이름은 스택에 저장할 수 없어요.",
     delete_no_handle: |dir| format!("사진을 삭제할 수 없어요: {dir}의 디렉터리 핸들이 없어요"),
@@ -850,6 +852,7 @@ pub static KO: Strings = Strings {
     comfy_lost: "{where}의 ComfyUI가 응답하지 않아요. 다시 시작한 다음 {button}을(를) 눌러 주세요.",
     fill_partial: "변형 {of}개 중 {failed}개를 만들지 못했어요. {why}",
     fill_not_started: "채우기를 시작하지 못했어요. 다시 시도해 주세요.",
+    fill_discarded_folder_changed: "생성 중에 폴더가 바뀌어 채우기가 취소되었어요.",
     wb_no_image: "선택할 이미지가 불러와져 있지 않아요",
     wb_pick_brighter: "화이트 밸런스에는 더 밝고 채도가 낮은 픽셀을 선택하세요",
     open_folder_failed: |e| format!("폴더를 열 수 없어요: {e}"),
@@ -894,6 +897,8 @@ pub static KO: Strings = Strings {
     presets_locked:
         "저장된 파일을 읽을 수 없어서 사전 설정이 잠겼어요. 파일을 옮기거나 고친 뒤 다시 시작하세요.",
     presets_save_failed: |e| format!("사전 설정을 저장하지 못했어요: {e}"),
+    gpu_out_of_memory: "이 이미지는 이 GPU에 비해 너무 커서 표시할 수 없었어요.",
+    gpu_device_error: "그래픽 장치에 문제가 생겨 이 이미지를 표시할 수 없었어요.",
 
     menu: MenuStrings {
         about: "LightPhotos에 관하여",

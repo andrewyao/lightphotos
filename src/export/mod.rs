@@ -712,8 +712,13 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
         .clone()
         .resolve(&job.src)
         .map_err(|e| e.to_string())?;
-    // A fill whose patch file is gone or bad is left out, not an error.
-    let fills = job.fills.clone().resolve(&job.src);
+    // A listed fill whose patch is gone or bad fails the export, as an
+    // unreadable mask does, rather than silently exporting without the fill.
+    let fills = job
+        .fills
+        .clone()
+        .resolve(&job.src)
+        .map_err(|e| e.to_string())?;
     let file = export_file(
         &job.src,
         &job.adj,

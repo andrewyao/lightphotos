@@ -602,6 +602,17 @@ pub(super) fn segmented<T: Copy + PartialEq>(
                 font.clone(),
                 text,
             );
+            // egui draws no focus ring for a hand-painted widget, so a keyboard
+            // user tabbing the segments couldn't see which one has focus
+            // (UI-A-09).
+            if resp.has_focus() {
+                ui.painter().rect_stroke(
+                    rect,
+                    radius,
+                    egui::Stroke::new(font_size::px(ui.style(), 2.0), colors.cursor),
+                    egui::StrokeKind::Inside,
+                );
+            }
             if let Some(tip) = tip {
                 resp = resp.on_hover_text(tip);
             }
@@ -694,6 +705,49 @@ mod tests {
         assert!(
             in_section >= ROW_GAP - 0.5,
             "rows are {ROW_GAP}px apart, got {in_section}"
+        );
+    }
+
+    /// A segment that has keyboard focus must paint a ring in the cursor
+    /// color, so a keyboard user can see which one Tab landed on (UI-A-09).
+    #[test]
+    fn a_focused_segment_paints_a_cursor_ring() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, theme::Theme::Dark);
+        let cursor = theme::palette(theme::Theme::Dark).cursor;
+        let choices = [(0u8, "A", None), (1u8, "B", None)];
+        let run = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 100.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                let _ = segmented(ui, &choices, 0u8);
+            })
+        };
+        let rings = |out: egui::FullOutput| {
+            out.shapes
+                .into_iter()
+                .filter(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.stroke.color == cursor))
+                .count()
+        };
+        // Settle, then Tab to focus the first segment.
+        assert_eq!(rings(run(Vec::new())), 0, "no ring before focus");
+        let tab = egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = run(vec![tab]);
+        assert!(
+            rings(run(Vec::new())) >= 1,
+            "the focused segment has a ring"
         );
     }
 

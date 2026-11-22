@@ -28,17 +28,107 @@ use crate::decode::image_decode::{
 ///
 /// Only DNG exposes its raw IFD through rawler's `Decoder::ifd`, so every
 /// other TIFF-based format (ARW, NEF, CR2, ORF, PEF, SRW, RW2) is checked
-/// against the largest image IFD found by walking its TIFF structure.
-/// Containers that aren't TIFF (CR3, RAF) have no size tags to read here and
-/// pass unchecked.
+/// against the largest image IFD found by walking its TIFF structure. CR3 and
+/// RAF aren't TIFF and expose no raw IFD, so their own containers are read for
+/// the sensor size rawler allocates from ([`cr3_cmp1_size`], [`raf_full_size`]).
 pub fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<(), String> {
     if let Some(size) = raw_ifd_size(source) {
+        return check_ifd_size(&size);
+    }
+    if let Some(size) = cr3_cmp1_size(source.buf()) {
+        return check_ifd_size(&size);
+    }
+    if let Some(size) = raf_full_size(source.buf()) {
         return check_ifd_size(&size);
     }
     tiff_ifd_sizes(source)
         .iter()
         .filter(|size| size.width > 0 && size.height > 0)
         .try_for_each(check_ifd_size)
+}
+
+/// The sensor size a CR3 claims, from the `CMP1` box of its `CRAW` sample
+/// entry: `cr3.rs` sizes its `PixU16` (`cpp` 1, Bayer) from `cmp1.f_width *
+/// f_height`, so a crafted box reaches the same unbounded allocation the TIFF
+/// check guards against. `Bmff::new_buf` parses only the small container
+/// boxes and skips the raw `mdat`, so it is cheap and never does that
+/// allocation itself. `None` when the file isn't a CR3 or carries no `CMP1`,
+/// in which case rawler won't reach that allocation either.
+fn cr3_cmp1_size(buf: &[u8]) -> Option<RawIfdSize> {
+    if buf.get(4..8)? != b"ftyp" {
+        return None;
+    }
+    // A crafted box can drive rawler's `BoxHeader::make_view` to index out of
+    // range; the same parse runs inside `rawler::decode`, but catch it here so
+    // the pre-check itself can't panic (an abort on wasm32).
+    let parse = std::panic::AssertUnwindSafe(|| {
+        let bmff = rawler::formats::bmff::Bmff::new_buf(buf).ok()?;
+        let cmp1 = bmff
+            .filebox
+            .moov
+            .traks
+            .iter()
+            .find_map(|trak| trak.mdia.minf.stbl.stsd.craw.as_ref()?.cmp1.as_ref())?;
+        Some((cmp1.f_width, cmp1.f_height))
+    });
+    let (f_width, f_height) = std::panic::catch_unwind(parse).ok().flatten()?;
+    let width = usize::try_from(f_width).ok()?;
+    let height = usize::try_from(f_height).ok()?;
+    Some(RawIfdSize {
+        width,
+        height,
+        cpp: 1,
+        row: width,
+        rows: height,
+    })
+}
+
+/// The sensor size a Fujifilm RAF claims, from the `RawImageFullSize` tag
+/// (`0x0100`) of the metadata directory at offset 92, the same directory
+/// [`fuji_dynamic_range_gain`] walks. rawler sizes its Bayer/X-Trans `PixU16`
+/// (`cpp` 1) from these dimensions, so a crafted header reaches an unbounded
+/// allocation. The tag holds two big-endian `u16`s, height then width. `None`
+/// when the file isn't a RAF or the tag is absent or truncated.
+fn raf_full_size(file: &[u8]) -> Option<RawIfdSize> {
+    const MAX_ENTRIES: u32 = 4000;
+    let be_u16 = |at: usize| {
+        Some(u16::from_be_bytes(
+            file.get(at..at.checked_add(2)?)?.try_into().ok()?,
+        ))
+    };
+    let be_u32 = |at: usize| {
+        Some(u32::from_be_bytes(
+            file.get(at..at.checked_add(4)?)?.try_into().ok()?,
+        ))
+    };
+
+    if file.get(..16)? != b"FUJIFILMCCD-RAW " {
+        return None;
+    }
+    let dir = usize::try_from(be_u32(92)?).ok()?;
+    let count = be_u32(dir)?;
+    if count > MAX_ENTRIES {
+        return None;
+    }
+    let mut at = dir.checked_add(4)?;
+    for _ in 0..count {
+        let tag = be_u16(at)?;
+        let len = usize::from(be_u16(at.checked_add(2)?)?);
+        let data = at.checked_add(4)?;
+        if tag == 0x0100 && len >= 4 {
+            let height = usize::from(be_u16(data)?);
+            let width = usize::from(be_u16(data.checked_add(2)?)?);
+            return Some(RawIfdSize {
+                width,
+                height,
+                cpp: 1,
+                row: width,
+                rows: height,
+            });
+        }
+        at = data.checked_add(len)?;
+    }
+    None
 }
 
 fn check_ifd_size(size: &RawIfdSize) -> Result<(), String> {
@@ -336,6 +426,35 @@ pub fn decode_raw_nonmac_from_shared_vec(
     decode_raw_nonmac_from_source(source, max_dim, intent)
 }
 
+/// Most memory the full RAW develop holds at once, from the sensor size. The
+/// vendored `RawDevelop::develop_intermediate` clones the image and copies it
+/// into its own layout, so a full-size f32 RGB buffer is live about three
+/// times, beside rawler's u16 sensor buffer and the f16 output: roughly 48
+/// bytes a pixel at the peak. Only wasm32 reads this (see [`decode_budget`]);
+/// `develop_file_estimate` is the pre-decode guess from the file size.
+///
+/// [`decode_budget`]: crate::decode::decode_budget
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(dead_code, reason = "only wasm32 has a decode budget")
+)]
+fn develop_scratch_estimate(raw: &rawler::RawImage) -> usize {
+    raw.width.saturating_mul(raw.height).saturating_mul(48)
+}
+
+/// A pre-decode guess at [`develop_scratch_estimate`] from the file size,
+/// before the sensor size is known: rawler's u16 sensor buffer (2 bytes a
+/// pixel, cpp 1 for a Bayer file) plus the develop scratch. A compressed RAW
+/// takes a byte or more a pixel, so this rarely asks for too little; the grow
+/// after decode corrects it when it does.
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(dead_code, reason = "only wasm32 has a decode budget")
+)]
+fn develop_file_estimate(file_len: usize) -> usize {
+    file_len.saturating_mul(20)
+}
+
 #[hotpath::measure]
 fn decode_raw_nonmac_from_source(
     source: rawler::rawsource::RawSource,
@@ -344,7 +463,20 @@ fn decode_raw_nonmac_from_source(
 ) -> Result<DecodedImage, String> {
     check_rawler_size_limit(&source)?;
     let params = rawler::decoders::RawDecodeParams::default();
+
+    // On wasm32 every decode thread shares one 4 GB heap; a full-size develop
+    // needs most of a gigabyte of scratch, so take a budget grant before
+    // allocating, as `raw_preview::decode_raw_preview` does. Sized from the
+    // file first (the sensor size is unknown until rawler has decoded), then
+    // grown once `raw` is known. Held until this decode returns.
+    #[cfg(target_arch = "wasm32")]
+    let grant = crate::decode::decode_budget::acquire(develop_file_estimate(source.len()));
+
     let mut raw = rawler::decode(&source, &params).map_err(|e| e.to_string())?;
+
+    #[cfg(target_arch = "wasm32")]
+    let _grant = grant.grow(develop_scratch_estimate(&raw));
+
     normalize_linear_levels(&mut raw)?;
     apply_fuji_dynamic_range_gain(&mut raw, source.buf());
     let orientation = rawler::get_decoder(&source)
@@ -848,6 +980,46 @@ mod tests {
     fn bytes_that_are_not_a_tiff_pass_the_size_check_untouched() {
         assert!(size_check(&[]).is_ok());
         assert!(size_check(b"FUJIFILMCCD-RAW 0201").is_ok());
+    }
+
+    /// A minimal RAF: the 16-byte magic, a metadata-directory pointer at
+    /// offset 92, and a one-entry `RawImageFullSize` (tag 0x0100) directory
+    /// holding `height` then `width` as big-endian `u16`s, as rawler reads it.
+    fn raf(width: u16, height: u16) -> Vec<u8> {
+        const DIR: usize = 100;
+        let mut out = vec![0u8; DIR];
+        out[..16].copy_from_slice(b"FUJIFILMCCD-RAW ");
+        out[92..96].copy_from_slice(&(DIR as u32).to_be_bytes());
+        out.extend(1u32.to_be_bytes()); // one entry
+        out.extend(0x0100u16.to_be_bytes()); // RawImageFullSize
+        out.extend(4u16.to_be_bytes()); // length
+        out.extend(height.to_be_bytes());
+        out.extend(width.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn a_raf_claiming_a_huge_image_is_refused_before_rawler_allocates() {
+        assert!(size_check(&raf(60_000, 60_000)).is_err());
+        assert!(size_check(&raf(6_000, 4_000)).is_ok());
+    }
+
+    #[test]
+    fn a_truncated_raf_directory_is_not_a_panic_and_passes() {
+        // The pointer at 92 lands past the end, so no size is read.
+        let mut bytes = raf(6_000, 4_000);
+        bytes.truncate(96);
+        assert!(size_check(&bytes).is_ok());
+    }
+
+    #[test]
+    fn garbage_after_an_ftyp_marker_does_not_panic_the_cr3_size_read() {
+        // A crafted BMFF can drive rawler's box parser to index out of range;
+        // the pre-check must turn that into "no size read", not an abort.
+        let mut bytes = vec![0u8; 64];
+        bytes[4..8].copy_from_slice(b"ftyp");
+        bytes[0..4].copy_from_slice(&0xffff_ffffu32.to_be_bytes());
+        assert!(size_check(&bytes).is_ok());
     }
 
     /// A display develop, which may bin.

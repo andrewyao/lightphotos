@@ -191,10 +191,19 @@ fn system_tags() -> Vec<String> {
 
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
 fn system_tags() -> Vec<String> {
+    posix_tags(|k| std::env::var(k).ok())
+}
+
+/// POSIX locale precedence: `LC_ALL` overrides everything, then `LC_MESSAGES`,
+/// then `LANG`. Only the first non-empty one counts, so `LC_ALL=C` (the C
+/// locale, which is English) is not quietly overridden by a `LANG` that
+/// happens to be set, as it was when all three were tried in turn.
+#[cfg(any(test, all(not(target_arch = "wasm32"), not(target_os = "macos"))))]
+fn posix_tags(var: impl Fn(&str) -> Option<String>) -> Vec<String> {
     ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .iter()
-        .filter_map(|k| std::env::var(k).ok())
-        .filter(|v| !v.is_empty())
+        .into_iter()
+        .find_map(|k| var(k).filter(|v| !v.is_empty()))
+        .into_iter()
         .collect()
 }
 
@@ -682,6 +691,10 @@ pub struct Strings {
     pub deleted: fn(usize) -> String,
     pub deleted_partial: fn(usize, usize, &str) -> String,
     pub delete_in_progress: &'static str,
+    pub delete_worker_failed: &'static str,
+    /// Dialog heading when startup leaves no window to show (window or GPU
+    /// setup failed). Shown only on native, which is why it is not web-gated.
+    pub startup_failed: &'static str,
     pub group_refused_loading: &'static str,
     pub group_name_unsaveable: &'static str,
     #[cfg_attr(
@@ -963,6 +976,7 @@ pub struct Strings {
     pub comfy_lost: &'static str,
     pub fill_partial: &'static str,
     pub fill_not_started: &'static str,
+    pub fill_discarded_folder_changed: &'static str,
     pub wb_no_image: &'static str,
     pub wb_pick_brighter: &'static str,
     pub open_folder_failed: fn(&str) -> String,
@@ -1052,6 +1066,12 @@ pub struct Strings {
     pub presets_load_failed: fn(&str) -> String,
     pub presets_locked: &'static str,
     pub presets_save_failed: fn(&str) -> String,
+    /// A GPU out-of-memory fault while rendering: the image was too large for
+    /// this GPU, so the renderer dropped it (REND-01).
+    pub gpu_out_of_memory: &'static str,
+    /// A GPU validation, internal or device-lost fault while rendering: the
+    /// graphics device had a problem, so the renderer dropped the image.
+    pub gpu_device_error: &'static str,
 
     // Native menu bar.
     pub menu: MenuStrings,
@@ -1331,6 +1351,36 @@ mod tests {
         ] {
             assert_eq!(lang_from_query(search), want, "{search:?}");
         }
+    }
+
+    /// POSIX says `LC_ALL` overrides the rest, then `LC_MESSAGES`, then `LANG`,
+    /// and only the first non-empty one counts. The old code returned all three
+    /// and picked the first that parsed, so `LC_ALL=C LANG=de` started in German
+    /// (finding I18N-01).
+    #[test]
+    fn posix_locale_precedence() {
+        fn lang_for(vars: &[(&str, &str)]) -> Option<Lang> {
+            let tags = posix_tags(|k| {
+                vars.iter()
+                    .find(|(name, _)| *name == k)
+                    .map(|(_, v)| (*v).to_string())
+            });
+            tags.iter().find_map(|t| Lang::from_tag(t))
+        }
+        // LC_ALL=C is the C locale (English); it is not overridden by LANG.
+        assert_eq!(lang_for(&[("LC_ALL", "C"), ("LANG", "de_DE.UTF-8")]), None);
+        // LC_MESSAGES outranks LANG.
+        assert_eq!(
+            lang_for(&[("LC_MESSAGES", "fr_FR.UTF-8"), ("LANG", "de_DE.UTF-8")]),
+            Some(Lang::Fr)
+        );
+        // An empty variable is skipped in favour of the next.
+        assert_eq!(
+            lang_for(&[("LC_ALL", ""), ("LANG", "de_DE.UTF-8")]),
+            Some(Lang::De)
+        );
+        assert_eq!(lang_for(&[("LANG", "ja_JP.UTF-8")]), Some(Lang::Ja));
+        assert_eq!(lang_for(&[]), None);
     }
 
     #[test]
@@ -1684,6 +1734,59 @@ mod tests {
                     tr_section.rows.len(),
                     "{lang:?} section {:?}",
                     en.title
+                );
+            }
+        }
+    }
+
+    /// A tip that names a Cmd shortcut must be shown through `keys()`, which
+    /// rewrites "Cmd+" to "Ctrl+" off the Mac. Two sites skipped it, so
+    /// Windows, Linux and non-Mac browsers read a key that isn't there
+    /// (finding I18N-02). This fails on the pre-fix, unwrapped call sites.
+    #[test]
+    fn shortcut_tips_are_shown_through_keys() {
+        assert!(EN.export_jpg_tip.contains("Cmd+"));
+        for (file, src) in [
+            ("ui/toolbar.rs", include_str!("ui/toolbar.rs")),
+            ("ui/tour.rs", include_str!("ui/tour.rs")),
+        ] {
+            for (i, line) in src.lines().enumerate() {
+                let unwrapped = line.contains("on_hover_text(t.export_jpg_tip")
+                    || line.contains(".label(body)");
+                assert!(
+                    !unwrapped,
+                    "{file}:{} shows a shortcut string without i18n::keys()",
+                    i + 1
+                );
+            }
+        }
+    }
+
+    /// The help's key column mixes literal key names (Enter, Shift, Cmd) with
+    /// prose (the connective "or", "Click", "Drag", "Scroll a tile"). The key
+    /// names stay English; the prose must be translated. This fails if a
+    /// non-English key cell still holds an English prose word as a whole token,
+    /// which is how 23 rows shipped half-English (finding I18N-03).
+    #[test]
+    fn non_english_help_keys_translate_their_prose() {
+        // Verbs and connectives that every language translates (no English/
+        // French cognates, unlike "photo" or "zone"), so each English prose row
+        // trips at least one.
+        const PROSE: &[&str] = &[
+            "or", "Click", "click", "Drag", "drag", "Scroll", "scroll", "slider", "arrows",
+        ];
+        for lang in Lang::ALL {
+            if lang == Lang::En {
+                continue;
+            }
+            for (keys, _) in catalog(lang).help.iter().flat_map(|s| s.rows) {
+                let offenders: Vec<&str> = keys
+                    .split([' ', '+', '/', '-'])
+                    .filter(|tok| PROSE.contains(tok))
+                    .collect();
+                assert!(
+                    offenders.is_empty(),
+                    "{lang:?} key cell {keys:?} keeps English prose {offenders:?}"
                 );
             }
         }

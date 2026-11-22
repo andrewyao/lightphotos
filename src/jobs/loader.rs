@@ -134,13 +134,20 @@ struct BakeJob {
 impl BakeJob {
     fn run(self) -> BakedThumb {
         // An empty bake is what `land_bake` counts as failed, so the
-        // thumbnail is never cached without a mask its signature claims.
-        let (width, height, rgba) = match self.masks.resolve(&self.path) {
-            Ok(masks) => crate::develop::image_ops::bake_edited(
+        // thumbnail is never cached without a mask or fill its signature
+        // claims. A listed fill with no readable patch fails the bake like an
+        // unreadable mask, so the thumbnail re-bakes once the patch is back.
+        let resolved = self.masks.resolve(&self.path).map_err(|e| e.to_string());
+        let resolved = resolved.and_then(|masks| {
+            let fills = self.fills.resolve(&self.path).map_err(|e| e.to_string())?;
+            Ok((masks, fills))
+        });
+        let (width, height, rgba) = match resolved {
+            Ok((masks, fills)) => crate::develop::image_ops::bake_edited(
                 &self.img,
                 &self.adj,
                 crate::develop::image_ops::Retouch {
-                    fills: &self.fills.resolve(&self.path),
+                    fills: &fills,
                     touchups: &self.touchups,
                 },
                 &masks,
@@ -1579,6 +1586,23 @@ impl Loader {
         q.full.retain(|job| !matches!(job, Job::Full(..)));
     }
 
+    /// Forgets which thumbnails and thumbnail bakes failed, so a folder
+    /// (re)open retries them. A thumbnail fails for reasons that pass: a file
+    /// still being copied from a card, a network volume that blipped, or a
+    /// file since replaced by a good copy. Without this a single failure
+    /// stuck until restart, and `thumb_failed` grew for the life of the
+    /// process. Bumping the epoch tells callers to ask again. The cached
+    /// images stay: the on-disk cache is keyed by mtime and length, so a
+    /// replaced file still regenerates once its in-memory entry is evicted.
+    pub fn forget_thumb_failures(&mut self) {
+        if self.thumb_failed.is_empty() && self.bake_failed.is_empty() {
+            return;
+        }
+        self.thumb_failed.clear();
+        self.bake_failed.clear();
+        self.thumb_epoch = next_thumb_epoch();
+    }
+
     /// The Loupe's decode era, which a browser Loupe decode is stamped with
     /// so `App` can drop one that lands after `forget_loupe_decodes`.
     #[cfg(target_arch = "wasm32")]
@@ -2985,6 +3009,29 @@ mod tests {
         loader.request_preview(path("preview"), 2560);
         assert!(loader.has_pending_image(), "a new request queues afresh");
     }
+
+    /// A thumbnail that failed once (a file mid-copy, a network blip, a file
+    /// since replaced) is tried again when the folder is (re)opened, and the
+    /// epoch bump tells callers to ask.
+    #[test]
+    fn a_folder_change_lets_a_failed_thumbnail_be_retried() {
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
+        loader.mark_thumb_failed_external(path("gone"), 192);
+        assert!(loader.thumb_failed(&path("gone"), 192));
+        let before = loader.thumb_epoch();
+
+        loader.forget_thumb_failures();
+        assert!(
+            !loader.thumb_failed(&path("gone"), 192),
+            "a folder (re)open must retry a once-failed thumbnail"
+        );
+        assert_ne!(
+            loader.thumb_epoch(),
+            before,
+            "callers must be told the failed set changed"
+        );
+    }
+
     /// Caps of `previews` and `fulls` entries and `bytes` bytes each tier.
     fn byte_capped(bytes: usize) -> Loader {
         let limits = CacheLimits {

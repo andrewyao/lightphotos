@@ -94,27 +94,6 @@ impl Mask {
         })
     }
 
-    /// This mask rotated or flipped by an EXIF orientation (`1..=8`) so it lines
-    /// up with the decoded image.
-    #[cfg(target_os = "macos")]
-    fn oriented(self, orientation: u8) -> Mask {
-        if orientation <= 1 {
-            return self;
-        }
-        let (width, height, alpha) = crate::develop::image_ops::orient_mask(
-            &self.alpha,
-            self.width,
-            self.height,
-            orientation,
-        );
-        Mask::new_tracked(MaskFields {
-            width,
-            height,
-            alpha,
-            source: self.source,
-        })
-    }
-
     /// Mean coverage, 0.0..=1.0.
     // Only `seg_probe` reports this. The app uses `solid_coverage`.
     pub fn coverage(&self) -> f32 {
@@ -148,7 +127,8 @@ pub const EMPTY_COVERAGE: f32 = 0.01;
 
 /// The subject mask for the photo at `path`, in display orientation. An error
 /// means no selection is available, which is normal for photos with no subject.
-/// Vision ignores EXIF orientation, so we rotate the mask ourselves.
+/// Given a file, Vision applies its EXIF orientation and hands back an upright
+/// mask (see [`vision`]), so this does not rotate it.
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
 pub fn segment(path: &Path) -> Result<Mask, String> {
@@ -173,9 +153,9 @@ pub fn segment_subject(path: &Path) -> Result<Option<Mask>, String> {
             None => return Ok(None),
         },
     };
-    Ok(Some(mask.oriented(
-        crate::decode::image_decode::orientation_of(path),
-    )))
+    // Vision read the file's EXIF orientation and already returned the mask
+    // upright, so it needs no further rotation.
+    Ok(Some(mask))
 }
 
 /// Person segmentation at Accurate quality. It runs on demand for one photo,
@@ -304,11 +284,66 @@ unsafe fn copy_f32_rows(base: *const f32, width: usize, height: usize, stride: u
 mod tests {
     use super::*;
     use crate::scoring::test_support::write_jpeg;
+    #[cfg(target_os = "macos")]
+    use crate::scoring::test_support::write_jpeg_oriented;
+
+    // SCORE-01 regression. Vision reads a file's EXIF orientation and returns
+    // its mask upright: a landscape-stored shot tagged orientation 6 displays
+    // portrait, and Vision's mask is portrait too. `segment_subject` used to
+    // call `.oriented(6)` on top of that, rotating the already-upright mask a
+    // second time back to landscape. The fix drops that call, so the mask stays
+    // taller than it is wide.
+    //
+    // A standalone Swift experiment confirmed the premise directly: the same
+    // 400x200 pixels gave a 2016x1512 person mask at orientation 1 and a
+    // 1512x2016 mask at orientation 6. This test enforces the upright result
+    // through the real Rust seam on any runtime where Vision's segmentation
+    // models load. Vision cannot run outside an app bundle (the models fail to
+    // load for a bare test binary), so there it reports no subject; the test
+    // then only checks that nothing came back wrongly rotated.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_exif_rotated_subject_mask_stays_upright() {
+        // Landscape-stored pixels, wider than tall, tagged orientation 6 so the
+        // display frame is portrait (taller than wide). A bright off-centre
+        // blob gives Vision something to lift.
+        let (w, h) = (240u32, 160u32);
+        let mut rgba = vec![110u8; (w * h * 4) as usize];
+        for y in 40..130u32 {
+            for x in 24..110u32 {
+                let i = ((y * w + x) * 4) as usize;
+                rgba[i] = 250;
+                rgba[i + 1] = 242;
+                rgba[i + 2] = 235;
+                rgba[i + 3] = 255;
+            }
+        }
+        let path = write_jpeg_oriented("score01_orientation6.jpg", w, h, &rgba, 6);
+        assert_eq!(
+            crate::decode::image_decode::orientation_of(&path),
+            6,
+            "the fixture must carry EXIF orientation 6"
+        );
+
+        match segment(&path) {
+            Ok(mask) => assert!(
+                mask.height > mask.width,
+                "an orientation-6 photo displays portrait, so its upright mask \
+                 must be taller than wide, got {}x{}",
+                mask.width,
+                mask.height
+            ),
+            // Vision's segmentation models do not load for a bare test binary,
+            // so "no subject" is expected off an app bundle. A real failure
+            // still says something.
+            Err(e) => assert!(!e.is_empty(), "an error must say something"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
 
     // 997 and 331 are deliberately unrelated: see the matching test in
-    // `image_decode`. `resized` and `oriented` both rebuild a `Mask` through
-    // `MaskFields`, and both swap the pair, so a silent transposition in
-    // either constructor fails here.
+    // `image_decode`. `resized` rebuilds a `Mask` through `MaskFields` and
+    // swaps the pair, so a silent transposition in the constructor fails here.
     #[test]
     fn width_and_height_land_in_their_own_fields() {
         let tall = Mask::new_tracked(MaskFields {

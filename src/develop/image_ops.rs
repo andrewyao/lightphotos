@@ -366,7 +366,12 @@ fn bake_with_copy<S: Sample>(
     half_copy: Option<bool>,
 ) -> (u32, u32, Vec<S>) {
     let (w, h) = (img.width, img.height);
-    let ca = adj.chromatic_aberration.unwrap_or_default();
+    // The CPU bake reads the scales straight from the sidecar, so clamp an
+    // inf/NaN/huge hand-edited value here as the GPU path's `clamped()` does.
+    let ca = adj
+        .chromatic_aberration
+        .map(develop::CaScale::clamped)
+        .unwrap_or_default();
     let sharpen = develop::Sharpen::new(&adj.sharpening, w as f32, h as f32);
     let Some(src) = Source::new(img, ca) else {
         return (0, 0, Vec::new());
@@ -752,35 +757,6 @@ pub(crate) fn resample_bilinear_u8(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u3
     out
 }
 
-/// Apply an EXIF orientation (`1..=8`) to a packed one-channel mask. Returns
-/// `(width, height, buffer)`. Same mapping as `image_decode`'s
-/// `apply_exif_orientation`.
-#[cfg(any(target_os = "macos", test))]
-#[hotpath::measure]
-pub(crate) fn orient_mask(src: &[u8], w: u32, h: u32, orientation: u8) -> (u32, u32, Vec<u8>) {
-    if orientation <= 1 || src.len() < (w * h) as usize {
-        return (w, h, src.to_vec());
-    }
-    let swaps = matches!(orientation, 5..=8);
-    let (nw, nh) = if swaps { (h, w) } else { (w, h) };
-    let mut dst = vec![0u8; (nw * nh) as usize];
-    for yo in 0..nh {
-        for xo in 0..nw {
-            let (xs, ys) = match orientation {
-                2 => (w - 1 - xo, yo),
-                3 => (w - 1 - xo, h - 1 - yo),
-                4 => (xo, h - 1 - yo),
-                5 => (yo, xo),
-                6 => (yo, h - 1 - xo),
-                7 => (w - 1 - yo, h - 1 - xo),
-                _ => (w - 1 - yo, xo),
-            };
-            dst[(yo * nw + xo) as usize] = src[(ys * w + xs) as usize];
-        }
-    }
-    (nw, nh, dst)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,17 +802,35 @@ mod tests {
     }
 
     /// The scales come from the sidecar, and serde reads `1e39` as an f32
-    /// infinity. The neighbor index must not overflow on either.
+    /// infinity. The neighbor index must not overflow on either, and an
+    /// infinite scale must clamp to the bound rather than bake NaN (which
+    /// encodes to 0, an all-black export).
     #[test]
     fn a_sidecar_with_runaway_scales_bakes_without_overflow() {
-        let img = crate::develop::chroma::fixture::photo(9, 7, develop::CaScale::default());
+        let img = crate::develop::chroma::fixture::photo(64, 48, develop::CaScale::default());
+        // 1e39 reads as +inf and clamps to +MAX_SCALE, -1e39 to -MAX_SCALE.
+        let clamped = Adjustments {
+            chromatic_aberration: Some(develop::CaScale {
+                red: 0.005,
+                blue: -0.005,
+            }),
+            ..Adjustments::default()
+        };
+        let want = bake_edited(&img, &clamped, Retouch::NONE, &MaskSet::default(), 0).2;
         for json in [
             r#"{"chromatic_aberration": {"red": 1e30, "blue": -1e30}}"#,
             r#"{"chromatic_aberration": {"red": 1e39, "blue": -1e39}}"#,
         ] {
             let adj: Adjustments = serde_json::from_str(json).unwrap();
             let (w, h, out) = bake_edited(&img, &adj, Retouch::NONE, &MaskSet::default(), 0);
-            assert_eq!((w, h, out.len()), (9, 7, 9 * 7 * 4));
+            assert_eq!((w, h, out.len()), (64, 48, 64 * 48 * 4));
+            // A finite frame, not NaN baked to an all-black export.
+            assert!(out.iter().any(|&b| b != 0), "the bake isn't all black");
+            // An infinite scale clamps to the same bake as an explicit
+            // ±MAX_SCALE, not NaN garbage.
+            if json.contains("1e39") {
+                assert_eq!(out, want, "an infinite scale clamps to the bound");
+            }
         }
     }
 
@@ -1395,11 +1389,12 @@ mod tests {
         );
     }
 
-    /// A fill whose patch file is gone or damaged is left out and the bake
-    /// goes on, where a missing mask coverage fails it.
+    /// DEV-B-02: a listed fill whose patch file is gone or damaged fails the
+    /// resolve, as a missing mask coverage does, so the bake is never cached
+    /// under a signature that counts a fill it couldn't draw.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn a_bake_goes_on_without_a_patch_file_it_cannot_read() {
+    fn a_listed_fill_with_no_readable_patch_fails_the_resolve() {
         use develop::fill::{Fill, FillInput, Patch};
         let dir =
             std::env::temp_dir().join(format!("lightphotos-bake-fill-{}", std::process::id()));
@@ -1409,27 +1404,31 @@ mod tests {
         let patch = Patch::new(1, 1, vec![200, 40, 30, 255]).unwrap();
         let fill = Fill::new([0.0, 0.0, 1.0, 1.0], vec![patch.id()], String::new()).unwrap();
         let img = flat(PixelFormat::Srgb8, [128; 3]);
-        let bake = || {
-            let fills = FillInput::OnDisk(vec![fill.clone()]).resolve(&photo);
-            let out = bake_edited(
-                &img,
-                &Adjustments::default(),
-                with_fills(&fills),
-                &MaskSet::default(),
-                0,
-            );
-            assert_eq!((out.0, out.1), (16, 16));
-            (fills.len(), rgb_at(&out.2, 8, 8))
-        };
-        assert_eq!(bake(), (0, [128; 3]), "missing");
+        let resolve = || FillInput::OnDisk(vec![fill.clone()]).resolve(&photo);
+
+        assert!(
+            resolve().is_err(),
+            "a missing patch fails, it is not dropped"
+        );
+
         develop::fill::write(&photo, &patch).unwrap();
-        assert_eq!(bake(), (1, RED), "present");
+        let fills = resolve().expect("present patch resolves");
+        let out = bake_edited(
+            &img,
+            &Adjustments::default(),
+            with_fills(&fills),
+            &MaskSet::default(),
+            0,
+        );
+        assert_eq!((out.0, out.1), (16, 16));
+        assert_eq!((fills.len(), rgb_at(&out.2, 8, 8)), (1, RED), "present");
+
         let file = dir
             .join(".lightphotos/fills")
             .join(format!("a.jpg.{}.png", patch.id()));
         let bytes = std::fs::read(&file).unwrap();
         std::fs::write(&file, &bytes[..bytes.len() / 2]).unwrap();
-        assert_eq!(bake(), (0, [128; 3]), "truncated");
+        assert!(resolve().is_err(), "a truncated patch fails too");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1646,6 +1645,40 @@ mod tests {
     }
 
     #[test]
+    fn a_hostile_sidecar_touchup_does_not_bake_the_photo_black() {
+        // A sidecar is a file anyone can edit. serde_json reads 1e39 as an f32
+        // infinity; an infinite radius makes `apply_touchups`' mask NaN at
+        // every pixel, which bakes to black (S::encode(NaN) is 0). The record
+        // loader sanitizes each spot, so the hostile spot is dropped and the
+        // photo bakes unchanged. Baking `rec.touchups` is the same slice the
+        // Loupe, export, thumbnail and score paths render.
+        let gray = 128u8;
+        let img = DecodedImage::new_tracked(DecodedImageFields {
+            width: 8,
+            height: 8,
+            rgba: [gray, gray, gray, 255].repeat(8 * 8),
+            pixel_format: PixelFormat::Srgb8,
+        });
+        let bad = r#"{"center":[0.5,0.5],"radius":1e39,"source":[0.5,0.5],"feather":0.5,"delta":[0,0,0],"opacity":1.0}"#;
+        let rec: crate::sidecar::ImageRecord =
+            serde_json::from_str(&format!(r#"{{"touchups":[{bad}]}}"#)).unwrap();
+        let (_, _, out) = bake_edited(
+            &img,
+            &Adjustments::default(),
+            Retouch {
+                touchups: &rec.touchups,
+                ..Retouch::NONE
+            },
+            &MaskSet::default(),
+            0,
+        );
+        assert!(
+            out.chunks_exact(4).all(|p| p[0] == gray),
+            "a sanitized hostile spot leaves the photo its gray, not black"
+        );
+    }
+
+    #[test]
     fn a_spot_saved_without_opacity_reads_as_opaque_and_a_partial_one_hashes_apart() {
         let json =
             r#"{"center":[0.5,0.5],"radius":0.1,"source":[0.2,0.2],"feather":0.5,"delta":[0,0,0]}"#;
@@ -1778,37 +1811,6 @@ mod tests {
             (center as i32 - 139).abs() <= 1,
             "center of the field should sit near the mean of the four corners, got {center}"
         );
-    }
-
-    #[test]
-    fn orienting_a_mask_matches_the_exif_table() {
-        let src = vec![1, 2, 3, 4, 5, 6];
-
-        assert_eq!(orient_mask(&src, 2, 3, 1), (2, 3, src.clone()));
-        assert_eq!(
-            orient_mask(&src, 2, 3, 3),
-            (2, 3, vec![6, 5, 4, 3, 2, 1]),
-            "180° rotation reverses the buffer"
-        );
-        assert_eq!(
-            orient_mask(&src, 2, 3, 2),
-            (2, 3, vec![2, 1, 4, 3, 6, 5]),
-            "horizontal mirror reverses each row"
-        );
-
-        let (w, h, rot) = orient_mask(&src, 2, 3, 6);
-        assert_eq!((w, h), (3, 2));
-        assert_eq!(rot, vec![5, 3, 1, 6, 4, 2]);
-    }
-
-    #[test]
-    fn orienting_a_mask_is_reversible_through_its_inverse() {
-        let src: Vec<u8> = (0..12).collect();
-        // Orientations 6 and 8 undo each other.
-        let (w, h, once) = orient_mask(&src, 4, 3, 6);
-        let (w2, h2, back) = orient_mask(&once, w, h, 8);
-        assert_eq!((w2, h2), (4, 3));
-        assert_eq!(back, src);
     }
 
     #[test]

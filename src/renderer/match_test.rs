@@ -1023,6 +1023,65 @@ fn loupe_fills_match_cpu_bake_on_half_float_photos() {
     report(diffs);
 }
 
+/// `raw_shader.wgsl` differs from `shader.wgsl` by the sRGB working gamma and
+/// the `apply_raw_preview_boost` knots, which feed tone, curve, the mixer and
+/// grade. The half-float test above only exercises identity and fills on that
+/// path, so a RAW-only regression in any of those stages would pass CI. This
+/// drives a representative slice of the tonal and colour matrix on a
+/// `LinearF16` ramp whose values run below 0 and above 1, as demosaiced RAW
+/// data does.
+#[test]
+fn loupe_raw_shader_matches_cpu_bake_on_tonal_edits() {
+    let Some(mut r) = headless(W, H) else {
+        return;
+    };
+    // A ramp pushed out to roughly -0.1 .. 1.25 so the RAW path's boost and
+    // gamma are exercised on out-of-range linear light, not just 0..1.
+    let mut rgba = Vec::with_capacity((W * H * 8) as usize);
+    for y in 0..H {
+        for x in 0..W {
+            let signed = ramp(x, y).map(|v| v * 1.35 - 0.1);
+            for c in signed.into_iter().chain([1.0]) {
+                rgba.extend(half::f16::from_f32(c).to_le_bytes());
+            }
+        }
+    }
+    let fixture = Fixture {
+        name: "raw",
+        img: DecodedImage::new_tracked(DecodedImageFields {
+            width: W,
+            height: H,
+            rgba,
+            pixel_format: PixelFormat::LinearF16,
+        }),
+    };
+    let wanted = |name: &str| {
+        matches!(
+            name,
+            "identity"
+                | "curve_rgb"
+                | "grade_all"
+                | "mixer+ca"
+                | "everything_color"
+                | "everything_mono"
+                | "mask_linear"
+        ) || name.starts_with("exposure=")
+            || name.starts_with("contrast=")
+    };
+    let cases: Vec<Case> = cases().into_iter().filter(|c| wanted(&c.name)).collect();
+    assert_eq!(
+        cases.len(),
+        11,
+        "case names drifted: {:?}",
+        cases.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+    let diffs = cases
+        .iter()
+        .map(|c| measure(&mut r, &fixture, c, BaseProbe::Off))
+        .collect();
+    report(diffs);
+}
+
 /// The GPU base layer, read through `baseAt`, against `BaseLayer`, read
 /// through `at_uv`, for every field and the 8x detail view.
 #[test]

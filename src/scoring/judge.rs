@@ -37,7 +37,7 @@ pub fn score_file(
         ..rec.adjustments
     };
     let masks = rec.mask_set(path)?;
-    let fills = crate::develop::fill::FillSet::read(path, &rec.fills);
+    let fills = crate::develop::fill::FillSet::read(path, &rec.fills).map_err(|e| e.to_string())?;
     let (w, h, rgba) = crate::develop::image_ops::bake_edited(
         &img,
         &adj,

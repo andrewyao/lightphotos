@@ -259,3 +259,18 @@ pub(crate) fn one_photo(tag: &str) -> (App, PathBuf, PathBuf) {
     app.shown = Shown::Preview(photo.clone(), 1024, 1024);
     (app, dir, photo)
 }
+
+/// A one-photo app with a radial mask of feather `feather` added and picked,
+/// its Develop panel on the Masks tab, for a UI test of that panel.
+pub(crate) fn one_photo_with_radial_mask(tag: &str, feather: f32) -> (App, PathBuf, PathBuf) {
+    use crate::develop::mask::{Mask, MaskShape};
+    let (mut app, dir, photo) = one_photo(tag);
+    app.mode = ViewMode::Loupe;
+    let mut mask = Mask::radial([0.5, 0.5], [0.2, 0.1]);
+    if let MaskShape::Radial { feather: f, .. } = &mut mask.shape {
+        *f = feather;
+    }
+    app.add_mask(mask);
+    app.set_develop_tab(crate::app::DevelopTab::Masks);
+    (app, dir, photo)
+}

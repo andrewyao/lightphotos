@@ -596,6 +596,48 @@ pub struct TouchUp {
     pub opacity: f32,
 }
 
+/// Widest spot radius a sidecar may carry, as a fraction of the short edge.
+/// The UI caps its own radius far lower ([`crate::app::TOUCHUP_MAX_RADIUS`] is
+/// 0.15); this is a looser bound that only rejects values that would blow up
+/// the mask math, not legitimate edits.
+const TOUCHUP_RADIUS_RANGE: std::ops::RangeInclusive<f32> = 1e-4..=2.0;
+
+impl TouchUp {
+    /// This spot with every number finite and in range, or `None` if a field
+    /// isn't a number. A spot comes from sidecars, presets, drive scripts and
+    /// paste, and an infinite radius or opacity turns the baked mask NaN at
+    /// every pixel (the photo exports black), so a render never trusts the
+    /// values. The UI already holds its own spots to tighter bounds.
+    pub fn sanitized(self) -> Option<TouchUp> {
+        let all = [
+            self.center[0],
+            self.center[1],
+            self.source[0],
+            self.source[1],
+            self.radius,
+            self.feather,
+            self.delta[0],
+            self.delta[1],
+            self.delta[2],
+            self.opacity,
+        ];
+        if !all.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let (lo, hi) = (*mask::COORD_RANGE.start(), *mask::COORD_RANGE.end());
+        Some(TouchUp {
+            center: self.center.map(|v| v.clamp(lo, hi)),
+            source: self.source.map(|v| v.clamp(lo, hi)),
+            radius: self
+                .radius
+                .clamp(*TOUCHUP_RADIUS_RANGE.start(), *TOUCHUP_RADIUS_RANGE.end()),
+            feather: self.feather.clamp(0.0, 1.0),
+            delta: self.delta.map(|v| v.clamp(-1.0, 1.0)),
+            opacity: self.opacity.clamp(0.0, 1.0),
+        })
+    }
+}
+
 fn is_zero(v: &f32) -> bool {
     *v == 0.0
 }
@@ -753,6 +795,27 @@ impl CaScale {
     pub fn is_zero(&self) -> bool {
         self.red == 0.0 && self.blue == 0.0
     }
+
+    /// Both scales held to `±MAX_SCALE`, a non-finite one put back to 0. The
+    /// scales normally come from [`chroma::measure`], which already bounds
+    /// them, but a sidecar or preset is a file anyone can edit: `1e39` reads
+    /// as an f32 infinity and `source_uv` then returns `±inf` (or NaN at the
+    /// center), which renders and exports as garbage.
+    pub fn clamped(self) -> CaScale {
+        // `f32::clamp` turns ±inf into ±MAX_SCALE but keeps NaN, so reset NaN
+        // first: a NaN scale means "no reading", which is no correction.
+        let hold = |k: f32| {
+            if k.is_nan() {
+                0.0
+            } else {
+                k.clamp(-chroma::MAX_SCALE, chroma::MAX_SCALE)
+            }
+        };
+        CaScale {
+            red: hold(self.red),
+            blue: hold(self.blue),
+        }
+    }
 }
 
 /// How far the Straighten tool can turn a photo, in degrees.
@@ -854,6 +917,7 @@ impl Adjustments {
             };
         }
         self.straighten = clamp_straighten(self.straighten);
+        self.chromatic_aberration = self.chromatic_aberration.map(CaScale::clamped);
         self
     }
 
@@ -2392,6 +2456,35 @@ mod tests {
         );
         let old: Adjustments = serde_json::from_str(r#"{"exposure":0.5}"#).unwrap();
         assert_eq!(old.chromatic_aberration, None);
+    }
+
+    #[test]
+    fn clamped_holds_runaway_ca_scales() {
+        // serde reads 1e39 as an f32 infinity; source_uv then returns ±inf.
+        let hostile = Adjustments {
+            chromatic_aberration: Some(CaScale {
+                red: f32::INFINITY,
+                blue: f32::NAN,
+            }),
+            ..Default::default()
+        };
+        let ca = hostile.clamped().chromatic_aberration.unwrap();
+        assert_eq!(ca.red, chroma::MAX_SCALE, "inf clamps to the bound");
+        assert_eq!(ca.blue, 0.0, "NaN resets to no correction");
+
+        let big = CaScale {
+            red: 1.0,
+            blue: -1.0,
+        }
+        .clamped();
+        assert_eq!((big.red, big.blue), (chroma::MAX_SCALE, -chroma::MAX_SCALE));
+
+        // A measured value stays untouched.
+        let fine = CaScale {
+            red: 0.0012,
+            blue: -0.0008,
+        };
+        assert_eq!(fine.clamped(), fine);
     }
 
     #[test]

@@ -957,6 +957,60 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// A photo with only IFD0 `DateTime` and no `DateTimeOriginal` (a
+    /// software-edited JPEG, a scan, many TIFF/PNG exports) still yields a
+    /// capture stamp. The macOS reader used to look for `DateTime` in the
+    /// top-level property dictionary, where it never lives, and returned None.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_capture_stamp_falls_back_to_ifd0_datetime() {
+        use exif::{Field, In, Rational, Tag, Value};
+        let field = |tag, value| Field {
+            tag,
+            ifd_num: In::PRIMARY,
+            value,
+        };
+        let ascii = |s: &str| Value::Ascii(vec![s.as_bytes().to_vec()]);
+        let exif = crate::export::metadata::block(&[
+            field(Tag::Make, ascii("Scanner")),
+            field(Tag::Software, ascii("Editor 1.0")),
+            field(Tag::Orientation, Value::Short(vec![1])),
+            field(
+                Tag::XResolution,
+                Value::Rational(vec![Rational { num: 72, denom: 1 }]),
+            ),
+            field(
+                Tag::YResolution,
+                Value::Rational(vec![Rational { num: 72, denom: 1 }]),
+            ),
+            field(Tag::ResolutionUnit, Value::Short(vec![2])),
+            field(Tag::DateTime, ascii("2021:03:04 09:08:07")),
+        ])
+        .unwrap()
+        .unwrap();
+        let rgba = [90u8; 12 * 8 * 4];
+        let jpeg = Prepared::new(12, 8, Pixels::Rgba8(&rgba))
+            .unwrap()
+            .encode(
+                Encoding::Jpeg(JpegOptions::default()),
+                Embedded {
+                    exif: Some(&exif),
+                    xmp: None,
+                },
+            )
+            .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos-ifd0-datetime-{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, &jpeg).unwrap();
+        assert_eq!(
+            image_decode::capture_stamp(&path),
+            image_decode::CaptureStamp::new("2021:03:04 09:08:07", None),
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn exif_goes_after_jfif_and_bytes_that_are_not_a_jpeg_pass_through() {
         let jfif = [0xFF, 0xE0, 0x00, 0x07, b'J', b'F', b'I', b'F', 0x00];

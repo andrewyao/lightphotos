@@ -398,18 +398,20 @@ impl FillSet {
         FillSet { layers }
     }
 
-    /// `fills` with their chosen patches read from beside `photo`. A patch
-    /// that is missing or unreadable is logged and its fill left out: the
-    /// bake still succeeds, showing the photo there.
+    /// `fills` with their chosen patches read from beside `photo`. A listed
+    /// fill whose patch is missing or unreadable fails the read, as a mask
+    /// whose coverage is unreadable fails [`super::MaskSet::read`]: the edit
+    /// signature counts the fill, so a bake that silently left it out would
+    /// be cached under a signature it doesn't match. Failing instead leaves
+    /// the thumbnail or score uncached until the patch is in hand again, and
+    /// surfaces an export error rather than exporting without the fill.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn read(photo: &Path, fills: &[Fill]) -> FillSet {
-        FillSet::new(fills, |id| match read(photo, id) {
-            Ok(patch) => Some(Arc::new(patch)),
-            Err(e) => {
-                eprintln!("[fill] {}: {e}", photo.display());
-                None
-            }
-        })
+    pub fn read(photo: &Path, fills: &[Fill]) -> Result<FillSet, PatchError> {
+        let mut layers = Vec::new();
+        for f in fills.iter().take(MAX_FILLS) {
+            layers.push((f.bbox, Arc::new(read(photo, f.chosen())?)));
+        }
+        Ok(FillSet { layers })
     }
 
     pub fn len(&self) -> usize {
@@ -657,13 +659,14 @@ impl FillInput {
         FillInput::Ready(FillSet::default())
     }
 
-    /// The fills with their patches, read from beside `photo` if needed.
-    /// Never fails: see [`FillSet::read`].
-    pub fn resolve(self, photo: &std::path::Path) -> FillSet {
+    /// The fills with their patches, read from beside `photo` if needed. A
+    /// listed fill with no readable patch is an error, as for masks: see
+    /// [`FillSet::read`].
+    pub fn resolve(self, photo: &std::path::Path) -> Result<FillSet, PatchError> {
         // Only the native variant reads beside the photo.
         let _ = photo;
         match self {
-            FillInput::Ready(set) => set,
+            FillInput::Ready(set) => Ok(set),
             #[cfg(not(target_arch = "wasm32"))]
             FillInput::OnDisk(fills) => FillSet::read(photo, &fills),
         }

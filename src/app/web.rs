@@ -264,6 +264,36 @@ impl Web {
         self.dir_handles.remove(path);
     }
 
+    /// Drop every Loupe decode's tracking: the in-flight keys, the retry
+    /// counters and the failed set, for the preview, speed and full tiers.
+    /// The native loader clears its equivalents in
+    /// [`crate::jobs::loader::Loader::forget_loupe_decodes`]; without this a
+    /// photo that failed, or that used up its read retries, is never asked
+    /// for again and the Loupe reports it loading for the rest of the session.
+    pub(super) fn forget_loupe(&mut self) {
+        self.preview_inflight.clear();
+        self.preview_retries.clear();
+        self.preview_failed.clear();
+        self.speed_inflight.clear();
+        self.speed_retries.clear();
+        self.speed_failed.clear();
+        self.full_inflight.clear();
+        self.full_retries.clear();
+        self.full_failed.clear();
+    }
+
+    /// Drop the Loupe failed and retry state for photos under `root`, so a
+    /// later visit to the same paths is not refused by a stale failure.
+    pub(super) fn forget_loupe_for_root(&mut self, root: &Path) {
+        self.preview_retries
+            .retain(|(p, _), _| !p.starts_with(root));
+        self.preview_failed.retain(|(p, _)| !p.starts_with(root));
+        self.speed_retries.retain(|(p, _), _| !p.starts_with(root));
+        self.speed_failed.retain(|(p, _)| !p.starts_with(root));
+        self.full_retries.retain(|(p, _), _| !p.starts_with(root));
+        self.full_failed.retain(|(p, _)| !p.starts_with(root));
+    }
+
     /// File reads in flight, shared with the reads' own tasks.
     pub(super) fn read_inflight(&self) -> std::rc::Rc<std::cell::Cell<u32>> {
         self.read_inflight.clone()
@@ -509,6 +539,7 @@ impl App {
         self.web.dir_handles.retain(|p, _| !p.starts_with(root));
         self.web.thumb_cleanup.retain(|p, _| !p.starts_with(root));
         self.subdirs.retain(|p, _| !p.starts_with(root));
+        self.web.forget_loupe_for_root(root);
     }
 
     /// Loads a finished pick through `load_playlist`, like native

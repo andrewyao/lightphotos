@@ -223,12 +223,15 @@ mod tests {
         let group = group.map_or(String::new(), |g| {
             format!("<crs:Group><rdf:Alt><rdf:li xml:lang=\"x-default\">{g}</rdf:li></rdf:Alt></crs:Group>")
         });
+        // A contrast nudge so every fixture carries one mapped develop field,
+        // which keeps `parse` from refusing it as an empty look whatever the
+        // exposure is (these tests are about grouping and the walk).
         format!(
             "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
              <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
              <rdf:Description rdf:about=\"\" \
              xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
-             crs:PresetType=\"Normal\" crs:Exposure2012=\"{exposure}\">\
+             crs:PresetType=\"Normal\" crs:Contrast2012=\"+10\" crs:Exposure2012=\"{exposure}\">\
              {name}{group}</rdf:Description></rdf:RDF></x:xmpmeta>"
         )
     }

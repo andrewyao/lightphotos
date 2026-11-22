@@ -233,6 +233,19 @@ impl App {
             return;
         }
 
+        // The GPS import dialog is a modal (like Copy Settings), so it owns
+        // the keyboard: Esc cancels, Enter commits once a track is found, and
+        // every other key waits instead of acting on the photos behind it.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.import_dialog_open() {
+            match code {
+                KeyCode::Escape => self.cancel_import_dialog(),
+                KeyCode::Enter | KeyCode::NumpadEnter => self.commit_import_dialog(),
+                _ => {}
+            }
+            return;
+        }
+
         // While the export form is open, Enter runs it and Escape closes it.
         // Other keys still act, so the selection can change under the form.
         if self.export_form_open() {
@@ -402,9 +415,7 @@ impl App {
                     self.focus_level = FocusLevel::Selected;
                     self.on_focus_changed();
                 } else if self.focus == Region::Detail {
-                    self.mode = ViewMode::Grid;
-                    self.update_window_title();
-                    self.normalize_focus();
+                    self.enter_grid();
                 } else if self.focus == Region::Grid
                     && self.focus_level == FocusLevel::Selected
                     && self.region_available(Region::Folders)
@@ -584,6 +595,23 @@ mod tests {
         assert_eq!(app.mode, ViewMode::Grid);
         assert_eq!(app.focus, Region::Folders);
         assert_eq!(app.focus_level, FocusLevel::Selected);
+    }
+
+    /// Esc out of the Loupe must end Compare and the Masks tab the same way
+    /// every other route into the Grid does, not land in the Grid with them
+    /// still on.
+    #[test]
+    fn esc_from_the_loupe_ends_compare_and_the_masks_tab() {
+        let (mut app, _) = editor_app();
+        app.set_develop_tab(DevelopTab::Masks);
+        app.set_group_view(GroupView::Compare);
+        assert_eq!(app.focus, Region::Detail);
+
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+
+        assert_eq!(app.mode, ViewMode::Grid);
+        assert_eq!(app.group_view(), GroupView::Edit, "Compare ended");
+        assert_eq!(app.develop_tab(), DevelopTab::Sliders, "back on Sliders");
     }
 
     #[test]

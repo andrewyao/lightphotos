@@ -84,7 +84,26 @@ impl PresetStore {
         allow(dead_code, reason = "App::new uses an in-memory store under test")
     )]
     pub fn load() -> PresetStore {
-        PresetStore::from_text(&crate::persist::prefs::load(KEY).unwrap_or_default(), true)
+        match crate::persist::prefs::load_checked(KEY) {
+            Ok(Some(text)) => PresetStore::from_text(&text, true),
+            // No file yet: a normal empty, writable library.
+            Ok(None) => PresetStore::from_text("", true),
+            // The file is there but could not be read (permissions, I/O, not
+            // UTF-8). Treating it as empty would let the next save replace the
+            // user's real library, so lock writes until they fix or move it.
+            Err(cause) => PresetStore::locked(&cause),
+        }
+    }
+
+    /// A store whose stored library could not be read, so every write is
+    /// refused and the file is left untouched.
+    fn locked(cause: &str) -> PresetStore {
+        PresetStore {
+            persistent: true,
+            corrupt: true,
+            last_error: Some((crate::i18n::t().presets_load_failed)(cause)),
+            ..PresetStore::in_memory()
+        }
     }
 
     /// Adopts a stored document. A document that will not parse yields an
@@ -275,7 +294,7 @@ impl PresetStore {
         }
         // A failure leaves the change in memory and reports itself. The next
         // mutation rewrites the whole document, which is the retry.
-        if let Err(cause) = crate::persist::prefs::save(KEY, &self.to_text()) {
+        if let Err(cause) = crate::persist::prefs::save_durable(KEY, &self.to_text()) {
             self.last_error = Some((crate::i18n::t().presets_save_failed)(&cause));
         }
     }
@@ -364,6 +383,24 @@ mod tests {
         // mutation is what keeps the corrupt document from being replaced by an
         // empty one.
         assert!(store.presets().is_empty(), "no mutation lands");
+    }
+
+    #[test]
+    fn an_unreadable_library_locks_writes_so_it_is_never_overwritten() {
+        // The file exists but could not be read (permissions, I/O, non-UTF-8).
+        // Before the fix this looked like an empty, writable library, and the
+        // first save replaced the user's real one.
+        let mut store = PresetStore::locked("Input/output error");
+        assert!(store.presets().is_empty());
+        assert!(store.take_error().is_some(), "the read failure is reported");
+
+        assert_eq!(
+            store.add("New", tone(1.0), Vec::new()),
+            None,
+            "a save is refused rather than replacing the unreadable file"
+        );
+        assert!(store.take_error().is_some(), "the refusal is reported");
+        assert!(store.presets().is_empty(), "nothing lands");
     }
 
     #[test]

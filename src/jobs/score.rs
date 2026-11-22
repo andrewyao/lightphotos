@@ -55,7 +55,11 @@ pub fn score_photo(req: &ScoreRequest) -> Result<QualityScore, String> {
         .clone()
         .resolve(&req.path)
         .map_err(|e| e.to_string())?;
-    let fills = req.fills.clone().resolve(&req.path);
+    let fills = req
+        .fills
+        .clone()
+        .resolve(&req.path)
+        .map_err(|e| e.to_string())?;
     let (w, h, rgba) = crate::develop::image_ops::bake_edited(
         &img,
         &adj,

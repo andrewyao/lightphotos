@@ -195,7 +195,7 @@ fn draw_info_page(ui: &mut egui::Ui, app: &App) {
         ui.label(egui::RichText::new(t().info_no_selection).weak());
         return;
     };
-    let selected = app.selected_paths().len();
+    let selected = app.selected_path_refs().count();
     if selected > 1 {
         ui.label(egui::RichText::new((t().n_selected)(selected)).strong());
         ui.add_space(4.0);

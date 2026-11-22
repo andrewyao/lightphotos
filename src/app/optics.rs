@@ -87,6 +87,27 @@ impl Optics {
     }
 }
 
+/// Run a measurement off the UI thread and send its outcome for `path`. A
+/// panic in `work` (a malformed file that crashes the decoder or measure)
+/// is caught and reported as an error, so `optics.pending` never sticks and
+/// wedges Remove CA for the session.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_measure_thread(
+    tx: Sender<Outcome>,
+    path: PathBuf,
+    work: impl FnOnce() -> Result<CaScale, String> + Send + 'static,
+) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("chroma-measure".to_string())
+        .spawn(move || {
+            let scale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                .unwrap_or_else(|_| Err("measurement panicked".to_string()));
+            let _ = tx.send((path, scale));
+        })
+        .map(drop)
+        .map_err(|e| e.to_string())
+}
+
 impl App {
     /// The Remove Chromatic Aberration checkbox over the photos the panel
     /// acts on: on once measured, and while waiting to be measured.
@@ -228,19 +249,11 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn start_measure(&self, path: PathBuf) -> Result<(), String> {
         let tx = self.optics.tx.clone();
-        std::thread::Builder::new()
-            .name("chroma-measure".to_string())
-            .spawn(move || {
-                let scale = crate::jobs::thumbnail::decode_at_size(
-                    &path,
-                    MEASURE_PX,
-                    EmbeddedPreview::Never,
-                )
-                .map(|img| crate::develop::chroma::measure(&img));
-                let _ = tx.send((path, scale));
-            })
-            .map(drop)
-            .map_err(|e| e.to_string())
+        let decode_path = path.clone();
+        spawn_measure_thread(tx, path, move || {
+            crate::jobs::thumbnail::decode_at_size(&decode_path, MEASURE_PX, EmbeddedPreview::Never)
+                .map(|img| crate::develop::chroma::measure(&img))
+        })
     }
 
     /// The browser cannot open a file by path off the main thread, so this
@@ -358,6 +371,21 @@ mod tests {
         app.apply_look_to(&Adjustments::default(), optics, &paths);
         assert!(!app.remove_ca_pending());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A decode or measure that panics on a malformed file must still report
+    /// an outcome for its path, so `pending` clears and Remove CA is not
+    /// wedged for the session.
+    #[test]
+    fn a_panicking_measurement_still_reports_for_its_path() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = PathBuf::from("/does/not/matter/panics.jpg");
+        spawn_measure_thread(tx, path.clone(), || panic!("boom")).unwrap();
+        let (got, scale) = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the thread must report even when the work panics");
+        assert_eq!(got, path);
+        assert!(scale.is_err(), "a panic is reported as an error");
     }
 
     #[test]

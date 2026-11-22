@@ -236,6 +236,17 @@ impl App {
 
         #[cfg(not(target_arch = "wasm32"))]
         let submit = spawn_worker(done_tx.clone());
+        // No worker means nothing is ever admitted and `finished()` never
+        // becomes true, so the batch would wedge the app for the session.
+        // Refuse it instead of installing a stuck `BulkDelete`.
+        #[cfg(not(target_arch = "wasm32"))]
+        if submit.is_none() {
+            self.set_status(
+                StatusKind::Error,
+                crate::i18n::t().delete_worker_failed.to_string(),
+            );
+            return;
+        }
 
         self.bulk_delete = Some(BulkDelete {
             queue: paths.into(),
@@ -467,12 +478,26 @@ impl App {
 /// its sender.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_trash_worker(done_tx: Sender<DeleteResult>) -> Option<Sender<PathBuf>> {
+    spawn_trash_worker_with(done_tx, crate::shell::trash::move_to_trash)
+}
+
+/// [`spawn_trash_worker`] with the per-photo trash call passed in, so a test
+/// can stand in for it. A panic in `trash` (an objc exception on a hostile
+/// path) is caught and reported as an error for that photo, so one bad path
+/// cannot kill the worker and strand every photo behind it in `in_flight`.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_trash_worker_with(
+    done_tx: Sender<DeleteResult>,
+    trash: impl Fn(&Path) -> Result<(), String> + Send + 'static,
+) -> Option<Sender<PathBuf>> {
     let (submit, rx) = channel::<PathBuf>();
     match std::thread::Builder::new()
         .name("trash".into())
         .spawn(move || {
             while let Ok(path) = rx.recv() {
-                let result = crate::shell::trash::move_to_trash(&path);
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| trash(&path)))
+                        .unwrap_or_else(|_| Err("the trash call panicked".to_string()));
                 if done_tx.send((path, result)).is_err() {
                     return;
                 }
@@ -809,6 +834,59 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&old_dir);
         let _ = std::fs::remove_dir_all(&new_dir);
+    }
+
+    /// If the trash worker cannot be spawned, the batch must not install:
+    /// nothing would ever be admitted and `finished()` would never be true,
+    /// wedging every later delete and export for the session.
+    #[test]
+    fn a_delete_whose_worker_cannot_start_does_not_wedge() {
+        let (mut app, dir, paths) = app_with_photos(&["a.jpg", "b.jpg"]);
+        app.start_delete_with(paths, |_done_tx| None);
+        assert!(
+            !app.bulk_delete_running(),
+            "a batch whose worker cannot start must not install and wedge the app"
+        );
+        assert_eq!(
+            app.status_text(),
+            Some(crate::i18n::t().delete_worker_failed)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A panic in one trash call must not kill the worker and strand every
+    /// photo behind it in `in_flight` with no result ever coming.
+    #[test]
+    fn a_panicking_trash_call_does_not_strand_the_rest_of_the_batch() {
+        let dir = temp_folder("trash-panic");
+        let bad = dir.join("bad.jpg");
+        let good = dir.join("good.jpg");
+        let (tx, rx) = channel();
+        let submit = spawn_trash_worker_with(tx, |p: &Path| {
+            if p.file_name() == Some(std::ffi::OsStr::new("bad.jpg")) {
+                panic!("boom");
+            }
+            Ok(())
+        })
+        .expect("the worker starts");
+        submit.send(bad.clone()).unwrap();
+        submit.send(good.clone()).unwrap();
+        let mut got = HashMap::new();
+        for _ in 0..2 {
+            let (path, result) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the worker must report both photos, panic or not");
+            got.insert(path, result);
+        }
+        assert!(
+            got.get(&bad).map(|r| r.is_err()).unwrap_or(false),
+            "the panicking path is reported as an error"
+        );
+        assert!(
+            got.get(&good).map(|r| r.is_ok()).unwrap_or(false),
+            "the photo behind it still trashes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -22,6 +22,11 @@ const OBJECT_INFO_REPLY: u64 = 16 * 1024 * 1024;
 const HISTORY_REPLY: u64 = 8 * 1024 * 1024;
 const IMAGE_REPLY: u64 = 64 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(500);
+/// Consecutive failed `/history` polls [`ComfyServer::wait`] rides out before
+/// it gives up. A dropped connection, a sleeping laptop or a server too busy
+/// to answer one poll in time must not kill a generation that can run for many
+/// minutes. A successful poll resets the count.
+const MAX_POLL_FAILURES: u32 = 5;
 /// What [`ComfyServer::wait`] answers when its caller stopped it.
 pub const STOPPED: &str = "the job was cancelled";
 /// What a request answers when the server didn't: nothing is listening, the
@@ -225,24 +230,46 @@ impl ComfyServer {
         deadline: Instant,
         stop: &AtomicBool,
     ) -> Result<Vec<OutputImage>, String> {
+        let mut failures = 0u32;
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Err(STOPPED.into());
             }
-            let resp = self
-                .agent
-                .get(format!("{}/history/{prompt_id}", self.url))
-                .call()
-                .map_err(|e| lost(&self.url, &e))?;
-            let body = checked(resp, HISTORY_REPLY)?;
-            if let History::Done(images) = parse_history(&body, prompt_id, output_node)? {
-                return Ok(images);
+            match self.fetch_history(prompt_id) {
+                // The server answered. Its verdict (done, still running, or a
+                // run error) is terminal, so a parse error ends the wait too.
+                Ok(body) => {
+                    failures = 0;
+                    if let History::Done(images) = parse_history(&body, prompt_id, output_node)? {
+                        return Ok(images);
+                    }
+                }
+                // The server was unreachable or returned a bad status. One
+                // such poll must not end a long generation; ride out a few.
+                Err(e) => {
+                    failures += 1;
+                    if failures >= MAX_POLL_FAILURES {
+                        return Err(e);
+                    }
+                }
             }
             if Instant::now() + POLL > deadline {
                 return Err("ComfyUI took too long to finish".into());
             }
             std::thread::sleep(POLL);
         }
+    }
+
+    /// Fetch one `/history` reply as text. `Err` means the server was
+    /// unreachable or answered a non-2xx status: a transient poll failure the
+    /// caller may ride out, not a verdict about the prompt.
+    fn fetch_history(&self, prompt_id: &str) -> Result<String, String> {
+        let resp = self
+            .agent
+            .get(format!("{}/history/{prompt_id}", self.url))
+            .call()
+            .map_err(|e| lost(&self.url, &e))?;
+        checked(resp, HISTORY_REPLY)
     }
 
     pub fn fetch(&self, image: &OutputImage) -> Result<Vec<u8>, String> {
@@ -593,6 +620,36 @@ mod tests {
         assert_eq!(server.queue(&Value::Null, "c").unwrap_err(), LOST);
         assert_eq!(server.upload_png(&[], "a.png").unwrap_err(), LOST);
         assert_eq!(server.cancel("id").unwrap_err(), LOST);
+    }
+
+    /// A couple of unreachable-server polls must not kill a generation that
+    /// then finishes: `wait` rides out a short run of failed polls.
+    #[test]
+    fn wait_rides_out_a_few_failed_polls() {
+        use std::sync::atomic::AtomicUsize;
+        let polls = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = std::sync::Arc::clone(&polls);
+        let url = serve(move |r| {
+            if !r.path.starts_with("/history/") {
+                return Reply::new(404, "");
+            }
+            // Fail the first two polls with a server error, then finish.
+            if seen.fetch_add(1, Ordering::Relaxed) < 2 {
+                Reply::new(503, "busy")
+            } else {
+                Reply::new(200, DONE)
+            }
+        });
+        let server = ComfyServer::new(&url).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let images = server
+            .wait("p1", "10", deadline, &AtomicBool::new(false))
+            .expect("two transient failures must not end the wait");
+        assert_eq!(images.len(), 1);
+        assert!(
+            polls.load(Ordering::Relaxed) >= 3,
+            "it retried past the failures"
+        );
     }
 
     fn refs() -> Vec<ModelRef> {

@@ -209,12 +209,28 @@ fn refuse_linked_parent(file: &Path) -> std::io::Result<()> {
 /// [`write_atomic`], creating `file`'s directory first.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_atomic_in_dir(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_in_dir_impl(file, bytes, false)
+}
+
+/// [`write_atomic_in_dir`] that flushes the data to disk before and after the
+/// rename, so a power loss can't surface the new name over stale or empty
+/// blocks. For user-authored data with no second copy (sidecars, group files,
+/// the presets library). It costs a disk barrier per write, so it is only for
+/// writers that already run off the UI thread or at human-click rate, never
+/// the per-frame session file.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_atomic_in_dir_durable(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_in_dir_impl(file, bytes, true)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_atomic_in_dir_impl(file: &Path, bytes: &[u8], durable: bool) -> std::io::Result<()> {
     let parent = file
         .parent()
         .ok_or_else(|| std::io::Error::other("path has no parent"))?;
     refuse_linked_sidecar_dir(parent)?;
     create_sidecar_dir(parent)?;
-    write_atomic(file, bytes, None)
+    write_atomic_then(file, bytes, None, durable, || Ok(()))
 }
 
 /// Remove `file`. A file that is already gone counts as removed.
@@ -240,17 +256,23 @@ pub fn remove_if_present(file: &Path) -> std::io::Result<()> {
 /// the umask). Ignored off Unix.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_atomic(dest: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
-    write_atomic_then(dest, bytes, mode, || Ok(()))
+    write_atomic_then(dest, bytes, mode, false, || Ok(()))
 }
 
 /// [`write_atomic`], running `before` once the temp file is written and
 /// before it is renamed over `dest`. A failure in `before` removes the temp
 /// file and leaves `dest` as it was.
+///
+/// `durable` flushes the temp file's data to disk before the rename, and the
+/// parent directory after it on Unix, so a power loss never surfaces the new
+/// name over blocks the data had not reached yet. It costs a disk barrier, so
+/// pass it only off the UI thread or at human-click rate.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_atomic_then(
     dest: &Path,
     bytes: &[u8],
     mode: Option<u32>,
+    durable: bool,
     before: impl FnOnce() -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     use std::io::Write;
@@ -281,12 +303,27 @@ pub fn write_atomic_then(
         }
     };
     let written = file.write_all(bytes).and_then(|()| {
+        // Flush the data before the rename so the final name never surfaces
+        // over blocks the write had not reached on a power loss.
+        if durable {
+            file.sync_all()?;
+        }
         drop(file);
         before()?;
         std::fs::rename(&tmp, dest)
     });
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
+    } else if durable {
+        // Best effort: persist the directory entry the rename created, so the
+        // new name itself survives a power loss. A failure here only risks the
+        // rename not being durable yet, not the data, so it is not reported.
+        #[cfg(unix)]
+        if let Some(parent) = dest.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
     }
     written
 }
@@ -356,6 +393,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&gone);
         assert!(wrote.is_err());
         assert!(!made, "the gone folder was made again");
+    }
+
+    /// A durable write stores the exact bytes, replaces an existing file, and
+    /// leaves no temp file behind. (The fsync itself can't be observed from a
+    /// test; a crash-after-rename simulation needs a power cut.)
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_durable_write_lands_the_bytes_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("lp-durable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("record");
+
+        write_atomic_in_dir_durable(&file, b"first").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"first");
+        write_atomic_in_dir_durable(&file, b"second-and-longer").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"second-and-longer");
+
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            names,
+            [std::ffi::OsStr::new("record")],
+            "only the final file remains"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

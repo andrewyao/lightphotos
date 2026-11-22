@@ -457,9 +457,15 @@ impl App {
     /// many photos it changed. A photo that has left the folder is skipped.
     pub(super) fn undo_edit(&mut self) -> usize {
         // Undo takes back a running batch's step, so the batch must not land
-        // more results after it.
-        self.cancel_auto_tone();
-        self.cancel_remove_ca();
+        // more results after it. Take the batch back when its step already
+        // holds results, or when there is nothing else to undo (so Cmd+Z can
+        // stop a just-started batch). But when the batch has landed nothing
+        // and a previous, unrelated step is waiting, undo that step and leave
+        // the batch running, rather than do two things for one keypress.
+        if self.history.has_open_edits() || !self.history.has_done_steps() {
+            self.cancel_auto_tone();
+            self.cancel_remove_ca();
+        }
         let Some(step) = self.history.pop_undo() else {
             return 0;
         };
@@ -515,6 +521,13 @@ impl App {
                     self.touchups.remove(&path);
                 } else {
                     self.touchups.insert(path.clone(), touchups);
+                }
+                // The history just replaced this photo's spots, so the tool's
+                // local Touch Up undo for it is out of step; drop it, and clear
+                // a selection that indexed into the old list.
+                self.touchup_undo.remove(&path);
+                if shown.as_ref() == Some(&path) {
+                    self.touchup_selected = None;
                 }
             }
             if let Some(masks) = before.masks {
@@ -723,6 +736,11 @@ impl App {
         } else {
             self.touchups.insert(path.to_path_buf(), touchups);
         }
+        // Paste routes through the history, which now owns the undo of this
+        // replacement. The tool's local Touch Up stack recorded the spots this
+        // just replaced; leaving it would let `undo_touchup` reapply a state
+        // the history has moved past. Drop it so the two cannot drift.
+        self.touchup_undo.remove(path);
         #[cfg(target_arch = "wasm32")]
         crate::web::analytics::property("develop_edit_applied", "edit_kind", "touch_up");
         if self.shown.path() == Some(path) {
@@ -1748,6 +1766,55 @@ mod tests {
             assert!(
                 centers(&app).is_empty(),
                 "Undo with no history does nothing"
+            );
+        }
+
+        /// Paste replaces a photo's spots through the history. The tool's own
+        /// Touch Up undo must not then step back to the pre-paste spots.
+        #[test]
+        fn a_paste_clears_the_tool_local_touch_up_undo() {
+            let mut app = loupe("touch-up-paste-undo");
+            app.set_develop_tab(DevelopTab::Masks);
+            app.tool = LoupeTool::TouchUp;
+            let path = app.shown.path().unwrap().to_path_buf();
+
+            assert!(app.edit_touchups(vec![spot(0.2)]));
+            assert!(app.can_undo_touchup());
+
+            app.put_touchups(&path, vec![spot(0.6), spot(0.7)]);
+            assert_eq!(centers(&app), [0.6, 0.7]);
+
+            assert!(
+                !app.can_undo_touchup(),
+                "a paste clears the tool's local undo"
+            );
+            app.undo_touchup();
+            assert_eq!(
+                centers(&app),
+                [0.6, 0.7],
+                "undo_touchup must not wipe the pasted spots"
+            );
+        }
+
+        /// A history undo (Cmd+Z) that replaces a photo's spots must clear the
+        /// tool's local undo and a selection that indexed the replaced list.
+        #[test]
+        fn a_history_undo_of_spots_clears_the_tool_local_undo_and_selection() {
+            let mut app = loupe("touch-up-history-undo");
+            app.set_develop_tab(DevelopTab::Masks);
+            app.tool = LoupeTool::TouchUp;
+            let path = app.shown.path().unwrap().to_path_buf();
+
+            assert!(app.edit_touchups(vec![spot(0.2)]));
+            app.put_touchups(&path, vec![spot(0.6), spot(0.7)]);
+            app.touchup_selected = Some(1);
+
+            app.undo_edit();
+            assert_eq!(centers(&app), [0.2], "the paste is taken back");
+            assert_eq!(app.touchup_selected, None, "the stale selection is cleared");
+            assert!(
+                !app.can_undo_touchup(),
+                "the tool-local undo is cleared after a history undo"
             );
         }
 

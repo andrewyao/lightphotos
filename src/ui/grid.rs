@@ -432,6 +432,11 @@ pub(super) fn thumbnail_cell(
     let selected = app.is_selected(pos);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     app.record_cell_rect(pos, rect);
+    if let Some(name) = app.cell_label(pos) {
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, &name)
+        });
+    }
 
     let colors = theme::colors(ui.ctx());
     let marked = selected || primary;

@@ -332,6 +332,17 @@ fn cmp_name_key(name: Option<&OsStr>, key: Option<&str>) -> std::cmp::Ordering {
     }
 }
 
+/// The folder to list for `current`. `Path::new("photo.jpg").parent()` is
+/// `Some("")`, not `None`, and `read_dir("")` fails, so a bare relative name
+/// would otherwise give a lone photo with no siblings and resolve sidecars
+/// against an empty path. An empty parent means the current directory.
+fn parent_dir(current: &Path) -> &Path {
+    match current.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
+}
+
 #[hotpath::measure]
 /// The images in `dir`, sorted, and which of them are symlinks.
 fn sorted_images_in(dir: &Path) -> (Vec<PathBuf>, HashSet<PathBuf>) {
@@ -473,7 +484,7 @@ impl Playlist {
     /// The images in `current`'s folder, positioned on `current`.
     #[hotpath::measure]
     pub fn from_file(current: &Path) -> Self {
-        let dir = current.parent().unwrap_or_else(|| Path::new("."));
+        let dir = parent_dir(current);
         let (mut entries, mut links) = sorted_images_in(dir);
 
         // Every entry is `dir` joined with a name, so the entry with
@@ -1011,6 +1022,14 @@ mod tests {
         assert!(!is_listable_subdir("Photos.app"));
         assert!(!is_listable_subdir("Library.photoslibrary"));
         assert!(!is_listable_subdir("Thing.APP"));
+    }
+
+    #[test]
+    fn parent_dir_treats_a_bare_name_as_the_current_directory() {
+        assert_eq!(parent_dir(Path::new("photo.jpg")), Path::new("."));
+        assert_eq!(parent_dir(Path::new("./photo.jpg")), Path::new("."));
+        assert_eq!(parent_dir(Path::new("sub/photo.jpg")), Path::new("sub"));
+        assert_eq!(parent_dir(Path::new("/a/b/photo.jpg")), Path::new("/a/b"));
     }
 
     #[test]

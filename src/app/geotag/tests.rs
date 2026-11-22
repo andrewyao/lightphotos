@@ -488,6 +488,42 @@ fn a_body_whose_jpegs_lack_its_serial_is_one_camera() {
     );
 }
 
+/// The import dialog is a modal: a command key does nothing while it is
+/// open, so a digit can't rate the photo behind it, and Esc cancels it
+/// rather than acting on the view. The same key rates once the dialog is
+/// gone, so the swallow is the dialog's doing, not a dead key.
+#[test]
+fn the_import_dialog_holds_the_keys_off_the_photos() {
+    use winit::keyboard::{KeyCode, ModifiersState};
+    let (mut app, dir, paths) = folder_app("geotag-dialog-keys", 2);
+    std::fs::write(
+        &paths[0],
+        jpeg_with(&[taken_at("2026:11:08 19:05:00"), model("ILCE-7M2")]),
+    )
+    .unwrap();
+    put(&dir.join("tracks/day.gpx"), GPX);
+    app.select_single(0);
+    app.modifiers = ModifiersState::empty();
+
+    app.open_import_dialog(vec![dir.join("tracks")]);
+    assert_eq!(app.input_blocker(), Some(Blocker::GeotagImport));
+
+    app.handle_key(KeyCode::Digit3);
+    assert_eq!(app.rating_of(&paths[0]), 0, "the rating key waited");
+    assert!(app.import_dialog_open(), "the dialog stayed open");
+
+    app.handle_key(KeyCode::Escape);
+    assert!(!app.import_dialog_open(), "Esc cancelled the dialog");
+
+    app.handle_key(KeyCode::Digit3);
+    assert_eq!(
+        app.rating_of(&paths[0]),
+        3,
+        "the same key rates once it is gone"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn the_dialog_asks_each_camera_once_and_remembers_its_setting() {
     let (mut app, dir, paths) = folder_app("geotag-dialog", 3);

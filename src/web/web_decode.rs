@@ -217,9 +217,9 @@ impl WebExportJob {
 /// never the embedded JPEG, which the camera has already corrected.
 ///
 /// The RAW decode is the Loupe's `Quality` one, not export's
-/// `decode_raw_nonmac`: that one takes no `decode_budget` grant and does not
-/// reject the layouts rawler panics on, and under `panic=abort` an aborted
-/// thread keeps its memory, so every later decode fails too.
+/// `decode_raw_nonmac`: that one does not reject the layouts rawler panics on,
+/// and under `panic=abort` an aborted thread keeps its memory, so every later
+/// decode fails too.
 pub struct WebMeasureJob {
     pub path: PathBuf,
     pub bytes: Arc<Vec<u8>>,

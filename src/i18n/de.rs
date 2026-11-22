@@ -268,7 +268,7 @@ pub static DE: Strings = Strings {
         HelpSection {
             title: "Navigation",
             rows: &[
-                ("Enter or Space", "Ausgewähltes Foto öffnen (im Raster)"),
+                ("Enter oder Space", "Ausgewähltes Foto öffnen (im Raster)"),
                 ("E", "Ausgewähltes Foto öffnen (im Raster)"),
                 ("G", "Zurück zum Raster"),
                 ("F", "Vollbild, nur das Foto; F oder Esc beendet (im Editor)"),
@@ -302,9 +302,9 @@ pub static DE: Strings = Strings {
             title: "Auswahl",
             rows: &[
                 ("Cmd+A", "Alles im aktuellen Ordner auswählen (im Raster)"),
-                ("Shift+Click", "Bereich auswählen"),
-                ("Cmd+Click", "Einzelne Auswahl umschalten"),
-                ("Shift+arrows", "Auswahl erweitern (Raster)"),
+                ("Shift+Klick", "Bereich auswählen"),
+                ("Cmd+Klick", "Einzelne Auswahl umschalten"),
+                ("Shift+Pfeiltasten", "Auswahl erweitern (Raster)"),
                 ("Cmd+D", "Auswahl aufheben"),
                 ("Cmd+G", "Die Auswahl stapeln"),
                 ("Cmd+Shift+G", "Die ausgewählten Stapel auflösen"),
@@ -329,15 +329,15 @@ pub static DE: Strings = Strings {
         HelpSection {
             title: "Zoomen und Verschieben (im Editor)",
             rows: &[
-                ("Space or Z", "Zoom wechseln: einpassen, 2x eingepasst, 100%"),
-                ("Cmd++ or Cmd+=", "Vergrößern (in 20%-Schritten)"),
+                ("Space oder Z", "Zoom wechseln: einpassen, 2x eingepasst, 100%"),
+                ("Cmd++ oder Cmd+=", "Vergrößern (in 20%-Schritten)"),
                 ("Cmd+-", "Verkleinern (in 20%-Schritten)"),
                 ("\u{2191} / \u{2193}", "Vergrößern / verkleinern (in 10%-Schritten)"),
-                ("Scroll", "Am Zeiger zoomen"),
-                ("Drag", "Verschieben"),
-                ("Space+Drag", "Verschieben"),
-                ("Shift+Scroll", "Seitlich verschieben"),
-                ("Alt+Scroll", "Nach oben und unten verschieben"),
+                ("Scrollen", "Am Zeiger zoomen"),
+                ("Ziehen", "Verschieben"),
+                ("Space+Ziehen", "Verschieben"),
+                ("Shift+Scrollen", "Seitlich verschieben"),
+                ("Alt+Scrollen", "Nach oben und unten verschieben"),
             ],
         },
         HelpSection {
@@ -355,7 +355,7 @@ pub static DE: Strings = Strings {
                 ("V", "Schwarzweiß oder zurück zu Farbe"),
                 ("Cmd+Shift+C", "Die Anpassung dieses Fotos kopieren"),
                 ("Cmd+Shift+V", "Die Anpassung auf die Auswahl einsetzen"),
-                ("Double-click slider", "Den Regler zurücksetzen"),
+                ("Regler doppelklicken", "Den Regler zurücksetzen"),
                 (
                     "Delete",
                     if WEB {
@@ -369,7 +369,7 @@ pub static DE: Strings = Strings {
         HelpSection {
             title: "Zuschneiden",
             rows: &[
-                ("Enter or R", "Zuschnitt anwenden"),
+                ("Enter oder R", "Zuschnitt anwenden"),
                 ("Esc", "Zuschnitt abbrechen"),
                 ("Cmd+[ / Cmd+]", "Um -90 / +90 Grad drehen"),
             ],
@@ -377,10 +377,10 @@ pub static DE: Strings = Strings {
         HelpSection {
             title: "Repräsentativfoto wählen",
             rows: &[
-                ("Click or drag the photo", "Den Fokusbereich verschieben"),
-                ("Shift+scroll on the area", "Die Größe des Fokusbereichs ändern"),
-                ("Drag a tile", "Den Fokusbereich verschieben"),
-                ("Cmd+Click / Shift+Click a tile", "Weitere Kacheln wählen"),
+                ("Foto klicken oder ziehen", "Den Fokusbereich verschieben"),
+                ("Shift+Scrollen auf dem Bereich", "Die Größe des Fokusbereichs ändern"),
+                ("Kachel ziehen", "Den Fokusbereich verschieben"),
+                ("Cmd+Klick / Shift+Klick auf eine Kachel", "Weitere Kacheln wählen"),
             ],
         },
         HelpSection {
@@ -398,12 +398,12 @@ pub static DE: Strings = Strings {
             title: "Pinselmaske",
             rows: &[
                 ("K", "Pinsel ein / aus; malt die gewählte Pinselmaske"),
-                ("Drag", "Malen; jeder Strich ist ein Widerrufsschritt"),
-                ("Alt+Drag", "Radieren"),
+                ("Ziehen", "Malen; jeder Strich ist ein Widerrufsschritt"),
+                ("Alt+Ziehen", "Radieren"),
                 ("[ / ]", "Pinselgröße"),
-                ("Scroll", "Pinselgröße"),
+                ("Scrollen", "Pinselgröße"),
                 ("Shift+[ / ]", "Weiche Kante des Pinsels"),
-                ("Shift+Scroll", "Weiche Kante des Pinsels"),
+                ("Shift+Scrollen", "Weiche Kante des Pinsels"),
                 ("Esc", "Den Pinsel ablegen"),
             ],
         },
@@ -412,9 +412,9 @@ pub static DE: Strings = Strings {
             rows: &[
                 ("Q", "Retusche ein / aus"),
                 ("[ / ]", "Pinselgröße"),
-                ("Scroll", "Pinselgröße"),
+                ("Scrollen", "Pinselgröße"),
                 ("Shift+[ / ]", "Weiche Kante des Pinsels"),
-                ("Shift+Scroll", "Weiche Kante des Pinsels"),
+                ("Shift+Scrollen", "Weiche Kante des Pinsels"),
                 ("O", "Die Flecken zeigen oder ausblenden"),
                 ("Shift+O", "Den nächsten Fleck auswählen"),
                 ("Delete", "Den ausgewählten Fleck löschen"),
@@ -667,6 +667,8 @@ pub static DE: Strings = Strings {
         |n, total, e| format!("{n}/{total} in den Papierkorb gelegt \u{2014} letzter Fehler: {e}")
     },
     delete_in_progress: "Ein anderer Löschvorgang läuft noch\u{2026}",
+    delete_worker_failed: "Der Löschvorgang konnte nicht gestartet werden.",
+    startup_failed: "LightPhotos konnte nicht gestartet werden.",
     group_refused_loading: "Die Stapel dieses Ordners werden noch geladen. Versuchen Sie es gleich noch einmal.",
     group_name_unsaveable: "Ein Dateiname hier kann nicht in einem Stapel gesichert werden.",
     delete_no_handle: |dir| format!("Fotos konnten nicht gelöscht werden: kein Ordner-Handle für {dir}"),
@@ -953,6 +955,7 @@ pub static DE: Strings = Strings {
     comfy_lost: "ComfyUI antwortet unter {where} nicht mehr. Erneut starten, dann „{button}“ drücken.",
     fill_partial: "{failed} von {of} Varianten fehlgeschlagen. {why}",
     fill_not_started: "Die Füllung ließ sich nicht starten. Bitte erneut versuchen.",
+    fill_discarded_folder_changed: "Der Ordner wurde während der Generierung gewechselt, daher wurde die Füllung verworfen.",
     wb_no_image: "Kein Bild geladen, in dem gewählt werden kann",
     wb_pick_brighter: "Wählen Sie für den Weißabgleich ein helleres, weniger gesättigtes Pixel",
     open_folder_failed: |e| format!("Der Ordner konnte nicht geöffnet werden: {e}"),
@@ -997,6 +1000,8 @@ pub static DE: Strings = Strings {
     presets_locked:
         "Die Vorgaben sind gesperrt, weil die gesicherte Datei nicht gelesen werden konnte. Verschieben oder reparieren Sie sie und starten Sie dann neu.",
     presets_save_failed: |e| format!("Die Vorgaben konnten nicht gesichert werden: {e}"),
+    gpu_out_of_memory: "Dieses Bild ist zu groß für diese GPU und konnte daher nicht angezeigt werden.",
+    gpu_device_error: "Das Grafikgerät hatte ein Problem, daher konnte dieses Bild nicht angezeigt werden.",
 
     menu: MenuStrings {
         about: "Über LightPhotos",

@@ -147,7 +147,10 @@ impl Mode {
                         } else {
                             "Run one headless command on the photos named in params.photos, \
                              saving each photo's sidecar. Every photo is checked before any is \
-                             written."
+                             written. The save is immediate and cannot be undone from here: \
+                             photo.reset and clear-masks discard a photo's develop edits, masks, \
+                             touch-ups and generative fills for good, so confirm params.photos \
+                             with the user before a destructive command on many photos."
                         },
                         object(
                             json!({

@@ -18,6 +18,21 @@ use crate::develop::{self, Adjustments, EXPOSURE_RANGE, TONE_RANGE};
 /// One bin per 8-bit display level.
 const BINS: usize = 256;
 
+/// Counts `Develop::new` calls during an `analyze`, so a test can prove the
+/// pipeline is built per candidate and not per bin or per sample.
+#[cfg(test)]
+pub(crate) static DEVELOP_BUILDS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// `Develop::new`, counted under test. Autotone evaluates the same `adj`
+/// against every histogram bin, so the pipeline is built once per candidate
+/// here, not once per `respond`.
+fn new_develop(adj: &Adjustments) -> develop::Develop {
+    #[cfg(test)]
+    DEVELOP_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    develop::Develop::new(adj)
+}
+
 /// Where Exposure puts the median: a little over the middle.
 const TARGET_MEDIAN: f32 = 0.55;
 
@@ -74,13 +89,13 @@ fn luma(px: [f32; 3]) -> f32 {
 
 /// Linear-light pixel to display colour under `adj`. Matches what
 /// `recompute_histogram` plots in the Develop panel.
-fn display(adj: &Adjustments, format: PixelFormat, px: [f32; 3]) -> [f32; 3] {
+fn display(dev: &develop::Develop, format: PixelFormat, px: [f32; 3]) -> [f32; 3] {
     // Unframed, so Vignette and Grain stay out and the position is unused.
-    develop::Develop::new(adj).display_at(format, px, 0.5, 0.5, None)
+    dev.display_at(format, px, 0.5, 0.5, None)
 }
 
-fn respond(adj: &Adjustments, format: PixelFormat, linear: [f32; 3]) -> f32 {
-    luma(display(adj, format, linear))
+fn respond(dev: &develop::Develop, format: PixelFormat, linear: [f32; 3]) -> f32 {
+    luma(display(dev, format, linear))
 }
 
 /// Scale `px` down until it displays at luma `level`, keeping its hue.
@@ -89,16 +104,20 @@ fn respond(adj: &Adjustments, format: PixelFormat, linear: [f32; 3]) -> f32 {
 /// 0.08 brighter than the bin's mean display level. Uncorrected, every
 /// percentile reads high and Exposure stops short. Never scales up: if `px`
 /// is already at or below `level`, it is returned unchanged.
-fn fit_to_level(format: PixelFormat, px: [f32; 3], level: f32) -> [f32; 3] {
-    let identity = Adjustments::default();
+fn fit_to_level(
+    identity: &develop::Develop,
+    format: PixelFormat,
+    px: [f32; 3],
+    level: f32,
+) -> [f32; 3] {
     let scaled = |k: f32| [px[0] * k, px[1] * k, px[2] * k];
-    if respond(&identity, format, px) <= level + 1e-6 {
+    if respond(identity, format, px) <= level + 1e-6 {
         return px;
     }
     let (mut lo, mut hi) = (0.0f32, 1.0f32);
     for _ in 0..FIT_STEPS {
         let mid = 0.5 * (lo + hi);
-        if respond(&identity, format, scaled(mid)) < level {
+        if respond(identity, format, scaled(mid)) < level {
             lo = mid;
         } else {
             hi = mid;
@@ -112,7 +131,7 @@ impl Histogram {
         if samples.is_empty() {
             return None;
         }
-        let identity = Adjustments::default();
+        let identity = new_develop(&Adjustments::default());
         let mut count = [0f32; BINS];
         let mut lin_sum = [[0f32; 3]; BINS];
         let mut level_sum = [0f64; BINS];
@@ -144,7 +163,12 @@ impl Histogram {
                     lin_sum[i][1] / count[i],
                     lin_sum[i][2] / count[i],
                 ];
-                lin[i] = fit_to_level(format, mean, (level_sum[i] / f64::from(count[i])) as f32);
+                lin[i] = fit_to_level(
+                    &identity,
+                    format,
+                    mean,
+                    (level_sum[i] / f64::from(count[i])) as f32,
+                );
             }
         }
         Some(Histogram {
@@ -158,11 +182,13 @@ impl Histogram {
 
     /// Display luma at cumulative fraction `p` under `adj`.
     fn percentile(&self, p: f32, adj: &Adjustments) -> f32 {
+        // Built once for this candidate; every non-empty bin reuses it.
+        let dev = new_develop(adj);
         let mut output = [(0.0f32, 0.0f32); BINS];
         let mut len = 0;
         for (bin, &count) in self.count.iter().enumerate() {
             if count > 0.0 {
-                output[len] = (respond(adj, self.format, self.lin[bin]), count);
+                output[len] = (respond(&dev, self.format, self.lin[bin]), count);
                 len += 1;
             }
         }
@@ -381,6 +407,21 @@ mod tests {
             .collect()
     }
 
+    /// `respond` from an `Adjustments`, so the tests needn't build a `Develop`.
+    fn respond_adj(adj: &Adjustments, format: PixelFormat, linear: [f32; 3]) -> f32 {
+        respond(&develop::Develop::new(adj), format, linear)
+    }
+
+    /// `fit_to_level` under the identity pipeline.
+    fn fit_identity(format: PixelFormat, px: [f32; 3], level: f32) -> [f32; 3] {
+        fit_to_level(
+            &develop::Develop::new(&Adjustments::default()),
+            format,
+            px,
+            level,
+        )
+    }
+
     /// Display luma at percentile `p`, measured over every pixel instead of the
     /// histogram's stand-ins.
     fn percentile_under(samples: &[[f32; 3]], adj: &Adjustments, p: f32) -> f32 {
@@ -422,12 +463,12 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            respond(&Adjustments::default(), PixelFormat::Srgb8, photo[0])
-                > respond(&Adjustments::default(), PixelFormat::Srgb8, photo[99])
+            respond_adj(&Adjustments::default(), PixelFormat::Srgb8, photo[0])
+                > respond_adj(&Adjustments::default(), PixelFormat::Srgb8, photo[99])
         );
         assert!(
-            respond(&adj, PixelFormat::Srgb8, photo[0])
-                < respond(&adj, PixelFormat::Srgb8, photo[99])
+            respond_adj(&adj, PixelFormat::Srgb8, photo[0])
+                < respond_adj(&adj, PixelFormat::Srgb8, photo[99])
         );
         for p in [0.01, 0.25, 0.50, 0.75, 0.99] {
             let expected = percentile_under(&photo, &adj, p);
@@ -446,12 +487,12 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            respond(&Adjustments::default(), PixelFormat::Srgb8, photo[0])
-                < respond(&Adjustments::default(), PixelFormat::Srgb8, photo[99])
+            respond_adj(&Adjustments::default(), PixelFormat::Srgb8, photo[0])
+                < respond_adj(&Adjustments::default(), PixelFormat::Srgb8, photo[99])
         );
         assert!(
-            respond(&adj, PixelFormat::Srgb8, photo[0])
-                > respond(&adj, PixelFormat::Srgb8, photo[99])
+            respond_adj(&adj, PixelFormat::Srgb8, photo[0])
+                > respond_adj(&adj, PixelFormat::Srgb8, photo[99])
         );
         for p in [0.01, 0.25, 0.50, 0.75, 0.99] {
             assert!((hist.percentile(p, &adj) - percentile_under(&photo, &adj, p)).abs() < 1e-4);
@@ -490,12 +531,12 @@ mod tests {
                         exposure,
                         ..Default::default()
                     };
-                    let expected = respond(&adj, format, px);
+                    let expected = respond_adj(&adj, format, px);
                     assert!((hist.percentile(0.5, &adj) - expected).abs() < 1e-5);
                 }
-                let level = respond(&Adjustments::default(), format, px);
-                assert_eq!(fit_to_level(format, px, level + 0.01), px);
-                assert_eq!(fit_to_level(format, px, level), px);
+                let level = respond_adj(&Adjustments::default(), format, px);
+                assert_eq!(fit_identity(format, px, level + 0.01), px);
+                assert_eq!(fit_identity(format, px, level), px);
             }
         }
     }
@@ -512,7 +553,7 @@ mod tests {
                 continue;
             }
             let level = bin as f32 / (BINS - 1) as f32;
-            let got = respond(&identity, PixelFormat::Srgb8, hist.lin[bin]);
+            let got = respond_adj(&identity, PixelFormat::Srgb8, hist.lin[bin]);
             assert!(
                 (got - level).abs() < 0.005,
                 "bin {bin} stands for {level:.3} but reads back as {got:.3}"
@@ -606,7 +647,7 @@ mod tests {
                 continue;
             }
             let level = bin as f32 / (BINS - 1) as f32;
-            let got = respond(&identity, PixelFormat::LinearF16, hist.lin[bin]);
+            let got = respond_adj(&identity, PixelFormat::LinearF16, hist.lin[bin]);
             assert!(
                 (got - level).abs() < 0.005,
                 "bin {bin} stands for {level:.3} but reads back as {got:.3}"
@@ -837,6 +878,25 @@ mod tests {
         assert!(out.is_monochrome());
         assert_eq!(out.vibrance, 5.0);
         assert_eq!(out.exposure, 0.5);
+    }
+
+    #[test]
+    fn analyze_builds_the_pipeline_per_candidate_not_per_bin_or_sample() {
+        use std::sync::atomic::Ordering;
+        // A realistic worst case: a full 256x256 grid of samples.
+        let samples = ramp(0.0, 1.0, 256 * 256);
+        DEVELOP_BUILDS.store(0, Ordering::Relaxed);
+        let _ = analyze(&samples, PixelFormat::Srgb8);
+        let builds = DEVELOP_BUILDS.load(Ordering::Relaxed);
+        // Hoisted out of the loops this is ~5.4k: one build per percentile call
+        // (the solver's bisection steps over 4 passes) plus one identity build.
+        // A regression that built per sample would add this input's 65_536; one
+        // that built per non-empty bin inside `percentile` would multiply it by
+        // ~256. Either blows past this bound.
+        assert!(
+            builds < 10_000,
+            "analyze built Develop {builds} times; expected it hoisted out of the per-bin and per-sample loops"
+        );
     }
 
     #[test]

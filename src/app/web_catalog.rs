@@ -17,6 +17,10 @@ use crate::web::{web_catalog_idb as idb, web_fs};
 /// land together.
 pub(super) struct CatalogLoad {
     generation: u64,
+    /// The catalog this load was started for. A new-catalog switch lands its
+    /// record without starting a load, so it does not bump `generation`; the
+    /// name is what still tells an earlier catalog's load from this one's.
+    name: String,
     record: Result<Option<Vec<u8>>, String>,
     /// The preset-folders record, kept apart from `record`.
     presets: Result<Option<Vec<u8>>, String>,
@@ -61,6 +65,14 @@ impl State {
             forget_after_load: Vec::new(),
         }
     }
+
+    /// A switch supersedes any load still in flight: bump the generation so a
+    /// slower load for the catalog left behind is dropped, and let go of a
+    /// session restore that was waiting on it.
+    fn supersede(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.restore_waiting = false;
+    }
 }
 
 impl App {
@@ -80,6 +92,7 @@ impl App {
             let names = idb::catalog_names().await;
             let _ = tx.send(CatalogLoad {
                 generation,
+                name,
                 record,
                 presets,
                 kept,
@@ -92,7 +105,11 @@ impl App {
     /// Land a finished load. Returns true while the record is still out.
     pub(super) fn poll_catalog_load(&mut self) -> bool {
         while let Ok(load) = self.web.catalogs.rx.try_recv() {
-            if load.generation == self.web.catalogs.generation {
+            // Drop a load the open catalog is no longer waiting for, by both
+            // its generation and its name: a new-catalog switch changes the
+            // name without bumping the generation, so an earlier catalog's
+            // load must not land on, and overwrite, the one now open.
+            if load.generation == self.web.catalogs.generation && load.name == self.catalog.name() {
                 self.land_catalog(load);
             }
         }
@@ -224,6 +241,7 @@ impl App {
         self.sync_marks();
         self.close_folder();
         self.supersede_web_pending_nav();
+        self.web.catalogs.supersede();
         self.catalog = catalog;
         self.rescan_preset_folders(presets::Access::Quiet);
         self.web.catalogs.forget_after_load.clear();

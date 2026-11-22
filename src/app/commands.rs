@@ -50,6 +50,18 @@ impl App {
             if let Some(reason) = self.folder_read_only_text() {
                 return Err(CommandError::Failed { reason });
             }
+            // A folder still deciding its visit can't take an edit yet: the
+            // store drops the write, but `run` would still report success and
+            // leave a stale undo step. The keyboard gate refuses here too
+            // (`refuse_edit`). Auto Tone and scoring are jobs that defer
+            // across the opening instead (docs/design/folder-lock.md row 47).
+            if self.folder_store.opening()
+                && !matches!(cmd, Command::AutoTone(_) | Command::Score(_))
+            {
+                return Err(CommandError::Failed {
+                    reason: crate::i18n::t().folder_opening.to_string(),
+                });
+            }
         }
         let loupe = self.mode == ViewMode::Loupe;
         match cmd {
@@ -1552,6 +1564,45 @@ mod tests {
         crate::app::test_support::load_folder(&mut app, &dir);
         assert!(!app.history.can_undo());
         assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 1.0);
+    }
+
+    /// A photo-writing command run while the folder's visit is still
+    /// undecided (`Opening`) must be refused, the way the keyboard refuses
+    /// it, so `run` cannot report success for an edit the store drops and
+    /// leave a stale undo step. Auto Tone and scoring, which defer across the
+    /// opening, are the only exceptions.
+    #[test]
+    fn a_develop_command_is_refused_while_the_folder_is_still_opening() {
+        use crate::app::test_support::wait_for_folder_store_within;
+        use crate::sidecar::{FolderLock, Writer};
+        let (dir, _) = crate::app::test_support::folder_of("cmd-open-refuse", &["0.jpg".into()]);
+        // A quitting app holds the lock, so the new visit stays Opening while
+        // the UI thread retries, with no wait.
+        let mut old = FolderLock::try_acquire(&dir, Writer::App).unwrap();
+        old.mark_quitting();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            drop(old);
+        });
+        let mut app = App::new(None);
+        app.load_playlist(crate::navigation::Playlist::from_dir(&dir), dir.clone());
+        assert!(app.folder_store.opening(), "the visit is still undecided");
+        app.select_single(0);
+
+        let mut controls = std::collections::BTreeMap::new();
+        controls.insert(SliderId::Exposure, crate::command::ControlValue::To(1.0));
+        let err = app
+            .run(Command::Develop(DevelopParams {
+                controls,
+                photos: Photos::Selected,
+            }))
+            .unwrap_err();
+        assert!(matches!(err, CommandError::Failed { .. }), "{err:?}");
+        assert!(!app.history.can_undo(), "no stale undo step is left");
+
+        wait_for_folder_store_within(&mut app, std::time::Duration::from_secs(20));
+        let _ = release.join();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

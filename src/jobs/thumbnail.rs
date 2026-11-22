@@ -506,12 +506,18 @@ fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
         crate::paths::write_atomic(file, &jpeg, None).map_err(|e| format!("write: {e}"))
     }
     // ImageIO writes the file itself and replaces a symlink rather than
-    // following it. Append `.tmp` to the full name so `sweep_orphans` can
-    // parse it.
+    // following it. Use the same `.<pid>-<n>.tmp` name `write_atomic` does, so
+    // two workers that decode the same photo at once (the loader's documented
+    // viewport-and-background duplicate) never share a temp file and leave a
+    // truncated JPEG under the entry name; `atomic_tmp_target` lets
+    // `sweep_orphans` still parse it.
     #[cfg(target_os = "macos")]
     {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let mut tmp = file.as_os_str().to_os_string();
-        tmp.push(".tmp");
+        tmp.push(format!(".{}-{n}.tmp", std::process::id()));
         let tmp = PathBuf::from(tmp);
 
         crate::decode::image_encode::encode_jpeg(
@@ -728,6 +734,24 @@ mod tests {
         let (back, key) = parse_cache_name(&name).expect("should parse");
         assert_eq!(back, photo);
         assert_eq!(key, 0xa3f1_c07b_91e4_d2f8);
+    }
+
+    // The macOS cache write uses a `.<pid>-<n>.tmp` name so two workers that
+    // decode the same photo at once never share a temp file. `sweep_orphans`
+    // must still recognise it as a temp of a real entry, or stale temps would
+    // accumulate forever. This mirrors sweep_orphans' own parse.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_unique_cache_temp_name_is_reaped_as_its_entry() {
+        let entry = cache_name(OsStr::new("my.photo.jpg"), 0xa3f1_c07b_91e4_d2f8);
+        let tmp = format!("{}.{}-7.tmp", entry.to_str().unwrap(), std::process::id());
+        let stem = tmp.strip_suffix(".tmp").expect("a .tmp name");
+        let target = crate::paths::atomic_tmp_target(stem);
+        assert_eq!(
+            parse_cache_name(OsStr::new(target)),
+            Some((OsString::from("my.photo.jpg"), 0xa3f1_c07b_91e4_d2f8)),
+            "sweep_orphans must parse the unique temp back to its photo and key"
+        );
     }
 
     #[test]

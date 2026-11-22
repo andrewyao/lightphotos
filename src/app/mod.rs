@@ -22,7 +22,7 @@ use crate::export::Exporter;
 use crate::jobs::loader::Loader;
 use crate::navigation::{Cmp, FlagSet, Playlist};
 use crate::persist::folder_store::FolderStore;
-use crate::renderer::{EguiPaint, Renderer};
+use crate::renderer::{EguiPaint, GpuError, Renderer};
 use crate::ui;
 
 /// The closest manual zoom, in screen pixels per source pixel. The farthest
@@ -485,6 +485,10 @@ pub(crate) struct App {
     shown_origin: crate::jobs::thumbnail::Origin,
     /// A file or folder requested before the window and renderer existed.
     pub(crate) pending_initial: Option<PathBuf>,
+    /// Set when startup left no window to show (window or GPU setup failed), so
+    /// `main` can exit non-zero instead of falling off the end as success.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) startup_error: Option<String>,
     /// The last session saved, which the next launch restores.
     session: Option<session::Session>,
     /// The browser build's file handles, channels and decode bookkeeping.
@@ -971,6 +975,8 @@ impl App {
             tiers_mode: ViewMode::Grid,
             shown_origin: crate::jobs::thumbnail::Origin::Decoded,
             pending_initial: initial,
+            #[cfg(not(target_arch = "wasm32"))]
+            startup_error: None,
             session,
             #[cfg(target_arch = "wasm32")]
             web: web::Web::new(),
@@ -1205,6 +1211,7 @@ impl App {
             }
 
             let playlist = Playlist::from_file(&path);
+            self.clear_folder_edit_state();
             self.seed_mirrors(&playlist);
             let start_index = playlist.position();
             let start = playlist.entry(start_index).map(Path::to_path_buf);
@@ -1361,6 +1368,11 @@ impl App {
             loader.forget_loupe_decodes();
         }
         self.forget_compare_fulls_waiting();
+        // The browser tracks its own Loupe decodes outside the loader; clear
+        // their failed, retry and in-flight state the one place loupe decodes
+        // are forgotten, so the two cannot come apart.
+        #[cfg(target_arch = "wasm32")]
+        self.web.forget_loupe();
     }
 
     /// [`App::forget_loupe_decodes`] for a folder change or close, which
@@ -1370,6 +1382,10 @@ impl App {
         self.forget_loupe_decodes();
         if let Some(loader) = self.loader.as_mut() {
             loader.set_hold(Default::default());
+            // A thumbnail that failed, or a file since replaced, must be tried
+            // again in the new (or refreshed) folder, not held failed or stale
+            // for the life of the process.
+            loader.forget_thumb_failures();
         }
     }
 
@@ -1415,6 +1431,21 @@ impl App {
         self.anchor = None;
     }
 
+    /// Drop the edit state that names the leaving folder's photos: the undo
+    /// history, detected-mask coverage, the burst scan and the Touch Up undo
+    /// stacks. Camera folders reuse file names (DSC_0001.NEF), so a group step
+    /// or Touch Up kept across a folder change would otherwise be written into
+    /// the new folder. Every route that opens a folder or a single file calls
+    /// this, so none can leak these into another folder.
+    fn clear_folder_edit_state(&mut self) {
+        self.history.clear();
+        self.coverage.clear();
+        self.burst_scan = None;
+        self.touchup_undo.clear();
+        #[cfg(target_arch = "wasm32")]
+        self.patches.clear();
+    }
+
     /// Show `dir`'s images in the grid with nothing selected.
     #[cfg(not(target_arch = "wasm32"))]
     fn load_folder(&mut self, dir: PathBuf) {
@@ -1427,11 +1458,7 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         crate::web::analytics::folder_opened(playlist.entries().len());
         self.teardown_loupe_state();
-        self.history.clear();
-        self.coverage.clear();
-        #[cfg(target_arch = "wasm32")]
-        self.patches.clear();
-        self.burst_scan = None;
+        self.clear_folder_edit_state();
         self.seed_mirrors(&playlist);
         self.playlist = Some(playlist);
         self.reset_eyes_filter();
@@ -1641,6 +1668,22 @@ impl App {
             screen_descriptor,
         };
         let presented = renderer.render(primary_vp, compare_vp, Some(egui_paint));
+        // A wgpu validation, out-of-memory or device-lost fault during that
+        // frame would have panicked the UI thread without the renderer's error
+        // handler (REND-01). Drain the recorded fault instead: drop the image,
+        // which can no longer be trusted, so a later photo can recover, and
+        // tell the user what happened.
+        let gpu_error = renderer.take_error();
+        if gpu_error.is_some() {
+            renderer.clear_image();
+        }
+        if let Some(error) = gpu_error {
+            let message = match error {
+                GpuError::OutOfMemory => crate::i18n::t().gpu_out_of_memory,
+                GpuError::Device => crate::i18n::t().gpu_device_error,
+            };
+            self.set_status(StatusKind::Error, message.into());
+        }
         // Retry an unpresentable surface so it draws once revealed. If winit
         // reports it occluded, wait for Occluded(false). macOS sends no
         // Occluded for a window behind another one, and nothing presented
@@ -2011,6 +2054,53 @@ mod tests {
         assert_eq!(range_set(3, 3), set(&[3])); // single cell
     }
 
+    /// In a narrow window the grid toolbar's tail (the Actions menu) scrolls
+    /// off, but a horizontal scroll over the row brings it back, instead of it
+    /// being clipped away unreachably (UI-B-02).
+    #[test]
+    fn a_narrow_grid_toolbar_scrolls_to_reach_the_actions_menu() {
+        use crate::app::test_support::{folder_app, settled_at};
+        let (mut app, dir, _paths) = folder_app("toolbar-overflow", 3);
+        let t = crate::i18n::t();
+        let actions = format!("{} \u{23f7}", t.actions_menu);
+        let window = egui::Vec2::new(700.0, 800.0);
+        let _ = settled_at(&mut app, window);
+        let before = settled_at(&mut app, window);
+        assert!(
+            !before.has(&actions),
+            "the Actions menu should start scrolled off a 700pt window"
+        );
+        // Horizontal scroll over the toolbar row reveals its right end.
+        let row = before.pos_of(t.rating_filter);
+        let ctx = app.egui_ctx.clone();
+        let scroll = |app: &mut App| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, window)),
+                events: vec![
+                    egui::Event::PointerMoved(row),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(-4000.0, 0.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let _ = crate::ui::draw(ui, app);
+            });
+        };
+        scroll(&mut app);
+        scroll(&mut app);
+        let after = settled_at(&mut app, window);
+        assert!(
+            after.has(&actions),
+            "a horizontal scroll should bring the Actions menu into reach"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// What was read from a folder's files is read again on the next visit,
     /// so an edit made outside the app in between shows.
     #[test]
@@ -2029,5 +2119,36 @@ mod tests {
         assert!(!app.sort_meta.contains_key(&photo), "sort_meta");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&other);
+    }
+
+    /// Opening a file in another folder must drop the leaving folder's undo
+    /// history and Touch Up stacks. Camera folders reuse file names, so a
+    /// leaked group step would otherwise be written into the new folder.
+    #[test]
+    fn opening_a_file_in_another_folder_drops_the_old_undo_history() {
+        use crate::app::test_support::{folder_app, temp_folder};
+        let (mut app, dir_a, paths_a) = folder_app("open-file-leaks-undo", 2);
+        app.selected = set(&[0, 1]);
+        app.sel = Some(0);
+        app.group_selected();
+        assert!(app.history.can_undo(), "a group step is on the undo stack");
+        // A Touch Up stack for a name both folders share.
+        app.touchup_undo
+            .insert(paths_a[0].clone(), vec![fill::TouchStep::Spots(Vec::new())]);
+
+        // Folder B reuses folder A's file names, as camera folders do.
+        let dir_b = temp_folder("open-file-leaks-undo-b");
+        let file_b = dir_b.join("0.jpg");
+        std::fs::write(&file_b, []).unwrap();
+        std::fs::write(dir_b.join("1.jpg"), []).unwrap();
+
+        app.open(file_b);
+        assert!(
+            !app.history.can_undo(),
+            "the leaving folder's undo history is gone"
+        );
+        assert!(app.touchup_undo.is_empty(), "Touch Up stacks are gone");
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 }

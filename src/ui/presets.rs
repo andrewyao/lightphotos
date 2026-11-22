@@ -61,14 +61,35 @@ fn list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 group(ui, id, t.my_presets, true, !query.is_empty(), |ui| {
                     for preset in library {
                         ui.horizontal(|ui| {
-                            let row = preset_row(ui, live, &preset.name, &preset.notes);
-                            if row.clicked() {
-                                out.actions
-                                    .push(UiAction::ApplyPreset(PresetRef::Library(preset.id)));
-                            }
+                            // The ⋯ menu is reserved on the right first, then the
+                            // name fills the rest, left-aligned and truncated, so
+                            // a long or CJK name can't push the menu off the panel
+                            // (UI-B-03).
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| library_menu(ui, preset.id, out),
+                                |ui| {
+                                    library_menu(ui, preset.id, out);
+                                    let clicked = ui
+                                        .with_layout(
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                preset_row(
+                                                    ui,
+                                                    live,
+                                                    &preset.name,
+                                                    &preset.notes,
+                                                    true,
+                                                )
+                                            },
+                                        )
+                                        .inner
+                                        .clicked();
+                                    if clicked {
+                                        out.actions.push(UiAction::ApplyPreset(
+                                            PresetRef::Library(preset.id),
+                                        ));
+                                    }
+                                },
                             );
                         });
                     }
@@ -90,7 +111,7 @@ fn list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 let id = egui::Id::new(("preset_group", key));
                 group(ui, id, name, false, !query.is_empty(), |ui| {
                     for preset in presets {
-                        if preset_row(ui, live, &preset.name, &preset.notes).clicked() {
+                        if preset_row(ui, live, &preset.name, &preset.notes, false).clicked() {
                             out.actions.push(UiAction::ApplyPreset(PresetRef::Folder(
                                 preset.path.clone(),
                             )));
@@ -131,14 +152,24 @@ fn group(
 
 /// A preset's row, off while no photo is selected. Its hover is what the
 /// preset could not carry, when anything.
-fn preset_row(ui: &mut egui::Ui, live: bool, name: &str, notes: &[String]) -> egui::Response {
+fn preset_row(
+    ui: &mut egui::Ui,
+    live: bool,
+    name: &str,
+    notes: &[String],
+    truncate: bool,
+) -> egui::Response {
     let t = t();
     let hover = if notes.is_empty() {
         t.apply_preset_tip.to_string()
     } else {
         notes.join("\n")
     };
-    ui.add_enabled(live, egui::Button::selectable(false, name))
+    let mut button = egui::Button::selectable(false, name);
+    if truncate {
+        button = button.truncate();
+    }
+    ui.add_enabled(live, button)
         .on_hover_text(hover)
         .on_disabled_hover_text(t.no_photo_selected)
 }

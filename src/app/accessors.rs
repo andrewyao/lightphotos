@@ -490,6 +490,14 @@ impl App {
         self.thumb_texture_for_path(path)
     }
 
+    /// The file name of the photo in the visible cell at `pos`, for the
+    /// cell's accessible name so a screen reader doesn't read a blank button.
+    pub(crate) fn cell_label(&self, pos: usize) -> Option<String> {
+        let idx = *self.visible.get(pos)?;
+        let path = self.playlist.as_ref()?.entry(idx)?;
+        Some(path.file_name()?.to_string_lossy().into_owned())
+    }
+
     /// Whether the thumbnail for the visible cell at `pos` failed to decode
     /// for good, as opposed to still loading.
     pub(crate) fn thumb_failed_at(&self, pos: usize) -> bool {

@@ -635,6 +635,8 @@ pub static EN: Strings = Strings {
         |n, total, e| format!("Moved {n}/{total}. Last error: {e}")
     },
     delete_in_progress: "Another delete is still running\u{2026}",
+    delete_worker_failed: "Could not start the delete.",
+    startup_failed: "LightPhotos could not start.",
     group_refused_loading: "This folder's stacks are still loading. Try again in a moment.",
     group_name_unsaveable: "A file name here can't be saved in a stack.",
     delete_no_handle: |dir| format!("Couldn't delete photos: no directory handle for {dir}"),
@@ -872,6 +874,7 @@ pub static EN: Strings = Strings {
     comfy_lost: "ComfyUI stopped responding at {where}. Start it again, then press {button}.",
     fill_partial: "{failed} of {of} variations failed. {why}",
     fill_not_started: "Couldn't start the fill. Try again.",
+    fill_discarded_folder_changed: "The folder changed while generating, so the fill was discarded.",
     wb_no_image: "No image loaded to pick from",
     wb_pick_brighter: "Pick a brighter, less saturated pixel for white balance",
     open_folder_failed: |e| format!("Couldn't open folder: {e}"),
@@ -916,6 +919,8 @@ pub static EN: Strings = Strings {
     presets_locked:
         "Presets are locked because the saved file could not be read. Move or fix it, then restart.",
     presets_save_failed: |e| format!("Couldn't save presets: {e}"),
+    gpu_out_of_memory: "This image is too large for this GPU, so it couldn't be shown.",
+    gpu_device_error: "The graphics device had a problem, so this image couldn't be shown.",
 
     menu: MenuStrings {
         about: "About LightPhotos",

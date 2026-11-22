@@ -59,6 +59,15 @@ pub enum ColorLabel {
 }
 
 impl ColorLabel {
+    /// Every label, in the order the menu and the toolbar filter list them.
+    pub const ALL: [ColorLabel; 5] = [
+        ColorLabel::Red,
+        ColorLabel::Yellow,
+        ColorLabel::Green,
+        ColorLabel::Blue,
+        ColorLabel::Purple,
+    ];
+
     /// The label digit key `n` sets: 6 red, 7 yellow, 8 green, 9 blue.
     /// Purple has no key, as in Lightroom.
     pub fn from_digit(n: u8) -> Option<ColorLabel> {
@@ -100,12 +109,8 @@ pub struct ImageRecord {
     pub detections: Detections,
     /// Generative fills, composited at the Touch Up stage. Their pixels
     /// live in `.lightphotos/fills/`.
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "readable_fills"
-    )]
-    pub fills: Vec<Fill>,
+    #[serde(default, skip_serializing_if = "FillList::is_empty")]
+    pub fills: FillList,
     /// Manual rotation in 90° clockwise steps, `0..=3`.
     #[serde(
         default,
@@ -252,30 +257,154 @@ pub struct StoredScore {
 
 /// A sidecar comes from whoever supplied the folder, and past
 /// [`crate::develop::MAX_TOUCHUPS`] the renderer's buffer overflows, so extra
-/// spots are dropped on load.
+/// spots are dropped on load. Each kept spot is sanitized the way masks and
+/// the crop are: a spot with a non-finite field (an infinite radius turns the
+/// baked mask NaN and the photo exports black) is dropped, the rest are
+/// clamped into range.
 fn at_most_max_touchups<'de, D>(deserializer: D) -> Result<Vec<TouchUp>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let mut touchups = Vec::<TouchUp>::deserialize(deserializer)?;
     touchups.truncate(crate::develop::MAX_TOUCHUPS);
-    Ok(touchups)
+    Ok(touchups
+        .into_iter()
+        .filter_map(TouchUp::sanitized)
+        .collect())
 }
 
-/// The first [`MAX_FILLS`] fills a sidecar holds that [`Fill`] accepts. A
-/// bad entry, or a `fills` that isn't a list, costs those fills and nothing
-/// else in the record.
-fn readable_fills<'de, D>(deserializer: D) -> Result<Vec<Fill>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = Box::<RawValue>::deserialize(deserializer)?;
-    let entries = serde_json::from_str::<Vec<Box<RawValue>>>(raw.get()).unwrap_or_default();
-    Ok(entries
-        .iter()
-        .filter_map(|e| serde_json::from_str::<Fill>(e.get()).ok())
-        .take(MAX_FILLS)
-        .collect())
+/// A photo's generative fills as its sidecar holds them: the ones this build
+/// reads, and any it can't parse that still name patch files, kept as the
+/// JSON they came as and written back where they stood. A folder shared with
+/// a later build (a new fill shape, more variants, or entries past
+/// [`MAX_FILLS`]) keeps that build's fills and the reference to their patch
+/// PNGs through every write of this one, the way [`MaskList`] keeps foreign
+/// masks. `Deref` hands out only the fills this build draws.
+///
+/// A fill entry that names no readable patch id is garbage, not a later
+/// build's fill, and is dropped rather than failing the whole record.
+#[derive(Clone, Debug, Default)]
+pub struct FillList {
+    known: Vec<Fill>,
+    /// Each unparsed-but-preserved entry with its index in the list as read.
+    foreign: Vec<(usize, Box<RawValue>)>,
+}
+
+impl FillList {
+    pub fn is_empty(&self) -> bool {
+        self.known.is_empty() && self.foreign.is_empty()
+    }
+
+    /// Replaces the fills this build draws; preserved foreign entries stay,
+    /// as [`MaskList::set`] keeps foreign masks, so a later build's fills and
+    /// their patch files survive an edit made here.
+    pub fn set(&mut self, known: Vec<Fill>) {
+        self.known = known;
+    }
+
+    /// Whether any entry, drawn or preserved, lists `id` among its variants,
+    /// so the orphan sweep must keep that patch file.
+    pub fn references(&self, id: crate::develop::coverage::RasterId) -> bool {
+        self.known.iter().any(|f| f.variants().contains(&id))
+            || self
+                .foreign
+                .iter()
+                .any(|(_, raw)| foreign_variant_ids(raw).any(|v| v == id))
+    }
+
+    /// An entry this build can't parse but that names at least one patch id,
+    /// so it is a later build's fill to keep rather than garbage to drop.
+    fn is_foreign(raw: &RawValue) -> bool {
+        foreign_variant_ids(raw).next().is_some()
+    }
+}
+
+/// The patch ids a raw fill entry lists in its `variants` array.
+fn foreign_variant_ids(raw: &RawValue) -> impl Iterator<Item = crate::develop::coverage::RasterId> {
+    serde_json::from_str::<serde_json::Value>(raw.get())
+        .ok()
+        .and_then(|v| v.get("variants").and_then(|vs| vs.as_array()).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+impl From<Vec<Fill>> for FillList {
+    fn from(known: Vec<Fill>) -> Self {
+        FillList {
+            known,
+            foreign: Vec::new(),
+        }
+    }
+}
+
+impl std::ops::Deref for FillList {
+    type Target = [Fill];
+    fn deref(&self) -> &[Fill] {
+        &self.known
+    }
+}
+
+impl PartialEq for FillList {
+    fn eq(&self, other: &Self) -> bool {
+        self.known == other.known
+            && self.foreign.len() == other.foreign.len()
+            && self
+                .foreign
+                .iter()
+                .zip(&other.foreign)
+                .all(|((i, a), (j, b))| i == j && a.get() == b.get())
+    }
+}
+
+impl Serialize for FillList {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum Entry<'a> {
+            Fill(&'a Fill),
+            Foreign(&'a RawValue),
+        }
+        let mut out = Vec::with_capacity(self.known.len() + self.foreign.len());
+        let mut known = self.known.iter();
+        let mut foreign = self.foreign.iter().peekable();
+        loop {
+            match foreign.peek() {
+                Some((at, raw)) if *at == out.len() => {
+                    out.push(Entry::Foreign(raw));
+                    foreign.next();
+                }
+                _ => match known.next() {
+                    Some(f) => out.push(Entry::Fill(f)),
+                    None => break,
+                },
+            }
+        }
+        out.extend(foreign.map(|(_, raw)| Entry::Foreign(raw)));
+        out.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FillList {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // A `fills` that isn't a list costs the fills and nothing else.
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        let entries = serde_json::from_str::<Vec<Box<RawValue>>>(raw.get()).unwrap_or_default();
+        let mut list = FillList::default();
+        for (at, raw) in entries.into_iter().enumerate() {
+            match serde_json::from_str::<Fill>(raw.get()) {
+                Ok(fill) if list.known.len() < MAX_FILLS => list.known.push(fill),
+                // A readable fill past the cap, or one this build can't parse:
+                // keep it verbatim if it names a patch file, so a later build's
+                // fills survive and the sweep spares their PNGs.
+                _ if FillList::is_foreign(&raw) && list.foreign.len() < MAX_FILLS => {
+                    list.foreign.push((at, raw));
+                }
+                _ => {}
+            }
+        }
+        Ok(list)
+    }
 }
 
 /// A photo's masks as its sidecar holds them: the ones this build reads, and
@@ -663,8 +792,34 @@ pub fn write_record(photo: &Path, rec: &ImageRecord) -> Result<(), String> {
         return delete_record(photo);
     }
     let sidecar = sidecar_path(photo).ok_or("cannot determine sidecar path")?;
-    let bytes = serde_json::to_vec_pretty(rec).map_err(|e| e.to_string())?;
+    let bytes = serialized_within_limit(rec)?;
+    // Not `_durable`: these run on the writeback worker, often thousands at a
+    // time (rate or paste a whole folder). A per-file disk barrier (about 4 ms
+    // each here, F_FULLFSYNC on macOS) would turn a 20 000-photo drain from
+    // ~2 s into well over a minute and stall the quit-time flush. The atomic
+    // temp-then-rename already survives a process crash.
     crate::paths::write_atomic_in_dir(&sidecar, &bytes).map_err(|e| e.to_string())
+}
+
+/// `rec` as the bytes to store, refused when it would land over
+/// [`MAX_SIDECAR_BYTES`], which [`parse_record`] rejects on the way back in.
+/// Writing it would lose the photo's rating and edits on the next read. The
+/// pretty form is tried first; a record that only overflows because of the
+/// indentation is stored compact rather than lost.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn serialized_within_limit(rec: &ImageRecord) -> Result<Vec<u8>, String> {
+    let bytes = serde_json::to_vec_pretty(rec).map_err(|e| e.to_string())?;
+    if bytes.len() <= MAX_SIDECAR_BYTES {
+        return Ok(bytes);
+    }
+    let compact = serde_json::to_vec(rec).map_err(|e| e.to_string())?;
+    if compact.len() <= MAX_SIDECAR_BYTES {
+        return Ok(compact);
+    }
+    Err(format!(
+        "its edits would need {} bytes, over the {MAX_SIDECAR_BYTES}-byte sidecar limit",
+        compact.len()
+    ))
 }
 
 /// Delete `photo`'s sidecar. A photo with none is already done.
@@ -810,7 +965,7 @@ mod tests {
                 );
                 d
             },
-            fills: vec![sample_fill()],
+            fills: vec![sample_fill()].into(),
             rotation: 1,
             score: Some(StoredScore {
                 score: sample_score(),
@@ -851,7 +1006,7 @@ mod tests {
     #[test]
     fn a_record_with_only_fills_round_trips_and_counts_as_an_edit() {
         let rec = ImageRecord {
-            fills: vec![sample_fill()],
+            fills: vec![sample_fill()].into(),
             ..Default::default()
         };
         assert!(!rec.is_empty());
@@ -906,6 +1061,49 @@ mod tests {
         assert_eq!((not_a_list.rating, not_a_list.fills.len()), (Some(4), 0));
     }
 
+    /// EXP-02 / DEV-B-03: a fill a later build wrote in a shape this build
+    /// can't parse, but that still names its patch files, is kept verbatim
+    /// through a rewrite and keeps the sweep from reaping those PNGs. Before
+    /// the fix it was dropped on load and destroyed on the next write.
+    #[test]
+    fn an_unparsed_fill_from_a_later_build_is_preserved_and_keeps_its_files() {
+        use crate::develop::coverage::RasterId;
+        // A future fill: `bbox` as an object this build's `Fill` rejects, but
+        // a `variants` array that still points at a stored patch.
+        let future = r#"{"bbox":{"x":0.1,"y":0.1,"w":0.2,"h":0.2},"variants":["0000000000000abc"],"shape":"freeform"}"#;
+        let good = r#"{"bbox":[0.1,0.1,0.2,0.2],"variants":["0000000000000001"]}"#;
+        let body = format!(r#"{{"rating":3,"fills":[{good},{future}]}}"#);
+        let rec = parse_record(body.as_bytes(), || None).unwrap();
+
+        assert_eq!(
+            rec.fills.len(),
+            1,
+            "only the fill this build reads is drawn"
+        );
+        let future_id: RasterId = "0000000000000abc".parse().unwrap();
+        assert!(
+            rec.fills.references(future_id),
+            "the preserved fill's patch id is still claimed, so the sweep keeps it"
+        );
+
+        // The rewrite carries the future fill and its id back out, in place.
+        let written = serde_json::to_string(&rec).unwrap();
+        assert!(
+            written.contains("0000000000000abc"),
+            "round trips: {written}"
+        );
+        assert!(written.contains("freeform"), "the unknown shape is kept");
+
+        // It survives a second load unchanged.
+        let again = parse_record(written.as_bytes(), || None).unwrap();
+        assert_eq!(again.fills, rec.fills);
+        assert!(again.fills.references(future_id));
+
+        // A pure-garbage entry naming no patch is still dropped, not preserved.
+        let garbage = parse_record(br#"{"fills":[7,{"bbox":[0,0,1,1]}]}"#, || None).unwrap();
+        assert!(garbage.fills.is_empty(), "nothing to keep, nothing kept");
+    }
+
     #[test]
     fn a_sidecar_from_before_fills_loads_and_signs_the_same() {
         let bytes = br#"{"rating":2,"adjustments":{"exposure":0.5},"rotation":1}"#;
@@ -925,32 +1123,36 @@ mod tests {
                 1
             )
         );
-        fills.fills = vec![sample_fill()];
+        fills.fills = vec![sample_fill()].into();
         let with = fills.edit_signature();
         assert_ne!(rec.edit_signature(), with);
 
         let mut other_choice = fills.clone();
-        other_choice.fills[0].choose(0);
+        let mut picked = other_choice.fills.to_vec();
+        picked[0].choose(0);
+        other_choice.fills = picked.into();
         assert_ne!(other_choice.edit_signature(), with, "the chosen variant");
 
         let mut moved = fills.clone();
-        moved.fills = vec![Fill::new(
+        let mut moved_fill = vec![Fill::new(
             [0.1, 0.2, 0.4, 0.6],
             sample_fill().variants().to_vec(),
             "a red boat".into(),
         )
         .unwrap()];
-        moved.fills[0].choose(1);
+        moved_fill[0].choose(1);
+        moved.fills = moved_fill.into();
         assert_ne!(moved.edit_signature(), with, "the rect");
 
         let mut reworded = fills.clone();
-        reworded.fills = vec![Fill::new(
+        let mut reworded_fill = vec![Fill::new(
             [0.1, 0.2, 0.4, 0.5],
             sample_fill().variants().to_vec(),
             "something else".into(),
         )
         .unwrap()];
-        reworded.fills[0].choose(1);
+        reworded_fill[0].choose(1);
+        reworded.fills = reworded_fill.into();
         assert_eq!(reworded.edit_signature(), with, "the prompt doesn't render");
     }
 
@@ -963,6 +1165,28 @@ mod tests {
             serde_json::from_str(&format!(r#"{{"rating":2,"touchups":[{spots}]}}"#)).unwrap();
         assert_eq!(rec.touchups.len(), crate::develop::MAX_TOUCHUPS);
         assert_eq!(rec.rating, Some(2));
+    }
+
+    #[test]
+    fn a_touchup_with_a_non_finite_field_is_dropped_on_load() {
+        // serde_json reads 1e39 as an f32 infinity; an infinite radius would
+        // make the baked mask NaN at every pixel and export the photo black.
+        let bad = r#"{"center":[0.5,0.5],"radius":1e39,"source":[0.2,0.2],"feather":0.5,"delta":[0,0,0]}"#;
+        let good =
+            r#"{"center":[0.5,0.5],"radius":0.1,"source":[0.2,0.2],"feather":0.5,"delta":[0,0,0]}"#;
+        let rec: ImageRecord =
+            serde_json::from_str(&format!(r#"{{"touchups":[{bad},{good}]}}"#)).unwrap();
+        assert_eq!(rec.touchups.len(), 1, "the infinite-radius spot is dropped");
+        assert!(rec.touchups.iter().all(|t| t.radius.is_finite()));
+    }
+
+    #[test]
+    fn a_touchup_with_a_huge_but_finite_radius_is_clamped_on_load() {
+        let big = r#"{"center":[0.5,0.5],"radius":1000.0,"source":[0.2,0.2],"feather":0.5,"delta":[0,0,0],"opacity":9.0}"#;
+        let rec: ImageRecord = serde_json::from_str(&format!(r#"{{"touchups":[{big}]}}"#)).unwrap();
+        let t = rec.touchups.first().expect("the spot is kept, clamped");
+        assert!(t.radius <= 2.0 && t.radius.is_finite());
+        assert_eq!(t.opacity, 1.0);
     }
 
     #[test]
@@ -1139,6 +1363,58 @@ mod tests {
             );
             assert_eq!(parse_record(&bytes, || None).unwrap().masks, rec.masks);
         }
+    }
+
+    /// EXP-01: `write_record` once serialized whatever it was given, so a
+    /// record larger than the read cap wrote a file the next read refuses
+    /// whole, losing the rating and edits. It must refuse the write instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_record_over_the_size_limit_is_refused_not_written_unreadable() {
+        use crate::develop::{MaskShape, Stroke};
+        // A record far past the cap, built in memory (the loader caps on read,
+        // not on what the app holds). Enough brush points to clear 1 MiB even
+        // compact.
+        let stroke = Stroke {
+            radius: 0.1,
+            feather: 0.5,
+            flow: 1.0,
+            erase: false,
+            points: vec![[-9.123_45, -9.123_45]; 120_000],
+        };
+        let mut mask = Mask::brush();
+        mask.shape = MaskShape::Brush {
+            strokes: vec![stroke].into(),
+        };
+        let huge = ImageRecord {
+            rating: Some(5),
+            masks: vec![mask].into(),
+            ..ImageRecord::default()
+        };
+        let err = serialized_within_limit(&huge).unwrap_err();
+        assert!(err.contains("limit"), "the refusal names the limit: {err}");
+
+        // write_record surfaces that error and leaves no file behind.
+        let dir = std::env::temp_dir().join(format!("lp-sidecar-big-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("IMG.jpg");
+        assert!(write_record(&photo, &huge).is_err());
+        assert!(
+            !sidecar_path(&photo).unwrap().exists(),
+            "no unreadable sidecar is written"
+        );
+
+        // A record that only overflows when pretty-printed is kept, stored
+        // compact, and still reads back.
+        let rating_only = ImageRecord {
+            rating: Some(3),
+            ..ImageRecord::default()
+        };
+        let bytes = serialized_within_limit(&rating_only).unwrap();
+        assert_eq!(parse_record(&bytes, || None).unwrap().rating, Some(3));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1340,7 +1616,7 @@ mod tests {
             crate::develop::DetectTarget::Sky,
             "5be1c0a39d2f7e14".parse().ok(),
         );
-        rec.fills = vec![sample_fill()];
+        rec.fills = vec![sample_fill()].into();
         rec.rotation = 1;
         rec.score = Some(StoredScore {
             score: sample_score(),

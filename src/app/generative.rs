@@ -192,21 +192,30 @@ fn run(input: &JobInput) -> Result<Generated, String> {
     let deadline = Instant::now() + JOB_TIMEOUT;
     let mut variants: Vec<Result<Patch, String>> = Vec::new();
     for (n, sent) in queued.iter().enumerate() {
-        let patch = sent
-            .clone()
-            .and_then(|(id, node)| server.wait(&id, &node, deadline, &input.stop))
-            .and_then(|images| {
-                let first = images.first().ok_or("ComfyUI finished without an image")?;
-                server.fetch(first)
-            })
-            .and_then(|bytes| request.patch(&bytes))
-            .and_then(|patch| {
-                if input.write {
-                    fill::write(&input.photo, &patch)
-                        .map_err(|e| format!("could not save the fill beside the photo: {e}"))?;
-                }
-                Ok(patch)
-            });
+        let patch = sent.clone().and_then(|(id, node)| {
+            let outcome = server
+                .wait(&id, &node, deadline, &input.stop)
+                .and_then(|images| {
+                    let first = images.first().ok_or("ComfyUI finished without an image")?;
+                    server.fetch(first)
+                })
+                .and_then(|bytes| request.patch(&bytes))
+                .and_then(|patch| {
+                    if input.write {
+                        fill::write(&input.photo, &patch).map_err(|e| {
+                            format!("could not save the fill beside the photo: {e}")
+                        })?;
+                    }
+                    Ok(patch)
+                });
+            // A variant that ended for any reason other than a user stop may
+            // have left its prompt running on the server and holding a queue
+            // slot. Take it off best-effort; a finished prompt ignores this.
+            if outcome.as_ref().is_err_and(|e| e != STOPPED) {
+                let _ = server.cancel(&id);
+            }
+            outcome
+        });
         let stopped = patch.as_ref().is_err_and(|e| e == STOPPED);
         variants.push(patch);
         if stopped {
@@ -701,6 +710,17 @@ impl App {
                 return;
             }
         };
+        // The user may have opened another folder while this generation ran.
+        // A read-only folder keeps its fills in memory, but an editable fill
+        // for a photo the store no longer holds cannot be saved; landing it
+        // only logs a persist error and leaves the undo stack and the patch
+        // files out of step. Discard it with a clear notice instead.
+        let kept_in_memory = self.coverage.read_only_photo(&job.path)
+            || self.patches.unsaved_fills(&job.path).is_some();
+        if !kept_in_memory && !self.folder_store.in_open_folder(&job.path) {
+            self.set_status(StatusKind::Error, t.fill_discarded_folder_changed.into());
+            return;
+        }
         let arrived = patches.len();
         let ids: Vec<_> = patches.iter().map(Patch::id).collect();
         let Some(made) = Fill::new(job.bbox, ids, job.prompt.clone()) else {
@@ -926,6 +946,47 @@ mod tests {
         app.cycle_fill_variant(true);
         assert_eq!(app.fills_of(&photo)[0].chosen(), b.id());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A generation finishing after the user opened another folder cannot be
+    /// saved beside a photo the store no longer holds. It is discarded with a
+    /// clear notice, not landed with a logged persist error and a stale undo
+    /// step and prune entry.
+    #[test]
+    fn a_fill_that_lands_after_a_folder_change_is_discarded_cleanly() {
+        use crate::app::test_support::{folder_of, load_folder};
+        let (dir_a, photos_a) = folder_of("fill-switch-a", &["a.jpg".into()]);
+        let photo = photos_a[0].clone();
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir_a);
+        let (dir_b, _) = folder_of("fill-switch-b", &["b.jpg".into()]);
+        load_folder(&mut app, &dir_b);
+
+        app.land_job(job(&photo, Target::New), arrived(&[patch(1), patch(2)]));
+
+        assert!(
+            app.fills_of(&photo).is_empty(),
+            "no fill is stored for the stale photo"
+        );
+        assert!(
+            !app.touchup_undo.contains_key(&photo),
+            "no undo step is pushed for it"
+        );
+        assert!(
+            app.generative.unpruned.is_empty(),
+            "nothing is queued to prune"
+        );
+        assert_eq!(
+            app.folder_store.take_error(),
+            None,
+            "no persist error is logged"
+        );
+        assert_eq!(
+            app.status_text(),
+            Some(crate::i18n::t().fill_discarded_folder_changed)
+        );
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 
     #[test]

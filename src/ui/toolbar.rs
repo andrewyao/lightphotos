@@ -482,32 +482,39 @@ fn cmp_glyph(cmp: Cmp) -> &'static str {
 
 pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     toolbar_row(ui, "grid_toolbar", false, |ui| {
-        ui.horizontal(|ui| {
-            let t = t();
-            ui.label(t.rating_filter);
-            for (idx, control) in ToolbarControl::drawn().enumerate() {
-                if control.starts_group() {
-                    ui.separator();
-                }
-                let resp = control.widget(ui, app, out);
-                if resp.clicked() && !matches!(control, ToolbarControl::Sort) {
-                    out.actions.push(control.action(app));
-                }
-                toolbar_focus_sync(ui, app, idx, &resp, out);
-            }
-            ui.weak((t.n_of_m_photos)(app.shown_photos(), app.total_photos()));
-            all_photos_menu(ui, app, out);
+        // One row that never wraps; a window too narrow for it scrolls
+        // sideways rather than clipping its tail (the sort controls, the
+        // count and the Actions menu), as the selection bar does (UI-B-02).
+        egui::ScrollArea::horizontal()
+            .id_salt("grid_toolbar_scroll")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let t = t();
+                    ui.label(t.rating_filter);
+                    for (idx, control) in ToolbarControl::drawn().enumerate() {
+                        if control.starts_group() {
+                            ui.separator();
+                        }
+                        let resp = control.widget(ui, app, out);
+                        if resp.clicked() && !matches!(control, ToolbarControl::Sort) {
+                            out.actions.push(control.action(app));
+                        }
+                        toolbar_focus_sync(ui, app, idx, &resp, out);
+                    }
+                    ui.weak((t.n_of_m_photos)(app.shown_photos(), app.total_photos()));
+                    all_photos_menu(ui, app, out);
 
-            if let Some((done, total)) = app.score_progress() {
-                ui.separator();
-                ui.weak((t.scoring_progress)(done, total));
-                if ui.small_button(t.cancel).clicked() {
-                    out.actions.push(UiAction::CancelScoring);
-                }
-            }
+                    if let Some((done, total)) = app.score_progress() {
+                        ui.separator();
+                        ui.weak((t.scoring_progress)(done, total));
+                        if ui.small_button(t.cancel).clicked() {
+                            out.actions.push(UiAction::CancelScoring);
+                        }
+                    }
 
-            region_focus_marker(ui, app, Region::Toolbar);
-        });
+                    region_focus_marker(ui, app, Region::Toolbar);
+                });
+            });
     });
 }
 
@@ -742,7 +749,7 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             });
             if ui
                 .button(t.export_jpg)
-                .on_hover_text(t.export_jpg_tip)
+                .on_hover_text(crate::i18n::keys(t.export_jpg_tip))
                 .clicked()
             {
                 out.actions.push(UiAction::ToggleExportForm);
@@ -1006,7 +1013,7 @@ fn export_button(ui: &mut egui::Ui, out: &mut FrameOutput) {
     let t = t();
     if ui
         .button(t.export_jpg)
-        .on_hover_text(t.export_jpg_tip)
+        .on_hover_text(crate::i18n::keys(t.export_jpg_tip))
         .clicked()
     {
         out.actions.push(UiAction::ToggleExportForm);
@@ -1116,5 +1123,21 @@ mod tests {
             cursor_rects(&app).is_empty(),
             "a cursor past the last control outlines nothing"
         );
+    }
+
+    /// The toolbar filter and the right-click Color Label menu must offer the
+    /// same labels. The menu iterates `ColorLabel::ALL` directly, so the only
+    /// way they can drift is the filter row; this holds it to `ALL`. Purple
+    /// was once filterable but not settable (finding UI-B-01).
+    #[test]
+    fn the_label_filter_lists_every_settable_label() {
+        let filter: Vec<ColorLabel> = ToolbarControl::ALL
+            .iter()
+            .filter_map(|c| match c {
+                ToolbarControl::Label(label) => Some(*label),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(filter, ColorLabel::ALL.to_vec());
     }
 }

@@ -279,7 +279,7 @@ pub static FR: Strings = Strings {
         HelpSection {
             title: "Navigation",
             rows: &[
-                ("Enter or Space", "Ouvrir la photo sélectionnée (dans la bibliothèque)"),
+                ("Enter ou Space", "Ouvrir la photo sélectionnée (dans la bibliothèque)"),
                 ("E", "Ouvrir la photo sélectionnée (dans la bibliothèque)"),
                 ("G", "Retour à la grille de la bibliothèque"),
                 ("F", "Plein écran, la photo seule ; F ou Esc pour quitter (dans l'éditeur)"),
@@ -313,9 +313,9 @@ pub static FR: Strings = Strings {
             title: "Sélection",
             rows: &[
                 ("Cmd+A", "Tout sélectionner dans le dossier actuel (dans la bibliothèque)"),
-                ("Shift+Click", "Sélectionner une plage"),
-                ("Cmd+Click", "Ajouter ou retirer une photo de la sélection"),
-                ("Shift+arrows", "Étendre la sélection (bibliothèque)"),
+                ("Shift+Clic", "Sélectionner une plage"),
+                ("Cmd+Clic", "Ajouter ou retirer une photo de la sélection"),
+                ("Shift+flèches", "Étendre la sélection (bibliothèque)"),
                 ("Cmd+D", "Tout désélectionner"),
                 ("Cmd+G", "Mettre la sélection en pile"),
                 ("Cmd+Shift+G", "Dissocier les piles sélectionnées"),
@@ -340,15 +340,15 @@ pub static FR: Strings = Strings {
         HelpSection {
             title: "Zoom et déplacement (dans l'éditeur)",
             rows: &[
-                ("Space or Z", "Changer de zoom : ajusté, 2x ajusté, 100%"),
-                ("Cmd++ or Cmd+=", "Zoom avant (par pas de 20%)"),
+                ("Space ou Z", "Changer de zoom : ajusté, 2x ajusté, 100%"),
+                ("Cmd++ ou Cmd+=", "Zoom avant (par pas de 20%)"),
                 ("Cmd+-", "Zoom arrière (par pas de 20%)"),
                 ("\u{2191} / \u{2193}", "Zoom avant / arrière (par pas de 10%)"),
-                ("Scroll", "Zoomer sous le pointeur"),
-                ("Drag", "Déplacer"),
-                ("Space+Drag", "Déplacer"),
-                ("Shift+Scroll", "Déplacer latéralement"),
-                ("Alt+Scroll", "Déplacer vers le haut et le bas"),
+                ("Défilement", "Zoomer sous le pointeur"),
+                ("Glisser", "Déplacer"),
+                ("Space+Glisser", "Déplacer"),
+                ("Shift+Défilement", "Déplacer latéralement"),
+                ("Alt+Défilement", "Déplacer vers le haut et le bas"),
             ],
         },
         HelpSection {
@@ -366,7 +366,7 @@ pub static FR: Strings = Strings {
                 ("V", "Noir et blanc, ou retour à la couleur"),
                 ("Cmd+Shift+C", "Copier l'ajustement de cette photo"),
                 ("Cmd+Shift+V", "Coller l'ajustement sur la sélection"),
-                ("Double-click slider", "Réinitialiser le curseur"),
+                ("Double-clic sur le curseur", "Réinitialiser le curseur"),
                 (
                     "Delete",
                     if WEB {
@@ -380,7 +380,7 @@ pub static FR: Strings = Strings {
         HelpSection {
             title: "Recadrage",
             rows: &[
-                ("Enter or R", "Appliquer le recadrage"),
+                ("Enter ou R", "Appliquer le recadrage"),
                 ("Esc", "Annuler le recadrage"),
                 ("Cmd+[ / Cmd+]", "Faire pivoter de -90 / +90 degrés"),
             ],
@@ -388,10 +388,10 @@ pub static FR: Strings = Strings {
         HelpSection {
             title: "Choisir le représentant",
             rows: &[
-                ("Click or drag the photo", "Déplacer la zone de mise au point"),
-                ("Shift+scroll on the area", "Redimensionner la zone de mise au point"),
-                ("Drag a tile", "Déplacer la zone de mise au point"),
-                ("Cmd+Click / Shift+Click a tile", "Choisir d'autres vignettes"),
+                ("Cliquer ou glisser la photo", "Déplacer la zone de mise au point"),
+                ("Shift+défilement sur la zone", "Redimensionner la zone de mise au point"),
+                ("Glisser une vignette", "Déplacer la zone de mise au point"),
+                ("Cmd+Clic / Shift+Clic sur une vignette", "Choisir d'autres vignettes"),
             ],
         },
         HelpSection {
@@ -409,12 +409,12 @@ pub static FR: Strings = Strings {
             title: "Masque au pinceau",
             rows: &[
                 ("K", "Pinceau activé / désactivé ; peint le masque au pinceau choisi"),
-                ("Drag", "Peindre ; chaque trait est une étape d'annulation"),
-                ("Alt+Drag", "Effacer"),
+                ("Glisser", "Peindre ; chaque trait est une étape d'annulation"),
+                ("Alt+Glisser", "Effacer"),
                 ("[ / ]", "Taille du pinceau"),
-                ("Scroll", "Taille du pinceau"),
+                ("Défilement", "Taille du pinceau"),
                 ("Shift+[ / ]", "Contour progressif du pinceau"),
-                ("Shift+Scroll", "Contour progressif du pinceau"),
+                ("Shift+Défilement", "Contour progressif du pinceau"),
                 ("Esc", "Poser le pinceau"),
             ],
         },
@@ -423,9 +423,9 @@ pub static FR: Strings = Strings {
             rows: &[
                 ("Q", "Retouche activée / désactivée"),
                 ("[ / ]", "Taille du pinceau"),
-                ("Scroll", "Taille du pinceau"),
+                ("Défilement", "Taille du pinceau"),
                 ("Shift+[ / ]", "Contour progressif du pinceau"),
-                ("Shift+Scroll", "Contour progressif du pinceau"),
+                ("Shift+Défilement", "Contour progressif du pinceau"),
                 ("O", "Afficher ou masquer les taches"),
                 ("Shift+O", "Sélectionner la tache suivante"),
                 ("Delete", "Supprimer la tache sélectionnée"),
@@ -701,6 +701,8 @@ pub static FR: Strings = Strings {
         |n, total, e| format!("{n}/{total} placées dans la Corbeille \u{2014} dernière erreur : {e}")
     },
     delete_in_progress: "Une autre suppression est encore en cours\u{2026}",
+    delete_worker_failed: "Impossible de démarrer la suppression.",
+    startup_failed: "LightPhotos n'a pas pu démarrer.",
     group_refused_loading: "Les piles de ce dossier sont encore en cours de chargement. Réessayez dans un instant.",
     group_name_unsaveable: "Un nom de fichier ici ne peut pas être enregistré dans une pile.",
     delete_no_handle: |dir| format!("Impossible de supprimer les photos : aucun accès au dossier {dir}"),
@@ -999,6 +1001,7 @@ pub static FR: Strings = Strings {
     comfy_lost: "ComfyUI ne répond plus sur {where}. Redémarrez-le, puis cliquez sur {button}.",
     fill_partial: "{failed} variante(s) sur {of} ont échoué. {why}",
     fill_not_started: "Impossible de lancer le remplissage. Réessayez.",
+    fill_discarded_folder_changed: "Le dossier a changé pendant la génération ; le remplissage a été abandonné.",
     wb_no_image: "Aucune image chargée où prélever",
     wb_pick_brighter: "Choisissez un pixel plus clair et moins saturé pour la balance des blancs",
     open_folder_failed: |e| format!("Impossible d'ouvrir le dossier : {e}"),
@@ -1043,6 +1046,8 @@ pub static FR: Strings = Strings {
     presets_locked:
         "Les préréglages sont verrouillés car le fichier enregistré n'a pas pu être lu. Déplacez-le ou réparez-le, puis relancez l'application.",
     presets_save_failed: |e| format!("Échec de l'enregistrement des préréglages : {e}"),
+    gpu_out_of_memory: "Cette image est trop grande pour ce GPU et n'a donc pas pu être affichée.",
+    gpu_device_error: "Le périphérique graphique a rencontré un problème, cette image n'a donc pas pu être affichée.",
 
     menu: MenuStrings {
         about: "À propos de LightPhotos",

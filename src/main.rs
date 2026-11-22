@@ -106,11 +106,25 @@ fn finish_window_setup(
 }
 
 /// Reports a failure that leaves no window to show and stops the event loop.
-fn startup_failed(event_loop: &ActiveEventLoop, msg: &str) {
+/// Native records the reason on `app` so `main` can exit non-zero, and shows a
+/// blocking dialog so a Finder/Dock/Explorer launch (where stderr goes nowhere)
+/// does not just vanish with no window.
+fn startup_failed(app: &mut App, event_loop: &ActiveEventLoop, msg: &str) {
     #[cfg(not(target_arch = "wasm32"))]
-    eprintln!("[lightphotos] can't start: {msg}");
+    {
+        eprintln!("[lightphotos] can't start: {msg}");
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("LightPhotos")
+            .set_description(format!("{}\n\n{msg}", crate::i18n::t().startup_failed))
+            .show();
+        app.startup_error = Some(msg.to_string());
+    }
     #[cfg(target_arch = "wasm32")]
-    web_sys::console::error_1(&format!("[lightphotos] can't start: {msg}").into());
+    {
+        let _ = app;
+        web_sys::console::error_1(&format!("[lightphotos] can't start: {msg}").into());
+    }
     event_loop.exit();
 }
 
@@ -133,7 +147,7 @@ impl ApplicationHandler<UserEvent> for App {
         jobs::loader::mark("resumed: creating window");
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
-            Err(e) => return startup_failed(event_loop, &format!("create window: {e}")),
+            Err(e) => return startup_failed(self, event_loop, &format!("create window: {e}")),
         };
         jobs::loader::mark("window created; initializing wgpu");
 
@@ -145,7 +159,7 @@ impl ApplicationHandler<UserEvent> for App {
             let size = window.inner_size();
             let renderer = match pollster::block_on(Renderer::new(window.clone(), size)) {
                 Ok(r) => r,
-                Err(e) => return startup_failed(event_loop, &e),
+                Err(e) => return startup_failed(self, event_loop, &e),
             };
             jobs::loader::mark("wgpu ready");
             finish_window_setup(self, window.clone(), renderer, size);
@@ -158,7 +172,7 @@ impl ApplicationHandler<UserEvent> for App {
             // `attach` adds it and returns the real size.
             let size = match web::web_canvas::attach(&window) {
                 Ok(size) => size,
-                Err(e) => return startup_failed(event_loop, &e),
+                Err(e) => return startup_failed(self, event_loop, &e),
             };
             self.window = Some(window.clone());
             let tx = self.renderer_init_tx.clone();
@@ -775,6 +789,9 @@ fn main() {
     jobs::loader::mark("App constructed; entering event loop");
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("[lightphotos] event loop failed: {e}");
+        std::process::exit(1);
+    }
+    if app.startup_error.is_some() {
         std::process::exit(1);
     }
 }

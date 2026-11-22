@@ -223,11 +223,13 @@ mod tests {
         dir
     }
 
-    /// An App where the user opened `dir`, which makes it the anchor.
+    /// An App where the user opened `dir`, which makes it the anchor, with its
+    /// visit decided so edits are no longer refused as still-opening.
     #[cfg(not(target_arch = "wasm32"))]
     fn user_opened(dir: &std::path::Path) -> App {
         let mut app = App::new(None);
         app.open(dir.to_path_buf());
+        crate::app::test_support::wait_for_folder_store(&mut app);
         app
     }
 

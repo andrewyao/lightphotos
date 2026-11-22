@@ -267,7 +267,7 @@ pub static JA: Strings = Strings {
         HelpSection {
             title: "移動",
             rows: &[
-                ("Enter or Space", "選択した写真を開く（ライブラリ）"),
+                ("Enter または Space", "選択した写真を開く（ライブラリ）"),
                 ("E", "選択した写真を開く（ライブラリ）"),
                 ("G", "ライブラリのグリッドに戻る"),
                 ("F", "全画面表示（写真のみ）。F または Esc で終了（編集画面）"),
@@ -301,9 +301,9 @@ pub static JA: Strings = Strings {
             title: "選択",
             rows: &[
                 ("Cmd+A", "現在のフォルダ内をすべて選択（ライブラリ）"),
-                ("Shift+Click", "範囲を選択"),
-                ("Cmd+Click", "1 枚ずつ選択を切り替え"),
-                ("Shift+arrows", "選択範囲を拡張（ライブラリ）"),
+                ("Shift+クリック", "範囲を選択"),
+                ("Cmd+クリック", "1 枚ずつ選択を切り替え"),
+                ("Shift+方向キー", "選択範囲を拡張（ライブラリ）"),
                 ("Cmd+D", "すべての選択を解除"),
                 ("Cmd+G", "選択した写真をスタックにまとめる"),
                 ("Cmd+Shift+G", "選択したスタックを解除"),
@@ -328,15 +328,15 @@ pub static JA: Strings = Strings {
         HelpSection {
             title: "ズームとパン（編集画面）",
             rows: &[
-                ("Space or Z", "ズームを切り替え：全体表示、全体の 2 倍、100%"),
-                ("Cmd++ or Cmd+=", "拡大（20% ずつ）"),
+                ("Space または Z", "ズームを切り替え：全体表示、全体の 2 倍、100%"),
+                ("Cmd++ または Cmd+=", "拡大（20% ずつ）"),
                 ("Cmd+-", "縮小（20% ずつ）"),
                 ("\u{2191} / \u{2193}", "拡大 / 縮小（10% ずつ）"),
-                ("Scroll", "ポインタの位置でズーム"),
-                ("Drag", "パン"),
-                ("Space+Drag", "パン"),
-                ("Shift+Scroll", "左右にパン"),
-                ("Alt+Scroll", "上下にパン"),
+                ("スクロール", "ポインタの位置でズーム"),
+                ("ドラッグ", "パン"),
+                ("Space+ドラッグ", "パン"),
+                ("Shift+スクロール", "左右にパン"),
+                ("Alt+スクロール", "上下にパン"),
             ],
         },
         HelpSection {
@@ -354,7 +354,7 @@ pub static JA: Strings = Strings {
                 ("V", "白黒にする、またはカラーに戻す"),
                 ("Cmd+Shift+C", "この写真の調整をコピー"),
                 ("Cmd+Shift+V", "選択した写真に調整をペースト"),
-                ("Double-click slider", "スライダーをリセット"),
+                ("スライダーをダブルクリック", "スライダーをリセット"),
                 (
                     "Delete",
                     if WEB {
@@ -368,7 +368,7 @@ pub static JA: Strings = Strings {
         HelpSection {
             title: "切り抜き",
             rows: &[
-                ("Enter or R", "切り抜きを適用"),
+                ("Enter または R", "切り抜きを適用"),
                 ("Esc", "切り抜きをキャンセル"),
                 ("Cmd+[ / Cmd+]", "左 / 右に 90 度回転"),
             ],
@@ -376,10 +376,10 @@ pub static JA: Strings = Strings {
         HelpSection {
             title: "代表写真の選択",
             rows: &[
-                ("Click or drag the photo", "フォーカス領域を移動"),
-                ("Shift+scroll on the area", "フォーカス領域のサイズを変更"),
-                ("Drag a tile", "フォーカス領域を移動"),
-                ("Cmd+Click / Shift+Click a tile", "さらにタイルを選択"),
+                ("写真をクリックまたはドラッグ", "フォーカス領域を移動"),
+                ("領域上で Shift+スクロール", "フォーカス領域のサイズを変更"),
+                ("タイルをドラッグ", "フォーカス領域を移動"),
+                ("タイルを Cmd+クリック / Shift+クリック", "さらにタイルを選択"),
             ],
         },
         HelpSection {
@@ -397,12 +397,12 @@ pub static JA: Strings = Strings {
             title: "ブラシマスク",
             rows: &[
                 ("K", "ブラシのオン / オフ。選択中のブラシマスクに描画"),
-                ("Drag", "描画。1 ストロークが 1 回の取り消し単位"),
-                ("Alt+Drag", "消去"),
+                ("ドラッグ", "描画。1 ストロークが 1 回の取り消し単位"),
+                ("Alt+ドラッグ", "消去"),
                 ("[ / ]", "ブラシのサイズ"),
-                ("Scroll", "ブラシのサイズ"),
+                ("スクロール", "ブラシのサイズ"),
                 ("Shift+[ / ]", "ブラシのぼかし"),
-                ("Shift+Scroll", "ブラシのぼかし"),
+                ("Shift+スクロール", "ブラシのぼかし"),
                 ("Esc", "ブラシをオフにする"),
             ],
         },
@@ -411,9 +411,9 @@ pub static JA: Strings = Strings {
             rows: &[
                 ("Q", "スポット修正のオン / オフ"),
                 ("[ / ]", "ブラシのサイズ"),
-                ("Scroll", "ブラシのサイズ"),
+                ("スクロール", "ブラシのサイズ"),
                 ("Shift+[ / ]", "ブラシのぼかし"),
-                ("Shift+Scroll", "ブラシのぼかし"),
+                ("Shift+スクロール", "ブラシのぼかし"),
                 ("O", "スポットを表示または非表示"),
                 ("Shift+O", "次のスポットを選択"),
                 ("Delete", "選択したスポットを削除"),
@@ -629,6 +629,8 @@ pub static JA: Strings = Strings {
         |n, total, e| format!("{n}/{total}枚をゴミ箱に入れました \u{2014} 最後のエラー：{e}")
     },
     delete_in_progress: "別の削除がまだ実行中です\u{2026}",
+    delete_worker_failed: "削除を開始できませんでした。",
+    startup_failed: "LightPhotos を起動できませんでした。",
     group_refused_loading: "このフォルダのスタックを読み込み中です。しばらくしてからもう一度お試しください。",
     group_name_unsaveable: "ここにあるファイル名は、スタックに保存できません。",
     delete_no_handle: |dir| format!("写真を削除できませんでした：「{dir}」のディレクトリハンドルがありません"),
@@ -866,6 +868,7 @@ pub static JA: Strings = Strings {
     comfy_lost: "{where} の ComfyUI が応答しなくなりました。起動し直してから「{button}」を押してください。",
     fill_partial: "{of} 個中 {failed} 個のバリエーションを生成できませんでした。{why}",
     fill_not_started: "塗りつぶしを開始できませんでした。もう一度お試しください。",
+    fill_discarded_folder_changed: "生成中にフォルダーが変わったため、塗りつぶしは破棄されました。",
     wb_no_image: "指定できる画像が読み込まれていません",
     wb_pick_brighter: "ホワイトバランスには、より明るく彩度の低いピクセルを指定してください",
     open_folder_failed: |e| format!("フォルダを開けませんでした：{e}"),
@@ -910,6 +913,8 @@ pub static JA: Strings = Strings {
     presets_locked:
         "保存されているファイルを読み込めなかったため、プリセットはロックされています。ファイルを移動または修復してから、再起動してください。",
     presets_save_failed: |e| format!("プリセットを保存できませんでした：{e}"),
+    gpu_out_of_memory: "この画像が大きいため、このGPUでは表示できませんでした。",
+    gpu_device_error: "グラフィックデバイスに問題が発生したため、この画像を表示できませんでした。",
 
     menu: MenuStrings {
         about: "LightPhotosについて",

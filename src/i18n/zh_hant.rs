@@ -618,6 +618,8 @@ pub static ZH_HANT: Strings = Strings {
         |n, total, e| format!("已移動 {n}/{total} 張 \u{2014} 最後的錯誤：{e}")
     },
     delete_in_progress: "已有刪除作業正在進行\u{2026}",
+    delete_worker_failed: "無法開始刪除。",
+    startup_failed: "LightPhotos 無法啟動。",
     group_refused_loading: "此資料夾的堆疊仍在載入，請稍後再試。",
     group_name_unsaveable: "此資料夾中有檔名無法儲存到堆疊中。",
     delete_no_handle: |dir| format!("無法刪除照片：{dir} 沒有資料夾控制代碼"),
@@ -849,6 +851,7 @@ pub static ZH_HANT: Strings = Strings {
     comfy_lost: "{where} 上的 ComfyUI 已停止回應。請重新啟動，然後按「{button}」。",
     fill_partial: "{of} 個變體中有 {failed} 個生成失敗。{why}",
     fill_not_started: "無法開始填補，請再試一次。",
+    fill_discarded_folder_changed: "生成期間資料夾已變更，填補已捨棄。",
     wb_no_image: "沒有已載入的影像可供取樣",
     wb_pick_brighter: "請選擇更亮、飽和度更低的像素來設定白平衡",
     open_folder_failed: |e| format!("無法開啟資料夾：{e}"),
@@ -893,6 +896,8 @@ pub static ZH_HANT: Strings = Strings {
     presets_locked:
         "預設集已鎖定，因為無法讀取已儲存的檔案。請將其移走或修復，然後重新啟動。",
     presets_save_failed: |e| format!("無法儲存預設集：{e}"),
+    gpu_out_of_memory: "此影像過大，這張 GPU 無法顯示。",
+    gpu_device_error: "圖形裝置發生問題，因此無法顯示此影像。",
 
     menu: MenuStrings {
         about: "關於 LightPhotos",

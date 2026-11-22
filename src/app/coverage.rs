@@ -401,18 +401,17 @@ impl CoverageStore {
     }
 
     /// Whether every target `masks` use has settled: detected and recorded,
-    /// failed, or unsupported. A recorded coverage counts on every platform,
-    /// since the bake loads it when it runs, except in a read-only folder,
-    /// where the export takes its coverage from memory, so it loads first. Starts nothing; the frame
-    /// loop's [`kick`](Self::kick) over the selection starts what this
-    /// reports pending, so pending never stands.
+    /// failed, or unsupported. A recorded coverage counts as ready on every
+    /// platform, read-only or not, since the bake loads it when it runs
+    /// (natively for a read-only folder, always in the browser) through
+    /// [`readiness`](Self::readiness). This starts nothing and never waits on a
+    /// load, since the frame loop's [`kick`](Self::kick) does not load, so
+    /// treating a recorded coverage as pending here would block export forever.
     fn is_ready(&self, photo: &Path, masks: &[Mask], detections: &Detections) -> bool {
-        used_targets(masks).all(|t| {
-            match self.need(photo, t, detections.get(t), self.read_only_photo(photo)) {
-                Need::Ready => true,
-                Need::Detect => !(self.available)(t),
-                Need::Pending | Need::Load(_) => false,
-            }
+        used_targets(masks).all(|t| match self.need(photo, t, detections.get(t), false) {
+            Need::Ready => true,
+            Need::Detect => !(self.available)(t),
+            Need::Pending | Need::Load(_) => false,
         })
     }
 
@@ -448,16 +447,38 @@ impl CoverageStore {
     ) -> usize {
         paths
             .iter()
-            .filter(|p| {
-                masks.get(*p).is_some_and(|masks| {
-                    !self.is_ready(
-                        p,
-                        masks,
-                        detections.get(*p).unwrap_or(&Detections::default()),
-                    )
-                })
-            })
+            .filter(|p| self.mask_pending(p, masks, detections))
             .count()
+    }
+
+    /// Whether any of `paths` has a mask whose detection is still out.
+    /// `pending_among` > 0 without building a slice, for the per-frame export
+    /// gate over the whole selection.
+    pub(crate) fn any_pending<'a>(
+        &self,
+        paths: impl Iterator<Item = &'a Path>,
+        masks: &HashMap<PathBuf, Vec<Mask>>,
+        detections: &HashMap<PathBuf, Detections>,
+    ) -> bool {
+        paths
+            .into_iter()
+            .any(|p| self.mask_pending(p, masks, detections))
+    }
+
+    /// Whether `p` has a mask whose detection hasn't landed yet.
+    fn mask_pending(
+        &self,
+        p: &Path,
+        masks: &HashMap<PathBuf, Vec<Mask>>,
+        detections: &HashMap<PathBuf, Detections>,
+    ) -> bool {
+        masks.get(p).is_some_and(|masks| {
+            !self.is_ready(
+                p,
+                masks,
+                detections.get(p).unwrap_or(&Detections::default()),
+            )
+        })
     }
 
     /// Whether a job is still out, so the frame loop keeps polling.
@@ -957,6 +978,31 @@ mod tests {
         assert!(!written, "and nothing was written into the folder");
     }
 
+    /// The defect: a read-only folder whose sidecar already records a
+    /// detection blocked Export forever. `is_ready` asked for the coverage in
+    /// memory, but `kick` never loads, so the pending count never reached
+    /// zero. The bake loads it when it runs, so the blocker must not wait.
+    #[test]
+    fn export_is_not_blocked_by_a_recorded_coverage_in_a_read_only_folder() {
+        let (dir, p) = photo("read-only-recorded");
+        let c = Coverage::fit(2, 1, &[255, 0]).unwrap();
+        crate::develop::coverage::write(&p, &c).unwrap();
+        let mut d = Detections::default();
+        d.set(DetectTarget::Sky, Some(c.id()));
+        let masks = [Mask::detected(DetectTarget::Sky)];
+        let mut store = CoverageStore::with_detector(half_left);
+        store.set_read_only(crate::sidecar::FolderKey::of(&dir).into_iter().collect());
+
+        // No slot yet: the photo was never shown, so nothing loaded it.
+        let ready = store.is_ready(&p, &masks, &d);
+        let mask_map = HashMap::from([(p.clone(), masks.to_vec())]);
+        let det_map = HashMap::from([(p.clone(), d.clone())]);
+        let pending = store.pending_among(std::slice::from_ref(&p), &mask_map, &det_map);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(ready, "a recorded coverage does not block export");
+        assert_eq!(pending, 0, "and is not counted as pending");
+    }
+
     /// Design row 28: read-only is per folder. A photo of another folder,
     /// such as one a carried-over scoring run bakes, keeps the usual rules:
     /// its detection writes its file and its bakes read from disk.
@@ -1089,12 +1135,19 @@ mod tests {
         let unrecorded = HashMap::new();
         let paths = vec![p.clone()];
 
+        // `any_pending` is the per-frame export gate; it must agree with
+        // `pending_among > 0` at every state (UI-A-02).
+        let any = |store: &CoverageStore, det: &HashMap<PathBuf, Detections>| {
+            store.any_pending(paths.iter().map(PathBuf::as_path), &masks, det)
+        };
+
         let mut store = CoverageStore::with_detector(half_left);
         assert_eq!(
             store.pending_among(&paths, &masks, &unrecorded),
             1,
             "not asked yet"
         );
+        assert!(any(&store, &unrecorded));
         store.ensure_detected(&p, &masks[&p], &Detections::default());
         assert_eq!(store.pending_among(&paths, &masks, &unrecorded), 1);
         drain_until(&mut store, |s| !s.busy());
@@ -1103,6 +1156,7 @@ mod tests {
             0,
             "landed: in memory, and recorded in the same frame"
         );
+        assert!(!any(&store, &unrecorded));
         let mut d = Detections::default();
         for t in DetectTarget::ALL {
             d.set(t, store.ready(&p, t).map(|c| c.id()));

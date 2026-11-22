@@ -119,6 +119,8 @@ pub(crate) fn rail_button_rect(ctx: &egui::Context, item: RailItem) -> Option<eg
 /// One of `develop_rail`'s icons, painted in strokes like
 /// `eyedropper_button` so it follows the theme.
 fn rail_button(ui: &mut egui::Ui, item: RailItem, tip: &str, selected: bool) -> egui::Response {
+    let tip = crate::i18n::keys(tip);
+    let tip = tip.as_ref();
     let side = font_size::px(ui.style(), RAIL_BUTTON);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
     let response = ui.interact(rect, rail_id(item), egui::Sense::click());
@@ -607,7 +609,12 @@ fn step_slider_row(
                 };
                 let button = egui::Button::new(glyph)
                     .min_size(egui::vec2(font_size::px(ui.style(), 24.0), 0.0));
-                if ui.add(button).on_hover_text(tip).clicked() {
+                let resp = ui.add(button).on_hover_text(tip);
+                // The glyph is no name for a screen reader; use the tip.
+                resp.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tip)
+                });
+                if resp.clicked() {
                     picked = Some(step);
                 }
             }
@@ -807,11 +814,11 @@ fn eyedropper_button(ui: &mut egui::Ui, active: bool) -> egui::Response {
 }
 
 /// An on/off switch: a pill with a knob that slides right when `on`.
-fn toggle_switch(ui: &mut egui::Ui, on: bool) -> egui::Response {
+fn toggle_switch(ui: &mut egui::Ui, on: bool, label: &str) -> egui::Response {
     let size = ui.spacing().interact_size.y * egui::vec2(2.0, 1.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), on, "")
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), on, label)
     });
     if ui.is_rect_visible(rect) {
         let how_on = ui.ctx().animate_bool_responsive(response.id, on);
@@ -854,7 +861,7 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         draw_mask_section(ui, app, &form, out);
         form.section(ui, "", |ui| {
             form.row(ui, t.touch_up, |ui| {
-                if toggle_switch(ui, active).clicked() {
+                if toggle_switch(ui, active, t.touch_up).clicked() {
                     out.actions.push(UiAction::ToggleTouchUp);
                 }
             });
@@ -1247,9 +1254,10 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), form::SLIDER_GAP);
         let mut next = mask.clone();
+        let mut changed = false;
         for s in &crate::develop::mask::LOCAL_SLIDERS {
             let field = (s.field)(&mut next.amounts);
-            develop_slider(
+            let (c, _) = develop_slider(
                 ui,
                 t.slider(s.id),
                 field,
@@ -1259,10 +1267,15 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
                 false,
                 rail_colors(s.id),
             );
+            changed |= c;
         }
         if let MaskShape::Radial { feather, .. } = &mut next.shape {
+            // The percent round trip isn't exact, so write the feather back
+            // only when the slider actually moved. Otherwise just picking the
+            // mask would push a SetMask that differs by an ulp, recording an
+            // undo step and a sidecar write with no user input (UI-A-01).
             let mut percent = *feather * 100.0;
-            develop_slider(
+            let (c, _) = develop_slider(
                 ui,
                 t.feather,
                 &mut percent,
@@ -1272,9 +1285,12 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
                 false,
                 None,
             );
-            *feather = (percent / 100.0).clamp(0.0, 1.0);
+            if c {
+                *feather = (percent / 100.0).clamp(0.0, 1.0);
+                changed = true;
+            }
         }
-        if next != *mask {
+        if changed && next != *mask {
             out.actions.push(UiAction::SetMask(i, next));
         }
     });
@@ -1774,4 +1790,46 @@ fn curve_graph(
         );
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::one_photo_with_radial_mask;
+
+    /// Draws the Masks tab twice (hover reads the prior frame) with no input
+    /// and returns the actions the second frame emits.
+    fn masks_tab_actions(app: &App) -> Vec<UiAction> {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, theme::Theme::Dark);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(360.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input.clone(), |ui| {
+            draw_masks_tab(ui, app, &mut FrameOutput::default());
+        });
+        let mut out = FrameOutput::default();
+        let _ = ctx.run_ui(input, |ui| {
+            draw_masks_tab(ui, app, &mut out);
+        });
+        out.actions
+    }
+
+    /// Picking a radial mask whose feather (0.1234567) doesn't survive the
+    /// percent round trip in f32 must not push a SetMask without user input,
+    /// which would record an undo step and a sidecar write (UI-A-01).
+    #[test]
+    fn picking_a_radial_mask_pushes_no_edit() {
+        let (app, dir, _photo) = one_photo_with_radial_mask("radial-feather", 0.123_456_7);
+        let actions = masks_tab_actions(&app);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !actions.iter().any(|a| matches!(a, UiAction::SetMask(..))),
+            "picking the mask pushed {actions:?}"
+        );
+    }
 }

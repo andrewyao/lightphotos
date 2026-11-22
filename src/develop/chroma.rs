@@ -9,8 +9,10 @@ use crate::develop::image_ops::pixel_linear;
 use crate::develop::CaScale;
 
 /// The largest scale `measure` reports. Real lenses stay well inside it, so
-/// anything past it is a bad fit, not aberration.
-const MAX_SCALE: f32 = 0.005;
+/// anything past it is a bad fit, not aberration. [`CaScale::clamped`] holds a
+/// sidecar's scales to this bound too, so a hand-edited inf/NaN/huge value
+/// can't render garbage.
+pub(crate) const MAX_SCALE: f32 = 0.005;
 /// Edges inside this fraction of the half-diagonal move too little to measure.
 const INNER_RADIUS: f32 = 0.35;
 /// Half the length of the profile compared along the radius, in pixels.

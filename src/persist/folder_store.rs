@@ -459,7 +459,7 @@ impl FolderStore {
 
     /// Whether `path`'s folder is the open one, however either is spelled.
     #[cfg(not(target_arch = "wasm32"))]
-    fn in_open_folder(&self, path: &Path) -> bool {
+    pub(crate) fn in_open_folder(&self, path: &Path) -> bool {
         if self.cache_key(path).is_some() {
             return true;
         }
@@ -470,7 +470,7 @@ impl FolderStore {
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn in_open_folder(&self, path: &Path) -> bool {
+    pub(crate) fn in_open_folder(&self, path: &Path) -> bool {
         self.cache_key(path).is_some()
     }
 
@@ -638,7 +638,7 @@ impl FolderStore {
 
     /// `path`'s generative fills; none for a photo without a record here.
     pub fn fills(&self, path: &Path) -> &[crate::develop::fill::Fill] {
-        self.record(path).map_or(&[], |r| &r.fills)
+        self.record(path).map_or(&[], |r| &r.fills[..])
     }
 
     /// Set the rating, clamped to `0..=MAX_RATING`. `0` clears it.
@@ -2353,7 +2353,7 @@ mod tests {
             )
             .unwrap();
             fill.choose(1);
-            r.fills = vec![fill];
+            r.fills = vec![fill].into();
         });
         rec
     }

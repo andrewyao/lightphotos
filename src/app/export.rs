@@ -237,16 +237,35 @@ impl App {
         Some(format!("{stem}.{}", settings.output().format.extension()))
     }
 
-    /// Why Export can't run right now, shown under the disabled button.
+    /// Why Export can't run right now, shown under the disabled button. Runs
+    /// every frame, so it never builds the selection's path list: it counts
+    /// and scans it in place.
     pub(crate) fn export_blocker(&self) -> Option<&'static str> {
-        self.export_blocker_for(&self.action_paths())
+        self.export_blocker_with(self.action_count() == 0, || {
+            self.coverage
+                .any_pending(self.action_path_refs(), &self.masks, &self.detections)
+        })
     }
 
     /// [`export_blocker`](Self::export_blocker) for a batch of `paths`, which
     /// an agent's export can name outside the selection.
     fn export_blocker_for(&self, paths: &[PathBuf]) -> Option<&'static str> {
+        self.export_blocker_with(paths.is_empty(), || {
+            self.coverage
+                .pending_among(paths, &self.masks, &self.detections)
+                > 0
+        })
+    }
+
+    /// Shared body of the two export blockers. `any_pending` is a closure so
+    /// the detection scan runs only after the cheaper gates pass.
+    fn export_blocker_with(
+        &self,
+        empty: bool,
+        any_pending: impl FnOnce() -> bool,
+    ) -> Option<&'static str> {
         let t = crate::i18n::t();
-        if paths.is_empty() {
+        if empty {
             return Some(t.export_nothing_selected);
         }
         // One batch at a time. A second batch would pick the same file names
@@ -263,11 +282,7 @@ impl App {
         }
         // A detected mask whose detection hasn't landed would export as
         // nothing. One that failed exports as nothing too, but on purpose.
-        if self
-            .coverage
-            .pending_among(paths, &self.masks, &self.detections)
-            > 0
-        {
+        if any_pending() {
             return Some(t.export_masks_detecting);
         }
         #[cfg(not(target_arch = "wasm32"))]

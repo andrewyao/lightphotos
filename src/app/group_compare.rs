@@ -309,8 +309,11 @@ struct AdhocSet {
     /// In the Grid's order.
     paths: Vec<PathBuf>,
     /// The selection Compare opened from, put back when Compare closes on
-    /// one of `paths`, so C opens it again.
-    selected: std::collections::BTreeSet<usize>,
+    /// one of `paths`, so C opens it again. Stored as photo paths, not cell
+    /// indices: rejecting or rating a member while Compare is open re-filters
+    /// the Grid, and a stored index would then name a different photo or run
+    /// past the end. The paths are re-placed to cells at restore.
+    selected: Vec<PathBuf>,
 }
 
 impl GroupCompare {
@@ -387,10 +390,11 @@ impl App {
     }
 
     pub(super) fn sync_compare_tiles(&mut self) {
-        if self.mode != ViewMode::Loupe {
-            return;
-        }
-        if self.group_compare.view == GroupView::Edit {
+        // Compare only paints in the Loupe. Leaving it for the Grid, or
+        // closing the pane with Edit, frees the tile textures: otherwise the
+        // mode-guard early return left up to a page of previews (and any Full
+        // crops) held for the whole Grid session.
+        if self.mode != ViewMode::Loupe || self.group_compare.view == GroupView::Edit {
             if let (Some(tiles), Some(r)) =
                 (self.group_compare.tiles.take(), self.renderer.as_mut())
             {
@@ -673,6 +677,18 @@ impl App {
         self.visible.iter().position(|&i| pl.entry(i) == Some(path))
     }
 
+    /// The photo behind each of `cells`, in order, dropping any cell with no
+    /// photo. No group expansion: these are the selected cells themselves.
+    fn cells_as_paths(&self, cells: impl Iterator<Item = usize>) -> Vec<PathBuf> {
+        let Some(pl) = self.playlist.as_ref() else {
+            return Vec::new();
+        };
+        cells
+            .filter_map(|c| self.visible.get(c).copied())
+            .filter_map(|i| pl.entry(i).map(Path::to_path_buf))
+            .collect()
+    }
+
     /// Open Compare on `paths`, 2 to [`COMPARE_SELECTION_MAX`] photos that
     /// need not share a group, showing the first of them that is shown or
     /// selected.
@@ -686,14 +702,11 @@ impl App {
         };
         // The shown photo alone is selected, so a rating or flag with no
         // tile picked lands on it, as in a group. Closing Compare puts the
-        // selection back.
-        let set = AdhocSet {
-            paths,
-            selected: std::mem::replace(
-                &mut self.selected,
-                std::collections::BTreeSet::from([pos]),
-            ),
-        };
+        // selection back, kept as paths so a re-filter while Compare is open
+        // can't shift it onto the wrong photos.
+        let selected = self.cells_as_paths(self.selected.iter().copied());
+        self.selected = std::collections::BTreeSet::from([pos]);
+        let set = AdhocSet { paths, selected };
         self.sel = Some(pos);
         self.anchor = Some(pos);
         self.group_compare.adhoc = Some(set);
@@ -838,7 +851,13 @@ impl App {
             let shown = self.selected_path();
             if let Some(set) = self.group_compare.adhoc.take() {
                 if shown.is_some_and(|p| set.paths.contains(&p)) {
-                    self.selected = set.selected;
+                    // Re-place the kept paths to the Grid's current cells,
+                    // dropping any photo the Grid no longer shows.
+                    self.selected = set
+                        .selected
+                        .iter()
+                        .filter_map(|p| self.position_of(p))
+                        .collect();
                     self.selected.extend(self.sel);
                 }
             }
@@ -1096,6 +1115,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Leaving the Loupe for the Grid frees the Compare tile textures.
+    /// Before, the mode-guard early return left a page of previews held for
+    /// the whole Grid session.
+    #[test]
+    fn entering_the_grid_frees_the_compare_tiles() {
+        let (mut app, dir, paths) = folder_app("compare-free-grid", 3);
+        app.sel = Some(0);
+        app.want = Some(paths[0].clone());
+        app.mode = ViewMode::Loupe;
+        app.group_compare.view = GroupView::Compare;
+        app.group_compare.tiles = Some(waiting_tiles(&app, &paths, 1500));
+
+        app.enter_grid();
+        app.sync_compare_tiles();
+        assert!(
+            app.group_compare.tiles.is_none(),
+            "the Compare tiles are freed on entering the Grid"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Changing the RAW tone curve forgets every Loupe decode, the fulls
     /// the Compare tiles wait on included, so they ask again rather than
     /// staying soft as failures.
@@ -1198,6 +1238,35 @@ mod tests {
         assert_eq!(app.selected, std::collections::BTreeSet::from([1, 3]));
         act(&mut app, UiAction::CompareStack);
         assert!(app.comparing_selection(), "C opens the same photos again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rejecting a compared photo re-filters the Grid while Compare is open,
+    /// so closing it must restore the surviving photos, not whatever now sits
+    /// at the old cell indices.
+    #[test]
+    fn closing_a_selection_compare_after_a_reject_keeps_the_right_photos() {
+        let (mut app, dir, paths) = folder_app("compare-restore-reject", 6);
+        app.selected = std::collections::BTreeSet::from([1, 3, 4]);
+        app.sel = Some(1);
+        act(&mut app, UiAction::CompareStack);
+        assert!(app.comparing_selection());
+
+        // Reject one compared photo. The Grid's Not-Rejected filter drops it
+        // and shifts every later cell down by one.
+        app.flag_group_member(paths[4].clone(), Some(crate::sidecar::Flag::Reject));
+        assert_eq!(app.visible.len(), 5, "the rejected photo left the grid");
+
+        act(
+            &mut app,
+            UiAction::ClickRail(crate::app::RailItem::GroupCompare),
+        );
+        assert_eq!(app.group_view(), GroupView::Edit);
+        assert_eq!(
+            app.selected_paths(),
+            vec![paths[1].clone(), paths[3].clone()],
+            "the restored selection names the surviving photos"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -199,13 +199,12 @@ impl App {
                         .filter(|(_, r)| !r.detections.is_empty())
                         .map(|(name, r)| (name.clone(), r.detections.clone()))
                         .collect();
-                    let fills: HashMap<std::ffi::OsString, Vec<crate::develop::fill::Fill>> =
-                        loaded
-                            .images
-                            .iter()
-                            .filter(|(_, r)| !r.fills.is_empty())
-                            .map(|(name, r)| (name.clone(), r.fills.clone()))
-                            .collect();
+                    let fills: HashMap<std::ffi::OsString, crate::sidecar::FillList> = loaded
+                        .images
+                        .iter()
+                        .filter(|(_, r)| !r.fills.is_empty())
+                        .map(|(name, r)| (name.clone(), r.fills.clone()))
+                        .collect();
                     let _ = tx.send((for_thread.clone(), token, mark, loaded));
                     // Sweep after sending, because the UI waits on the folder store
                     // and nothing waits on the sweeps. Not in a read-only folder:
@@ -215,12 +214,12 @@ impl App {
                         crate::develop::coverage::sweep_orphans(&for_thread, |photo, id| {
                             named.get(photo).is_some_and(|d| d.names(id))
                         });
-                        // Every variant a fill lists, chosen or not, keeps
-                        // its file; dropping a variant from the fill frees it.
+                        // Every variant a fill lists, chosen or not, keeps its
+                        // file; dropping a variant from the fill frees it. A
+                        // fill this build couldn't parse but kept (a later
+                        // build's) still protects the files it names.
                         crate::develop::fill::sweep_orphans(&for_thread, |photo, id| {
-                            fills
-                                .get(photo)
-                                .is_some_and(|f| f.iter().any(|f| f.variants().contains(&id)))
+                            fills.get(photo).is_some_and(|f| f.references(id))
                         });
                     }
                 });
@@ -395,6 +394,18 @@ impl App {
         self.folder_store.read_only().map(|by| by.read_only_text())
     }
 
+    /// Why a user edit is refused right now, in the UI's language, or `None`
+    /// when edits are allowed: the folder is read-only, or its visit is still
+    /// undecided (`Opening`) so the store would drop the write. The keyboard
+    /// gate and the command dispatcher both read this so they cannot drift.
+    pub(super) fn edit_refused_text(&self) -> Option<String> {
+        self.folder_read_only_text().or_else(|| {
+            self.folder_store
+                .opening()
+                .then(|| crate::i18n::t().folder_opening.to_string())
+        })
+    }
+
     /// Refuse a job that would write the open folder while it is read-only,
     /// saying why. True when refused. A folder still opening is not
     /// refused: the job goes ahead or defers as it would while the folder
@@ -413,13 +424,10 @@ impl App {
     /// Say why an edit the user made with a control that is off was
     /// dropped: the folder is read-only, or still opening.
     pub(super) fn refuse_edit(&mut self) {
-        if self.refuse_if_read_only() || !self.folder_store.opening() {
+        let Some(why) = self.edit_refused_text() else {
             return;
-        }
-        self.set_status(
-            StatusKind::Error,
-            crate::i18n::t().folder_opening.to_string(),
-        );
+        };
+        self.set_status(StatusKind::Error, why);
         self.request_redraw();
     }
 

@@ -611,6 +611,8 @@ pub static ZH_HANS: Strings = Strings {
         |n, total, e| format!("已移动 {n}/{total} 张 \u{2014} 最后的错误：{e}")
     },
     delete_in_progress: "已有删除正在进行\u{2026}",
+    delete_worker_failed: "无法开始删除。",
+    startup_failed: "LightPhotos 无法启动。",
     group_refused_loading: "此文件夹的堆叠仍在载入，请稍后再试。",
     group_name_unsaveable: "此文件夹中有文件名无法保存到堆叠中。",
     delete_no_handle: |dir| format!("无法删除照片：{dir} 没有目录句柄"),
@@ -842,6 +844,7 @@ pub static ZH_HANS: Strings = Strings {
     comfy_lost: "{where} 上的 ComfyUI 已停止响应。请重新启动，然后按“{button}”。",
     fill_partial: "{of} 个变体中有 {failed} 个生成失败。{why}",
     fill_not_started: "无法开始填充，请重试。",
+    fill_discarded_folder_changed: "生成期间文件夹已更改，填充已丢弃。",
     wb_no_image: "没有已加载的图像可供取样",
     wb_pick_brighter: "请选择更亮、饱和度更低的像素来设置白平衡",
     open_folder_failed: |e| format!("无法打开文件夹：{e}"),
@@ -885,6 +888,8 @@ pub static ZH_HANS: Strings = Strings {
     presets_load_failed: |e| format!("无法读取预设：{e}"),
     presets_locked: "预设已锁定，因为无法读取已保存的文件。请将其移走或修复，然后重新启动。",
     presets_save_failed: |e| format!("无法保存预设：{e}"),
+    gpu_out_of_memory: "此图像过大，这块 GPU 无法显示。",
+    gpu_device_error: "图形装置出现问题，因此无法显示此图像。",
 
     menu: MenuStrings {
         about: "关于 LightPhotos",
