@@ -1673,7 +1673,7 @@ mod tests {
             0,
         );
         assert!(
-            out.chunks_exact(4).all(|p| p[0] == gray),
+            out.as_chunks::<4>().0.iter().all(|p| p[0] == gray),
             "a sanitized hostile spot leaves the photo its gray, not black"
         );
     }

@@ -19,6 +19,7 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant: unmaintained, via rfd/ashpd on Linux" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names: unmaintained, via rfd/ashpd on Linux" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: unmaintained, via rfd/ashpd on Linux" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono: unmaintained, no safe upgrade; also pulled in by rawler and trash" },
 ]
 
 [licenses]
